@@ -72,17 +72,6 @@ All workflows shared here are provided “as is.” **Before using them in a pro
   - **Descripción:** Este flujo permite probar webhooks en n8n utilizando PostBin y BambooHR sin necesidad de modificar la variable WEBHOOK_URL. Crea una bin en PostBin, registra un webhook en BambooHR, prueba su funcionalidad y notifica a Slack sobre nuevos empleados.
   - **Complejidad:** Alta (58 nodos)
 
-- **[0865-bamboo-hr-ai-chatbot.json](workflows/0865-bamboo-hr-ai-chatbot.json)**
-  - **Descripción:** Este flujo es un chatbot potenciado por IA para responder preguntas sobre políticas corporativas, beneficios y procedimientos laborales utilizando documentos cargados desde BambooHR como fuente de información. Implementa búsqueda vectorial con OpenAI, memoria contextual (window buffer memory), y herramientas de empleado lookup que permiten a la IA buscar contactos internos o departamentos para facilitar las respuestas.
-  - **Complejidad:** Alta (50 nodos)
-
-- **[0954-bamboo-hr-ai-chatbot.json](workflows/0954-bamboo-hr-ai-chatbot.json)**
-  - **Descripción:** Este flujo automático permite a un chatbot de HR acceder e interpretar información sobre políticas y beneficios corporativos mediante la integración con el almacenamiento vectorial en Supabase. También facilita búsquedas de empleados específicos o departamentos para contactos relevantes.
-  - **Complejidad:** Alta (50 nodos)
-
-- **[1444-bamboohr-ai-powered-company-policies.json](workflows/1444-bamboohr-ai-powered-company-policies.json)**
-  - **Descripción:** Este flujo permite chatbot, extracción de datos, gestión de leads utilizando OpenAI/GPT, Email/Gmail, Webhook con inteligencia artificial mediante webhooks y APIs.
-  - **Complejidad:** Alta (50 nodos)
 
 - **[2889-linkedin-monitor.json](workflows/2889-linkedin-monitor.json)**
   - **Descripción:** Este flujo automatiza la monitoreo de perfiles en LinkedIn y actualiza una hoja de cálculo Google Sheets con información de clientes. Obtiene listas de propietarios de HubSpot, busca perfiles en LinkedIn, compara datos y envía notificaciones por correo electrónico si hay cambios.
@@ -3362,10 +3351,6 @@ All workflows shared here are provided “as is.” **Before using them in a pro
   - **Descripción:** Este flujo automático valida y corrige direcciones de envío de pedidos utilizando la API Endereco para verificar datos en Alemania.
   - **Complejidad:** Alta (3 nodos)
 
-- **[2556-glassdoor-discrimination-analysis.json](workflows/2556-glassdoor-discrimination-analysis.json)**
-  - **Descripción:** Este flujo automático utiliza ScrapingBee para extraer reseñas y datos demográficos de Glassdoor, junto con modelos de OpenAI para analizar patrones discriminatorios mediante cálculos estadísticos como puntuaciones z y tamaños de efecto.
-  - **Complejidad:** Alta (3 nodos)
-
 - **[2600-news-pipeline.json](workflows/2600-news-pipeline.json)**
   - **Descripción:** Este flujo automatizado extrae artículos de prensa, los filtra por antigüedad (7 días), genera resúmenes y palabras clave usando ChatGPT, y almacena todo en una base de datos SQL.
   - **Complejidad:** Alta (3 nodos)
@@ -6269,10 +6254,6 @@ All workflows shared here are provided “as is.” **Before using them in a pro
   - **Descripción:** Este flujo automático valida y corrige direcciones de envío de pedidos utilizando la API Endereco para verificar datos en Alemania.
   - **Complejidad:** Alta (3 nodos)
 
-- **[2556-glassdoor-discrimination-analysis.json](workflows/2556-glassdoor-discrimination-analysis.json)**
-  - **Descripción:** Este flujo automático utiliza ScrapingBee para extraer reseñas y datos demográficos de Glassdoor, junto con modelos de OpenAI para analizar patrones discriminatorios mediante cálculos estadísticos como puntuaciones z y tamaños de efecto.
-  - **Complejidad:** Alta (3 nodos)
-
 - **[2600-news-pipeline.json](workflows/2600-news-pipeline.json)**
   - **Descripción:** Este flujo automatizado extrae artículos de prensa, los filtra por antigüedad (7 días), genera resúmenes y palabras clave usando ChatGPT, y almacena todo en una base de datos SQL.
   - **Complejidad:** Alta (3 nodos)
@@ -8108,10 +8089,6 @@ All workflows shared here are provided “as is.” **Before using them in a pro
   - **Descripción:** Este flujo automático analiza y clasifica contenido de WordPress para determinar si ya incluye un resumen generado por IA, generando nuevos resúmenes con GPT-4o-mini cuando es necesario.
   - **Complejidad:** Alta (32 nodos)
 
-- **[3170-auto-tag-wordpress.json](workflows/3170-auto-tag-wordpress.json)**
-  - **Descripción:** Este flujo automatiza la asignación de etiquetas en WordPress usando IA. Analiza entradas RSS, genera y estructura tags, crea nuevas si son necesarias y actualiza las existentes.
-  - **Complejidad:** Alta (32 nodos)
-
 - **[2972-youtube-ai-agent.json](workflows/2972-youtube-ai-agent.json)**
   - **Descripción:** Este flujo automatiza la extracción de detalles y transcripciones de videos de YouTube, los cuales son procesados por un agente de inteligencia artificial para permitir una conversación contextualizada y análisis detallado del contenido.
   - **Complejidad:** Alta (29 nodos)
@@ -8676,10 +8653,6 @@ All workflows shared here are provided “as is.” **Before using them in a pro
 
 - **[2828-organizador-tags.json](workflows/2828-organizador-tags.json)**
   - **Descripción:** Este flujo automático organiza workflows en carpetas específicas basadas en tags. Primero, inicia sesión en n8n, extrae los tags de los proyectos personales, permite seleccionarlos mediante un formulario y luego mueve los workflows a las carpetas correspondientes o crea nuevas si son necesarias.
-  - **Complejidad:** Alta (40 nodos)
-
-- **[3108-subworkflow-dependency-graph.json](workflows/3108-subworkflow-dependency-graph.json)**
-  - **Descripción:** Este flujo automatiza la creación de un grafo de dependencias entre workflows en n8n y asigna etiquetas automáticamente basadas en las relaciones detectadas. Analiza los flujos para identificar cuáles son llamados por otros, visualiza estas relaciones y crea nuevas etiquetas si detecta cambios.
   - **Complejidad:** Alta (40 nodos)
 
 - **[0787-n8n-ai-demo-multifunction.json](workflows/0787-n8n-ai-demo-multifunction.json)**
@@ -9498,10 +9471,6 @@ All workflows shared here are provided “as is.” **Before using them in a pro
 - **[2963-spotify-sync-playlist.json](workflows/2963-spotify-sync-playlist.json)**
   - **Descripción:** Este flujo sincroniza las canciones marcadas como favoritas en Spotify con una lista de reproducción específica. Automáticamente agrega nuevas canciones que estén en tus gustados pero no en la playlist y elimina aquellas que hayan sido eliminadas de tus gustados.
   - **Complejidad:** Alta (40 nodos)
-
-- **[1414-spot-discrimination-analysis.json](workflows/1414-spot-discrimination-analysis.json)**
-  - **Descripción:** Detecta discriminación en textos mediante IA.
-  - **Complejidad:** Alta (38 nodos)
 
 - **[0922-trustpilot-customer-insights.json](workflows/0922-trustpilot-customer-insights.json)**
   - **Descripción:** Este flujo automático extrae información de las reseñas del cliente en TrustPilot utilizando Qdrant para almacenar vectores y LLMs para generar insights sobre sentimiento general e identificar temas recurrentes.
