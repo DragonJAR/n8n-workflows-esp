@@ -1,0 +1,272 @@
+{
+  "name": "Creador de LLMs.txt",
+  "nodes": [
+    {
+      "parameters": {},
+      "position": [
+        48,
+        304
+      ],
+      "type": "n8n-nodes-base.manualTrigger",
+      "name": "Inicio Manual",
+      "id": "manual-trigger",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "url": "https://www.dragonjar.us/sitemap_index.xml",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "name": "Obtener Sitemap",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        272,
+        304
+      ],
+      "id": "sitemap-node",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';\nconst queue = [];\nconst visited = new Set();\nconst urls = new Set();\nconst errors = [];\n\nfunction extractLocs(xml) {\n  const out = [];\n  const re = /<loc>([^<]+)<\\/loc>/gims;\n  let m;\n  while ((m = re.exec(xml)) !== null) out.push(m[1].trim());\n  return out;\n}\n\nasync function fetchXml(url) {\n  const res = await this.helpers.httpRequest({\n    method: 'GET',\n    url,\n    headers: { 'User-Agent': UA },\n    timeout: 20000\n  });\n  if (typeof res === 'string') return res;\n  if (res && typeof res.body === 'string') return res.body;\n  if (res && typeof res.data === 'string') return res.data;\n  throw new Error('Respuesta vacía o no textual');\n}\n\nasync function processXml(xml, origin = 'inline') {\n  if (xml.includes('<sitemapindex')) {\n    for (const loc of extractLocs(xml)) if (loc.endsWith('.xml')) queue.push(loc);\n  } else if (xml.includes('<urlset')) {\n    for (const loc of extractLocs(xml)) if (!loc.endsWith('.xml')) urls.add(loc);\n  } else {\n    throw new Error(`XML inválido (${origin})`);\n  }\n}\n\nasync function processUrl(u) {\n  if (visited.has(u)) return;\n  visited.add(u);\n  const xml = await fetchXml.call(this, u);\n  await processXml(xml, u);\n}\n\nfor (const item of $input.all()) {\n  const xml = typeof item.json?.data === 'string'\n    ? item.json.data\n    : (typeof item.json === 'string' ? item.json : '');\n  if (!xml || !xml.trim()) {\n    errors.push({ error: 'Entrada sin data XML' });\n    continue;\n  }\n  try {\n    await processXml(xml);\n  } catch (e) {\n    errors.push({ error: e.message, source: 'inline' });\n  }\n}\n\nwhile (queue.length) {\n  const next = queue.shift();\n  try {\n    await processUrl.call(this, next);\n  } catch (e) {\n    errors.push({ error: e.message, source: next });\n  }\n}\n\nconst urls_to_process = Array.from(urls).map(u => ({ url: u }));\n\nif (urls_to_process.length === 0) {\n    return [];\n}\n\nconst output = [{ json: { urls_to_process: urls_to_process } }];\nif (errors.length) {\n  output[0].json.errors = errors;\n}\n\nreturn output;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "name": "Analizador Recursivo de Sitemap",
+      "position": [
+        496,
+        304
+      ],
+      "typeVersion": 2,
+      "id": "recursive-sitemap-parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const CONCURRENCY_LIMIT = 10;\nconst inputData = $input.item.json.urls_to_process;\nconst allResults = [];\n\n// Utilidad para limpiar texto\nconst cleanSpaces = (str) => str.replace(/\\s+/g, ' ').trim();\n\n// Utilidad muy básica para decodificar algunas entidades HTML comunes\nconst decodeEntities = (str) => str\n  .replace(/&amp;/gi, '&')\n  .replace(/&lt;/gi, '<')\n  .replace(/&gt;/gi, '>')\n  .replace(/&quot;/gi, '\"')\n  .replace(/&#39;/gi, \"'\");\n\n// Extrae el <title> o fallback og:title\nconst extractTitle = (html) => {\n  let title = null;\n\n  // 1. Tag <title>\n  const titleMatch = html.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i);\n  if (titleMatch && titleMatch[1]) {\n    title = cleanSpaces(decodeEntities(titleMatch[1]));\n  }\n\n  // 2. Fallback: og:title\n  if (!title) {\n    const ogMatch = html.match(/<meta[^>]+property=[\\\"']og:title[\\\"'][^>]*content=[\\\"']([^\\\"']+)[\\\"'][^>]*>/i);\n    if (ogMatch && ogMatch[1]) {\n      title = cleanSpaces(decodeEntities(ogMatch[1]));\n    }\n  }\n\n  return title || '';\n};\n\nconst processUrl = async (urlItem) => {\n  const url = urlItem.url;\n\n  try {\n    const response = await this.helpers.httpRequest({\n      method: 'GET',\n      url,\n      headers: {\n        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'\n      },\n      timeout: 20000,\n      json: false,\n      response: { response: 'arraybuffer' }\n    });\n\n    const html = Buffer.from(response).toString('utf-8');\n\n    // Extraer título antes de limpiar\n    const title = extractTitle(html);\n\n    // Limpiar contenido\n    let content = html;\n    content = content.replace(/<script[\\s\\S]*?<\\/script>/gi, '');\n    content = content.replace(/<style[\\s\\S]*?<\\/style>/gi, '');\n    content = content.replace(/<nav[\\s\\S]*?<\\/nav>/gi, '');\n    content = content.replace(/<footer[\\s\\S]*?<\\/footer>/gi, '');\n    content = content.replace(/<header[\\s\\S]*?<\\/header>/gi, '');\n    content = content.replace(/<aside[\\s\\S]*?<\\/aside>/gi, '');\n    content = content.replace(/<form[\\s\\S]*?<\\/form>/gi, '');\n    content = content.replace(/<[^>]+>/g, ' ');\n    content = cleanSpaces(content);\n    content = content.substring(0, 3000);\n\n    return { url, title, content, status: 'success' };\n\n  } catch (error) {\n    return { url, error: error.message, status: 'error' };\n  }\n};\n\nfor (let i = 0; i < inputData.length; i += CONCURRENCY_LIMIT) {\n  const batch = inputData.slice(i, i + CONCURRENCY_LIMIT);\n  const batchResults = await Promise.all(batch.map(item => processUrl(item)));\n  allResults.push(...batchResults);\n}\n\nreturn allResults.map(result => ({ json: result }));\n"
+      },
+      "name": "Procesar URLs Concurrentemente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        304
+      ],
+      "id": "process-urls-concurrently"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst successfulItems = [];\n\nfor (const item of items) {\n  if (item.json.status === 'success' && item.json.content) {\n    successfulItems.push({\n      json: {\n        title: item.json.title,\n        url: item.json.url,\n        content: item.json.content\n      }\n    });\n  }\n}\n\nreturn successfulItems;\n"
+      },
+      "position": [
+        944,
+        304
+      ],
+      "typeVersion": 2,
+      "id": "filter-successful-items",
+      "name": "Filtrar Resultados Exitosos",
+      "type": "n8n-nodes-base.code"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "value": "={{ $('Filtrar Resultados Exitosos').item.json.title }}",
+              "type": "string",
+              "name": "title",
+              "id": "d355d638-3b76-4ab8-b9b9-f1a257b6e520"
+            },
+            {
+              "name": "url",
+              "value": "={{ $('Filtrar Resultados Exitosos').item.json.url }}",
+              "type": "string",
+              "id": "2f391eef-930c-4e1c-91ae-ea601649aaab"
+            },
+            {
+              "value": "={{ $json.message.content }}",
+              "id": "75e80eca-ec2e-4b92-a082-0733bdc5b53c",
+              "type": "string",
+              "name": "message.content"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Formatear Resultado",
+      "id": "format-result",
+      "position": [
+        1568,
+        304
+      ],
+      "typeVersion": 3.4,
+      "type": "n8n-nodes-base.set"
+    },
+    {
+      "parameters": {
+        "jsCode": "const siteName   = 'PONER TITULO DE TU SITIO AQUI';\nconst contactUrl = 'mailto:contacto@TUSITIO.com';  // opcional, puedes dejar solo el correo\n\nconst items = $input.all(); // todos los ítems que entran al Code node\n\nlet markdown = `# ${siteName}\\n\\n## Contenido\\n\\n`;\n\nfor (const { json } of items) {\n  // Evitar problemas si faltan campos\n  const title   = json.title?.trim()   || '(Sin título)';\n  const url     = json.url?.trim()     || '#';\n  const content = json.message?.content?.replace(/\\r?\\n/g, ' ') || '';\n\n  markdown += `- [${title}](${url}): ${content}\\n`;\n}\n\nmarkdown += `\\n## Contacto\\n\\n- [Contacto](${contactUrl})\\n`;\n\nreturn [\n  {\n    json: {\n      markdownReport: markdown\n    }\n  }\n];\n"
+      },
+      "name": "Construir Informe Markdown",
+      "id": "construct-markdown-report",
+      "typeVersion": 2,
+      "type": "n8n-nodes-base.code",
+      "position": [
+        1792,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "cachedResultName": "GPT-3.5-TURBO",
+          "mode": "list",
+          "__rl": true,
+          "value": "gpt-3.5-turbo"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Por favor, resume el siguiente texto:  {{ $json.content }}"
+            },
+            {
+              "content": "Eres un asistente experto que resume contenido web de forma clara y concisa.",
+              "role": "system"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "name": "Resumir con IA",
+      "typeVersion": 1.8,
+      "position": [
+        1168,
+        304
+      ],
+      "id": "28e7adcb-2d5d-418a-ad40-f062dfe9d337",
+      "credentials": {
+        "openAiApi": {
+          "id": "TFucLZIxzbo8Hah3",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "markdownReport",
+        "binaryPropertyName": "llms.txt",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2000,
+        304
+      ],
+      "id": "eeceeef9-05e6-4c30-b331-5d319647b031",
+      "name": "Obtener Archivo LLMS.txt"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Resumir con IA": {
+      "main": [
+        [
+          {
+            "node": "Formatear Resultado",
+            "index": 0,
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Procesar URLs Concurrentemente": {
+      "main": [
+        [
+          {
+            "type": "main",
+            "node": "Filtrar Resultados Exitosos",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inicio Manual": {
+      "main": [
+        [
+          {
+            "type": "main",
+            "node": "Obtener Sitemap",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analizador Recursivo de Sitemap": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Procesar URLs Concurrentemente",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Construir Informe Markdown": {
+      "main": [
+        [
+          {
+            "node": "Obtener Archivo LLMS.txt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatear Resultado": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "type": "main",
+            "node": "Construir Informe Markdown"
+          }
+        ]
+      ]
+    },
+    "Filtrar Resultados Exitosos": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Resumir con IA",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Obtener Sitemap": {
+      "main": [
+        [
+          {
+            "node": "Analizador Recursivo de Sitemap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "a78e4a09-120f-4997-a9f2-9408d6fd15a3",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "24504d5ef4ba2e1595895fc6ce63d2429031db5ad88643e0f365bd7a1c85b90f"
+  },
+  "id": "EVy44BK26WGcwoZB",
+  "tags": []
+}
