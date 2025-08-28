@@ -1,4 +1,4 @@
-[🌐 Versión en español](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README.md) | [🌐 English Version](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README-ENGLISH.md) | [🖥️ Mejor hosting n8n](https://djar.co/hostingn8n)
+[🌐 Versión en español](https://github.com/DragonJAR/n8n-workflows-esp/blob/main/README.md) | [🌐 English Version](https://github.com/DragonJAR/n8n-workflows-esp/blob/main/README-ENGLISH.md) | [🖥️ Mejor hosting n8n](https://djar.co/hostingn8n)
 
 [📲 Noticias Diarias de Inteligencia Artificial gratis en tu WhatsApp](https://djar.co/iawz)
 
@@ -31,15 +31,15 @@ Para importar cualquier flujo de trabajo en tu instancia de n8n, sigue estos pas
 4. Revisa y ajusta las credenciales o URLs de los webhooks según sea necesario.  
 5. Guarda y ejecuta el flujo de trabajo.
 6. [Si no encuentras el flujo que necesitas, puedes usar este Custom GPT para que te ayude a encontrarlo o a resolver cualquier problema que tengas con N8N.](https://chatgpt.com/g/g-6840a79abd348191966dd06abd7236c8-asistente-de-flujos-n8n).
-7. También puedes chatear con este repositorio usando [https://gitmcp.io/DragonJAR/n8n-workflows-es/chat](https://gitmcp.io/DragonJAR/n8n-workflows-es/chat)
+7. También puedes chatear con este repositorio usando [https://gitmcp.io/DragonJAR/n8n-workflows-esp/chat](https://gitmcp.io/DragonJAR/n8n-workflows-esp/chat)
 
 ## 🖥️ Servidor MCP (Model Context Protocol)
 
 El servidor MCP de este repositorio, para que puedas interactuar con esta gran base de datos de conocimiento con flujos de n8n documentados, es:
 
-`https://gitmcp.io/DragonJAR/n8n-workflows-es`
+`https://gitmcp.io/DragonJAR/n8n-workflows-esp`
 
-[Aquí encontrarás las instrucciones para usarlo en Cursor, Claude Desktop, Windsurf, VSCode, Cline o Highlight AI](https://gitmcp.io/DragonJAR/n8n-workflows-es).
+[Aquí encontrarás las instrucciones para usarlo en Cursor, Claude Desktop, Windsurf, VSCode, Cline o Highlight AI](https://gitmcp.io/DragonJAR/n8n-workflows-esp).
 
 ## 🤝 Contribución
 
@@ -5992,7 +5992,7 @@ Todos los workflows aquí compartidos se proporcionan tal cual. **Antes de emple
   - **Descripción:** Este flujo automático permite a un chatbot interactuar con una base de datos PostgreSQL o Supabase mediante consultas SQL y generar gráficos visualizados en QuickChart usando agentes de inteligencia artificial. El sistema utiliza OpenAI para procesar las preguntas del usuario, ejecutar consultas SQL, obtener definiciones de tablas y crear gráficos basados en los resultados obtenidos.
   - **Complejidad:** Baja (4 nodos)
 
-#  [Ver lista 📋 completa](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README.md)
+#  [Ver lista 📋 completa](https://github.com/DragonJAR/n8n-workflows-esp/blob/main/README.md)
 
 
 - **[3160-chatgpt-email-responses.json](workflows/3160-chatgpt-email-responses.json)**
@@ -6019,7 +6019,7 @@ Todos los workflows aquí compartidos se proporcionan tal cual. **Antes de emple
   - **Descripción:** Este flujo automatizado responde a eventos de Calendly (como la creación de un invitado) para ejecutar análisis de personalidad con Humantic AI y almacenar posteriormente los resultados en una página de base de datos de Notion.
   - **Complejidad:** Baja (4 nodos)
 
-# [📋 Ver lista completa](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README.md)
+# [📋 Ver lista completa](https://github.com/DragonJAR/n8n-workflows-esp/blob/main/README.md)
 
 - **[0058-microsoft-todo-blueprint.json](workflows/0058-microsoft-todo-blueprint.json)**
   - **Descripción:** Este flujo permite crear y actualizar tareas en Microsoft To Do mediante un trigger manual. Comienza con la activación del trigger que inicializa el proceso. Luego crea una nueva tarea (create) especificando detalles como lista de tareas, importancia alta y contenido. Posteriormente, actualiza esa misma tarea usando los datos retornados por la creación para identificarla.
