@@ -1,6 +1,6 @@
 [🌐 Versión en español](https://github.com/DragonJAR/n8n-workflows-esp/blob/main/README.md) | [🌐 English Version](https://github.com/DragonJAR/n8n-workflows-esp/blob/main/README-ENGLISH.md) | [🖥️ Mejor hosting n8n](https://djar.co/hostingn8n)
 
-[🤖 Curso GRATUITO de Automatización con n8n creado 100% con IA](https://dragonjar.education/course/automatizacion-con-n8n)
+[🤖 Curso GRATUITO de Automatización con n8n creado 100% con IA](https://dragonjar.education/bundle/curso-n8n)
 
 
 # 🧠 Colección de Flujos de Trabajo de n8n
