@@ -1,0 +1,537 @@
+{
+  "id": 5146,
+  "name": "🛠️ Process AI Output to Structured JSON with Robust JSON Parser",
+  "views": 3531,
+  "recentViews": 0,
+  "totalViews": 3531,
+  "createdAt": "2025-06-23T10:13:09.027Z",
+  "description": "### How it works\n\nThis workflow is a robust and forgiving JSON parser designed to handle malformed or \"dirty\" JSON strings often returned by AI models or scraped from web pages. It takes a text string as input and attempts to extract and parse a valid JSON object from it.\n\n1.  **Cleans Input:** It starts by trimming whitespace and removing common Markdown code fences (like ` ```json `) that might wrap the JSON.\n2.  **Applies Multiple Fixes:** It systematically attempts to correct common JSON errors in a specific order:\n    *   Escapes unescaped control characters (like newlines) within strings.\n    *   Fixes invalid backslash escape sequences.\n    *   Removes trailing commas.\n    *   Intelligently attempts to fix unescaped double quotes inside string values.\n3.  **Parses Strategically:** If a direct parse fails, it tries to extract a potential JSON object from the text (e.g., finding a `{...}` block inside a larger sentence) and then re-applies the cleaning logic to that extracted portion.\n4.  **Outputs Clean Data:** If successful, it outputs the parsed JSON fields. By default, it removes the detailed `parsing_status` object, but you can deactivate the final \"Set\" node to keep it for debugging.\n\n### Set up steps\n\n**Setup time: ~1 minute**\n\nThis workflow is designed to be used as a sub-workflow and requires no internal setup.\n\n1.  In your main workflow, add an **Execute Sub-Workflow** node where you need to parse a messy JSON string.\n2.  In the **Workflow** parameter, select this \"Robust JSON Parser\" workflow.\n3.  Ensure the data you send to the node is a JSON object containing a `text` field, where the value of `text` is the string you want to parse. For example: `{ \"text\": \"{\\\\\\\"key\\\\\\\": \\\\\\\"some broken json...\\\\\\\"}\" }`.\n4.  The workflow will return the successfully parsed data. To see a detailed log of the cleaning process, simply deactivate the final `Remove parsing_status` node inside this workflow.",
+  "workflow": {
+    "nodes": [
+      {
+        "id": "4fd2662b-6698-4ec2-9b27-97afaa3416c1",
+        "name": "Robust JSON Parser",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "position": [
+          -432,
+          -64
+        ],
+        "parameters": {
+          "inputSource": "jsonExample",
+          "jsonExample": "{\n  \"text\": \"{\\\"your\\\": \\\"json to parse goes here\\\"}\"\n}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "a8e7b7d4-ff0f-4138-8b7e-b01900b1013f",
+        "name": "Safe JSON Parser",
+        "type": "n8n-nodes-base.code",
+        "onError": "continueRegularOutput",
+        "position": [
+          272,
+          -64
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "/**\n * Escapes control characters (like \\n, \\r, \\t) within JSON strings.\n * Ex: Replaces a literal newline in \"hello\\nworld\" with \"hello\\\\nworld\".\n * @param {string} jsonString The string potentially containing unescaped control characters.\n * @returns {string} The corrected string.\n */\nfunction escapeControlCharsInStrings(jsonString) {\n    let fixed = \"\";\n    let inString = false;\n    let escapeNext = false;\n\n    for (let i = 0; i < jsonString.length; i++) {\n        const char = jsonString[i];\n\n        if (escapeNext) {\n            fixed += char;\n            escapeNext = false;\n            continue;\n        }\n\n        if (char === '\\\\') {\n            fixed += '\\\\';\n            escapeNext = true;\n            continue;\n        }\n\n        if (char === '\"') {\n            fixed += '\"';\n            inString = !inString;\n            continue;\n        }\n\n        if (inString) {\n            if (char === '\\n') {\n                fixed += '\\\\n';\n            } else if (char === '\\r') {\n                fixed += '\\\\r';\n            } else if (char === '\\t') {\n                fixed += '\\\\t';\n            } else if (char === '\\b') {\n                fixed += '\\\\b';\n            } else if (char === '\\f') {\n                fixed += '\\\\f';\n            }\n            // Handle other control characters (U+0000 to U+001F)\n            // that do not have a short escape sequence.\n            else if (char.charCodeAt(0) >= 0 && char.charCodeAt(0) <= 31) {\n                let hex = char.charCodeAt(0).toString(16);\n                fixed += '\\\\u' + '0000'.substring(hex.length) + hex;\n            }\n            else {\n                fixed += char;\n            }\n        } else {\n            fixed += char;\n        }\n    }\n    return fixed;\n}\n\n\n/**\n * Fixes invalid escape sequences in a potential JSON string\n * by escaping the backslash itself.\n * Ex: Replaces `\\$` with `\\\\$`, `\\: ` with `\\\\:`, but leaves `\\\"` or `\\\\` or `\\n` (if already escaped) intact.\n * @param {string} jsonString The string potentially containing invalid escapes.\n * @returns {string} The corrected string.\n */\nfunction fixInvalidEscapes(jsonString) {\n    let fixed = \"\";\n    for (let i = 0; i < jsonString.length; i++) {\n        if (jsonString[i] === '\\\\') {\n            if (i + 1 < jsonString.length) {\n                const nextChar = jsonString[i + 1];\n                const validEscapeChars = ['\"', '\\\\', '/', 'b', 'f', 'n', 'r', 't'];\n\n                if (validEscapeChars.includes(nextChar)) {\n                    fixed += '\\\\' + nextChar;\n                    i++;\n                } else if (nextChar === 'u') {\n                    if (i + 5 < jsonString.length && /^[0-9a-fA-F]{4}$/.test(jsonString.substring(i + 2, i + 6))) {\n                        fixed += '\\\\u' + jsonString.substring(i + 2, i + 6);\n                        i += 5;\n                    } else {\n                        fixed += '\\\\\\\\u';\n                        i++;\n                    }\n                } else {\n                    fixed += '\\\\\\\\' + nextChar;\n                    i++;\n                }\n            } else {\n                fixed += '\\\\\\\\';\n            }\n        } else {\n            fixed += jsonString[i];\n        }\n    }\n    return fixed;\n}\n\n/**\n * Attempts to parse a JSON string. Returns the object/array or null on error.\n * Also captures the error message with context.\n * @param {string} jsonString The string to parse.\n * @returns {{ data: object | Array | null, error: string | null }} Parsing result.\n */\nfunction tryParseJsonInternal(jsonString) {\n    try {\n        const data = JSON.parse(jsonString);\n        if (typeof data === 'object' && data !== null) {\n            return { data: data, error: null };\n        } else {\n            return { data: null, error: \"Parsed data is not a JSON object or array.\" };\n        }\n    } catch (e) {\n        let errorMessage = e.message;\n        if (e.message.includes('position')) {\n             try {\n                 const positionMatch = e.message.match(/position\\s+(\\d+)/);\n                 if (positionMatch && positionMatch[1]) {\n                      const position = parseInt(positionMatch[1], 10);\n                      const contextChars = 20;\n                      const start = Math.max(0, position - contextChars);\n                      const end = Math.min(jsonString.length, position + contextChars);\n                      const context = jsonString.substring(start, end);\n                      errorMessage += ` (near: ...${context}...)`;\n                 }\n             } catch (contextError) { /* Ignore error during context generation */ }\n        }\n        return { data: null, error: errorMessage };\n    }\n}\n\n\n/**\n * Attempts to fix unescaped double quotes within JSON strings.\n * @param {string} jsonString The potentially malformed JSON string.\n * @returns {string} The JSON string with an attempted quote fix.\n */\nfunction fixJsonStringQuotes(jsonString) {\n    let fixed = \"\";\n    let inString = false;\n    let escapeNext = false;\n\n    for (let i = 0; i < jsonString.length; i++) {\n        const char = jsonString[i];\n\n        if (escapeNext) { fixed += char; escapeNext = false; continue; }\n        if (char === '\\\\') { fixed += '\\\\'; escapeNext = true; continue; }\n        if (char === '\"') {\n            if (inString) {\n                let nextMeaningfulChar = null;\n                for (let j = i + 1; j < jsonString.length; j++) {\n                    if (!/\\s/.test(jsonString[j])) { nextMeaningfulChar = jsonString[j]; break; }\n                }\n                if (nextMeaningfulChar === null || [':', ',', '}', ']'].includes(nextMeaningfulChar)) {\n                    fixed += '\"'; inString = false;\n                } else { fixed += '\\\\\"'; } // Escape internal quote\n            } else { fixed += '\"'; inString = true; }\n        } else { fixed += char; }\n    }\n    return fixed;\n}\n\n\n/**\n * Extracts potential JSON objects or arrays based on balancing { } and [ ] characters.\n * @param {string} text The source text.\n * @returns {string[]} An array of potentially JSON strings.\n */\nfunction extractPotentialJsonStrings(text) {\n    const results = [];\n    let braceDepth = 0, bracketDepth = 0, startIndex = -1, inString = false, escapeNext = false;\n    for (let i = 0; i < text.length; i++) {\n        const char = text[i];\n        if (escapeNext) { escapeNext = false; continue; }\n        if (char === '\\\\') { escapeNext = true; continue; }\n        if (char === '\"') { inString = !inString; }\n        if (!inString) {\n            if (char === '{') { if (braceDepth === 0 && bracketDepth === 0) startIndex = i; braceDepth++; }\n            else if (char === '}') { if (braceDepth > 0) { braceDepth--; if (braceDepth === 0 && bracketDepth === 0 && startIndex !== -1) { results.push(text.substring(startIndex, i + 1)); startIndex = -1; } } }\n            else if (char === '[') { if (braceDepth === 0 && bracketDepth === 0) startIndex = i; bracketDepth++; }\n            else if (char === ']') { if (bracketDepth > 0) { bracketDepth--; if (braceDepth === 0 && bracketDepth === 0 && startIndex !== -1) { results.push(text.substring(startIndex, i + 1)); startIndex = -1; } } }\n        }\n    }\n    return results;\n}\n\n/**\n * Attempts to fix trailing commas.\n * @param {string} jsonString JSON string potentially with trailing commas.\n * @returns {string} Corrected string.\n */\nfunction fixTrailingCommas(jsonString) {\n    try { return jsonString.replace(/,\\s*([}\\]])/g, '$1'); }\n    catch(e) { return jsonString; }\n}\n\n/**\n * Main function to find and parse the first valid JSON object/array in a text,\n * with pre-cleaning and multiple correction attempts.\n * Merges the keys of the found JSON with parsing metadata.\n *\n * @param {string} text The text potentially containing JSON.\n * @returns {object} An object containing the keys of the parsed JSON (if object)\n *                   or a 'parsed_data' key (if array), and a 'parsing_status' object.\n */\nfunction findAndParseJsonRobustly(text) {\n    let firstParsedData = null;\n    const parsing_status = {\n        success: false,\n        successfulMethod: null,\n        controlCharFixApplied: false, // New flag\n        invalidEscapeFixApplied: false,\n        trailingCommaFixApplied: false,\n        quoteFixApplied: false,\n        parsingLog: [],\n        errors: [],\n        originalInput: text,\n        cleanedInput: null,\n        finalAttemptedJsonString: null\n    };\n\n    if (!text || typeof text !== 'string') {\n        parsing_status.errors.push(\"Input text is null or not a string.\");\n        parsing_status.parsingLog.push(\"Validation failed: Input is not a valid string.\");\n        return { parsing_status };\n    }\n\n    parsing_status.parsingLog.push(\"Starting robust JSON parsing.\");\n\n    let currentText = text.trim();\n    parsing_status.parsingLog.push(`Original length: ${text.length}, Trimmed length: ${currentText.length}`);\n    const markdownBlockRegex = /^```(?:json)?\\s*([\\s\\S]*?)\\s*```$/;\n    const match = currentText.match(markdownBlockRegex);\n    if (match && match[1]) {\n        currentText = match[1].trim();\n        parsing_status.parsingLog.push(\"Detected and removed Markdown code block fences.\");\n    } else {\n        parsing_status.parsingLog.push(\"No Markdown code block fences detected.\");\n    }\n    parsing_status.cleanedInput = currentText;\n    parsing_status.parsingLog.push(`Cleaned text length after potential fence removal: ${currentText.length}`);\n\n    function processSuccess(data, method, flags) {\n        parsing_status.parsingLog.push(`Success with method: ${method}`);\n        parsing_status.success = true;\n        parsing_status.successfulMethod = method;\n        parsing_status.controlCharFixApplied = flags.controlCharFixApplied || false;\n        parsing_status.invalidEscapeFixApplied = flags.invalidEscapeFixApplied || false;\n        parsing_status.trailingCommaFixApplied = flags.trailingCommaFixApplied || false;\n        parsing_status.quoteFixApplied = flags.quoteFixApplied || false;\n        firstParsedData = data;\n    }\n\n    function attemptParseAndFix(textToParse, baseMethodName) {\n        let currentAttemptText = textToParse;\n        let flags = { controlCharFixApplied: false, invalidEscapeFixApplied: false, trailingCommaFixApplied: false, quoteFixApplied: false };\n        let method = baseMethodName;\n        let parseResult;\n\n        // 0. Escape control characters WITHIN strings (BEFORE fixInvalidEscapes)\n        parsing_status.parsingLog.push(`[${baseMethodName}] Applying control character escaping in strings...`);\n        let fixedControlCharsText = escapeControlCharsInStrings(currentAttemptText);\n        if (fixedControlCharsText !== currentAttemptText) {\n            parsing_status.parsingLog.push(`[${baseMethodName}] Control characters in strings escaped.`);\n            flags.controlCharFixApplied = true;\n            currentAttemptText = fixedControlCharsText;\n            method = `${baseMethodName} + Control Char Escape`;\n        } else {\n            parsing_status.parsingLog.push(`[${baseMethodName}] No control characters in strings needed escaping or found.`);\n        }\n        parsing_status.finalAttemptedJsonString = currentAttemptText;\n        parseResult = tryParseJsonInternal(currentAttemptText);\n        if (parseResult.data) { processSuccess(parseResult.data, method, flags); return true; }\n        parsing_status.parsingLog.push(`[${baseMethodName}] Parse failed after control char escape (if any): ${parseResult.error}`);\n        parsing_status.errors.push(`Parse (${method}): ${parseResult.error}`);\n\n\n        // 1. Fix invalid escapes (backslash)\n        parsing_status.parsingLog.push(`[${baseMethodName}] Applying invalid escape fix (escaping backslash)...`);\n        let fixedEscapesText = fixInvalidEscapes(currentAttemptText);\n        if (fixedEscapesText !== currentAttemptText) {\n            parsing_status.parsingLog.push(`[${baseMethodName}] Invalid backslash escapes fixed.`);\n            flags.invalidEscapeFixApplied = true;\n            currentAttemptText = fixedEscapesText;\n            method = `${baseMethodName}${flags.controlCharFixApplied ? ' + Control Char Escape' : ''} + Invalid Escape Fix`;\n        } else {\n            parsing_status.parsingLog.push(`[${baseMethodName}] No invalid backslash escapes found/fixed.`);\n        }\n        parsing_status.finalAttemptedJsonString = currentAttemptText;\n        parseResult = tryParseJsonInternal(currentAttemptText);\n        if (parseResult.data) { processSuccess(parseResult.data, method, flags); return true; }\n        parsing_status.parsingLog.push(`[${baseMethodName}] Parse failed after invalid escape fix (if any): ${parseResult.error}`);\n        parsing_status.errors.push(`Parse (${method}): ${parseResult.error}`);\n\n\n        // 2. Fix trailing commas\n        parsing_status.parsingLog.push(`[${baseMethodName}] Applying trailing comma fix...`);\n        let fixedCommasText = fixTrailingCommas(currentAttemptText);\n        if (fixedCommasText !== currentAttemptText) {\n            parsing_status.parsingLog.push(`[${baseMethodName}] Trailing commas fixed.`);\n            flags.trailingCommaFixApplied = true;\n            currentAttemptText = fixedCommasText;\n            method = `${baseMethodName}${flags.controlCharFixApplied ? ' + Control Char Escape' : ''}${flags.invalidEscapeFixApplied ? ' + Invalid Escape Fix' : ''} + Trailing Comma Fix`;\n            parsing_status.finalAttemptedJsonString = currentAttemptText;\n            parseResult = tryParseJsonInternal(currentAttemptText);\n            if (parseResult.data) { processSuccess(parseResult.data, method, flags); return true; }\n            parsing_status.parsingLog.push(`[${baseMethodName}] Parse failed after comma fix: ${parseResult.error}`);\n            parsing_status.errors.push(`Parse (${method}): ${parseResult.error}`);\n        } else {\n            parsing_status.parsingLog.push(`[${baseMethodName}] No trailing commas found/fixed.`);\n        }\n\n        // 3. Fix quotes\n        parsing_status.parsingLog.push(`[${baseMethodName}] Applying quote fix...`);\n        try {\n            let fixedQuotesText = fixJsonStringQuotes(currentAttemptText);\n            if (fixedQuotesText !== currentAttemptText) {\n                parsing_status.parsingLog.push(`[${baseMethodName}] Quotes fixed.`);\n                flags.quoteFixApplied = true;\n                currentAttemptText = fixedQuotesText;\n                method = `${baseMethodName}${flags.controlCharFixApplied ? ' + Control Char Escape' : ''}${flags.invalidEscapeFixApplied ? ' + Invalid Escape Fix' : ''}${flags.trailingCommaFixApplied ? ' + Trailing Comma Fix' : ''} + Quote Fix`;\n                parsing_status.finalAttemptedJsonString = currentAttemptText;\n                parseResult = tryParseJsonInternal(currentAttemptText);\n                if (parseResult.data) { processSuccess(parseResult.data, method, flags); return true; }\n                parsing_status.parsingLog.push(`[${baseMethodName}] Parse failed after quote fix: ${parseResult.error}`);\n                parsing_status.errors.push(`Parse (${method}): ${parseResult.error}`);\n            } else {\n                parsing_status.parsingLog.push(`[${baseMethodName}] Quote fixing did not modify the text.`);\n            }\n        } catch (e) {\n            parsing_status.parsingLog.push(`[${baseMethodName}] Error during quote fixing attempt: ${e.message}`);\n            parsing_status.errors.push(`Parse (${method} - quote fix error): ${e.message}`);\n        }\n        \n        parsing_status.finalAttemptedJsonString = currentAttemptText;\n        return false;\n    }\n\n    parsing_status.parsingLog.push(\"Attempting parse/fix on entire cleaned text...\");\n    attemptParseAndFix(parsing_status.cleanedInput, \"Direct\");\n\n    if (!firstParsedData) {\n        parsing_status.parsingLog.push(\"Direct processing failed. Attempting structured extraction...\");\n        const candidates = extractPotentialJsonStrings(parsing_status.cleanedInput);\n        parsing_status.parsingLog.push(`Found ${candidates.length} potential JSON candidate(s) via balancing.`);\n\n        for (let i = 0; i < candidates.length && !firstParsedData; i++) {\n            const candidate = candidates[i];\n            parsing_status.parsingLog.push(`Attempting parse/fix on candidate ${i + 1}/${candidates.length}...`);\n            attemptParseAndFix(candidate, `Structured Candidate ${i + 1}`);\n        }\n    }\n\n    if (firstParsedData) {\n        parsing_status.parsingLog.push(`Successfully parsed JSON found using method: ${parsing_status.successfulMethod}.`);\n        if (typeof firstParsedData === 'object' && !Array.isArray(firstParsedData)) {\n             return { ...firstParsedData, parsing_status: parsing_status };\n        } else {\n             parsing_status.parsingLog.push(\"Parsed data is an array or non-object, returning under 'parsed_data' key.\");\n             return { parsed_data: firstParsedData, parsing_status: parsing_status };\n        }\n    } else {\n        parsing_status.parsingLog.push(\"No valid JSON object or array could be parsed from the input after all attempts.\");\n        parsing_status.success = false;\n        if (!parsing_status.finalAttemptedJsonString && parsing_status.cleanedInput) {\n             parsing_status.finalAttemptedJsonString = parsing_status.cleanedInput;\n        } else if (!parsing_status.finalAttemptedJsonString) {\n             parsing_status.finalAttemptedJsonString = text;\n        }\n        return { parsing_status: parsing_status };\n    }\n}\n\n// --- n8n Usage ---\nconst inputItem = $input.item.json; \nconst inputText = inputItem && inputItem.text ? inputItem.text : null;\nconst parsingResult = findAndParseJsonRobustly(inputText);\n\nreturn parsingResult;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "680ea730-fc1f-40d8-91e9-0ea06b09d472",
+        "name": "Remove parsing_status",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          672,
+          -64
+        ],
+        "parameters": {
+          "include": "except",
+          "options": {},
+          "excludeFields": "parsing_status",
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "9a42c258-cbb3-4c56-9b6e-53bd77b0f207",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          608,
+          -336
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 360,
+          "height": 440,
+          "content": "#### ⚙️ OUTPUT CLEANUP\n\nThis node removes the detailed `parsing_status` object from the final output to keep it clean.\n\n**Want to see the full parsing log for debugging?**\n\n➡️ **Just deactivate or delete this node.**\n\nYou will then get the full output from the parser, including the `parsing_status` object which shows every step and fix that was applied."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c71da6a1-7553-4c3c-b17a-9a5eecc02552",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -624,
+          -336
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 360,
+          "height": 440,
+          "content": "#### ▶️ INPUT NODE\n\nThis workflow expects an input item with a `text` field. The value of this field should be the **string** you want to parse.\n\n**Example Input:**\n```json\n{\n  \"text\": \"Some text from an AI... {\\\\\\\"key\\\\\\\": \\\\\\\"value with an unescaped \\\\\\\"quote\\\\\\\" inside\\\\\\\"}\"\n}"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b5f8dc12-5092-42ba-bb50-47f760418ca8",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          80,
+          -528
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 480,
+          "height": 620,
+          "content": "#### 🧠 CORE LOGIC: The Parser\n\nThis node contains all the logic for cleaning and parsing the input string. It does not need to be edited for normal use.\n\n**Process Overview:**\n1.  **Cleans Input:** Removes Markdown fences (```) and trims whitespace.\n2.  **Applies Fixes in Order:**\n    *   Escapes control characters (`\\n`, `\\t`) inside strings.\n    *   Fixes invalid backslashes (e.g., `\\\"` -> `\\\\\"`).\n    *   Removes trailing commas.\n    *   Attempts to fix unescaped quotes within values.\n3.  **Parses:** Tries to parse the cleaned string. If it fails, it looks for a `{...}` or `[...]` block within the text and tries again.\n\n\n**Output:**\n*   The successfully parsed JSON fields.\n*   A `parsing_status` object with detailed logs and debugging info."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e54cafca-18cf-40de-8cce-0fd7ec9e428b",
+        "name": "Convert to JSON",
+        "type": "n8n-nodes-base.set",
+        "onError": "continueErrorOutput",
+        "position": [
+          -144,
+          -64
+        ],
+        "parameters": {
+          "mode": "raw",
+          "options": {},
+          "jsonOutput": "={{ $json.text.replace(/^```json\\s*|\\s*```$/g, '') }}"
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "140f3f24-935b-4f0c-bad4-8ffdda34da74",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1024,
+          -608
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 320,
+          "height": 704,
+          "content": "## 🛠️ Process AI Output to Structured JSON with Robust JSON Parser\n\nStop AI hallucinations from breaking your flows by automatically cleaning and repairing malformed JSON output.\n\n### How it works\n\n*   **Markdown Cleanup**: Removes the ` ```json ` code blocks often returned by LLMs.\n*   **Auto-Repair**: Uses a script to fix common errors like unescaped quotes, bad escapes, or trailing commas.\n*   **Clean Output**: Returns a validated JSON object ready for your next nodes.\n\n### Automate your operations today\nYour time is valuable. Let us automate the boring stuff for you.\n\n\n**👇 CHOOSE YOUR PATH:**\n\n[ **⚡️ I WANT A FREE AUDIT (2 min)** ](https://workflows.ac/audit?utm_source=n8n_template&utm_medium=workflow_note&utm_campaign=process_ai_output_to_structured_json_with_robust_json_parser&utm_content=5146)\n> *We've put our heart into this business evaluation machine.*\n\n[ **💡 I HAVE A SPECIFIC REQUEST** ](https://workflows.ac/form?utm_source=n8n_template&utm_medium=workflow_note&utm_campaign=process_ai_output_to_structured_json_with_robust_json_parser&utm_content=5146)\n\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0641599d-9712-4b9c-9177-ec6e367db75c",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1024,
+          -1008
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 320,
+          "height": 1104,
+          "content": "---\n\n## Was this helpful? Let me know!\n[![clic](https://supastudio.ia2s.app/storage/v1/object/public/assets/n8n/clic_down_lucas.gif)](https://api.ia2s.app/form/templates/academy)\n\nI really hope this template helped you. Your feedback is what helps me create better resources for the n8n community.\n\n### **Have Feedback, a Question, or a Project Idea?**\n\n\n#### ➡️ **[Click here to go to the Contact Form](https://workflows.ac/form?utm_source=n8n_template&utm_medium=workflow_note&utm_campaign=process_ai_output_to_structured_json_with_robust_json_parser&utm_content=5146)**\n\nUse this single link for anything you need:\n\n*   **Give Feedback:** Share your thoughts on this template, whether you found a typo, encountered an unexpected error, have a suggestion, or just want to say thanks!\n\n*   **Automation Coaching:** Get personalized, one-on-one guidance to master n8n. We can work together to help you reach an expert level.\n\n*   **Automation Consulting:** Have a complex business challenge or need custom workflows built from scratch? We offer a plug and play automation department for 8 to 88 people teams with unlimited automation requests.\n\n---\n\nHappy Automating!\nLucas Peyrin | [Workflows Accelerator](https://workflows.ac?utm_source=n8n_template&utm_medium=workflow_note&utm_campaign=process_ai_output_to_structured_json_with_robust_json_parser&utm_content=5146)"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "connections": {
+      "Convert to JSON": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Safe JSON Parser",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Safe JSON Parser": {
+        "main": [
+          [
+            {
+              "node": "Remove parsing_status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Robust JSON Parser": {
+        "main": [
+          [
+            {
+              "node": "Convert to JSON",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 9,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 5
+      },
+      "n8n-nodes-base.executeWorkflowTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Lucas Peyrin",
+    "username": "lucaspeyrin",
+    "bio": "Innovative builder with a passion for crafting automation solutions that solve real-world challenges. From streamlining workflows to driving efficiency, my work empowers teams and individuals to achieve more with less effort. Experienced in developing scalable tools and strategies that deliver results with n8n, supabase and cline.\n\nGet your Free n8n PDF Audit:",
+    "verified": true,
+    "links": [
+      "https://free.n8n.ac"
+    ],
+    "avatar": "https://gravatar.com/avatar/74234187cf4a650d53f6a86e7b03d1bcb8cfef4cbd0552eabd8d966cd808cc54?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 837,
+      "icon": "fa:sign-out-alt",
+      "name": "n8n-nodes-base.executeWorkflowTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When Executed by Another Workflow",
+        "color": "#ff6d5a"
+      },
+      "iconData": {
+        "icon": "sign-out-alt",
+        "type": "icon"
+      },
+      "displayName": "Execute Workflow Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 5,
+      "name": "Engineering"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

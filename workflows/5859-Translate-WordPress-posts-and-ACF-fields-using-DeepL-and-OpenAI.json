@@ -1,0 +1,1607 @@
+{
+  "id": 13543,
+  "name": "Translate WordPress posts and ACF fields using DeepL and OpenAI",
+  "views": 55,
+  "recentViews": 1,
+  "totalViews": 55,
+  "createdAt": "2026-02-20T10:45:29.921Z",
+  "description": "## Who it is for\n\nThis workflow is designed for developers, content managers, and website administrators managing multilingual WordPress sites. It is highly beneficial for websites built with complex Advanced Custom Fields (ACF) or custom Gutenberg layouts that standard translation plugins often struggle to process efficiently.\n\n## How it works\n\nWhen a post is created or updated, WordPress triggers a webhook to start the workflow. The workflow fetches the raw post JSON directly from the WordPress REST API. An OpenAI node analyzes a text snippet to detect the exact source language, ensuring it only routes and translates into missing target languages to prevent duplication. A code node then recursively extracts text from both standard fields and specific ACF fields into a single array. These strings are translated in bulk via DeepL, maintaining HTML formatting. Finally, the workflow rebuilds the original JSON structure with the translated text and pushes it back to WordPress as a newly linked translation draft.\n\n## Requirements\n\n- WordPress Application Password (for HTTP Basic Auth)\n- OpenAI API Key\n- DeepL API Key\n- A WordPress plugin capable of firing webhooks on post updates (e.g., WP Webhooks)\n\n## How to set up\n\n1. Configure the Webhook node and point your WordPress webhook plugin to the provided test/production URL.\n2. Add your HTTP Basic Auth credentials (WP Admin Username and App Password) to the WordPress request nodes.\n3. Add your OpenAI API key and DeepL API key to their respective nodes.\n4. Update the base URL in the HTTP nodes to point to your actual WordPress domain.\n\n## How to customize\n\nOpen the \"Smart Router & Targets\" node and update the target languages array to match your website's supported languages. Most importantly, open the \"Extract Content\" code node and modify the text keys array to perfectly match the field names used in your site's unique ACF configuration.",
+  "workflow": {
+    "name": "Smart WP Translation with OpenAI & DeepL (Gutenberg + ACF)",
+    "nodes": [
+      {
+        "id": "b09ce46f-19e9-4ee4-9538-a76f417649fb",
+        "name": "Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -1568,
+          64
+        ],
+        "parameters": {
+          "path": "translate-post",
+          "options": {},
+          "httpMethod": "POST"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "58826b48-c964-4df2-a049-72bef987081f",
+        "name": "Get Post Data",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -1344,
+          56
+        ],
+        "parameters": {
+          "url": "=https://your-wordpress-site.com/wp-json/wp/v2/{{ $json.body.post.post_type === 'post' ? 'posts' : $json.body.post.post_type === 'solution' ? 'solutions' : $json.body.post.post_type }}/{{ $json.body.post.ID }}",
+          "options": {},
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBasicAuth"
+        },
+        "credentials": {
+          "httpBasicAuth": {
+            "id": "uOtGiCZl4h3hybVW",
+            "name": "WordPress Application"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "9c7cff9a-c5c1-4af5-a5fb-196225b74998",
+        "name": "Prepare Text Snippet",
+        "type": "n8n-nodes-base.function",
+        "position": [
+          -1120,
+          56
+        ],
+        "parameters": {
+          "functionCode": "// Extract a snippet of text for the AI to analyze\nconst post = items[0].json;\nlet snippet = post.title.rendered + \"\\n\\n\";\n\n// Try to grab raw content or intro if available\nif (post.content && post.content.rendered) {\n    snippet += post.content.rendered.replace(/<[^>]*>?/gm, ''); // Strip HTML\n} else if (post.acf && post.acf.intro) {\n    snippet += post.acf.intro;\n}\n\n// Limit to 1000 chars to save OpenAI tokens\nreturn [{\n  json: {\n    ...post,\n    textSnippet: snippet.substring(0, 1000)\n  }\n}];"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7558b3a4-95f7-4db2-87e0-a64f4b9c7ace",
+        "name": "OpenAI Language Detect",
+        "type": "n8n-nodes-base.openAi",
+        "position": [
+          -896,
+          56
+        ],
+        "parameters": {
+          "model": "gpt-4o-mini",
+          "prompt": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a language detection bot. Reply ONLY with the 2-letter lowercase ISO 639-1 language code (e.g., en, fr, de, es, nl). Do not include any other text, punctuation, or explanation."
+              }
+            ]
+          },
+          "options": {},
+          "resource": "chat",
+          "requestOptions": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "kXuygi0uT6VOPrb1",
+            "name": "OpenAi account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b5d17f47-d5c0-40fa-a5f7-deff90984546",
+        "name": "Smart Router & Targets",
+        "type": "n8n-nodes-base.function",
+        "position": [
+          -672,
+          56
+        ],
+        "parameters": {
+          "functionCode": "const originalPost = $items(\"Prepare Text Snippet\")[0].json;\nconst detectedLang = items[0].json.message.content.trim().toLowerCase();\nconst currentWpLang = originalPost.lang || 'en'; // Defaults to 'en' if not set\n\n// 👉 UPDATE THIS ARRAY to include all the languages your site supports\nconst allSupported = ['en', 'fr', 'de'];\nlet targetLangs = allSupported.filter(l => l !== detectedLang);\n\n// 2. Check which translations already exist so we don't duplicate\nconst existingTranslations = originalPost.translations || {};\nconst needed = [];\n\ntargetLangs.forEach(lang => {\n  if (!existingTranslations[lang]) {\n    needed.push(lang);\n  }\n});\n\n// 3. Do we need to fix the original post's flag in WP?\nconst needsLangFix = (detectedLang !== currentWpLang) && allSupported.includes(detectedLang);\n\nreturn [{\n  json: {\n    originalPost: originalPost,\n    detectedLang: detectedLang,\n    languagesNeeded: needed,\n    needsLangFix: needsLangFix,\n    originalId: originalPost.id,\n    postTypeUrl: originalPost._links.self[0].href // e.g., https://.../wp/v2/posts/123\n  }\n}];"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f326e6d2-bf5c-4d14-8c6d-242da29f7dad",
+        "name": "Needs WP Lang Fix?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -448,
+          56
+        ],
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $json.needsLangFix }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ce0b4c3b-4019-4ab6-9d03-4280624e4438",
+        "name": "Fix WP Language Flag",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -224,
+          -16
+        ],
+        "parameters": {
+          "url": "={{ $json.postTypeUrl }}",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "authentication": "genericCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "lang",
+                "value": "={{ $json.detectedLang }}"
+              }
+            ]
+          },
+          "genericAuthType": "httpBasicAuth"
+        },
+        "credentials": {
+          "httpBasicAuth": {
+            "id": "uOtGiCZl4h3hybVW",
+            "name": "WordPress Application"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "bf7b9308-ce6c-45fe-aa2f-3c83d8af30f9",
+        "name": "Merge",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          0,
+          56
+        ],
+        "parameters": {},
+        "typeVersion": 2.1
+      },
+      {
+        "id": "fa16eebf-412f-4acd-b76a-9260aa77f5c5",
+        "name": "Needs Translations?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          224,
+          56
+        ],
+        "parameters": {
+          "conditions": {
+            "boolean": [
+              {
+                "value1": "={{ $json.languagesNeeded.length > 0 }}",
+                "value2": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "47ec6995-9e87-42e8-b3c8-2d0b0c0261a6",
+        "name": "Extract Content",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          448,
+          64
+        ],
+        "parameters": {
+          "jsCode": "const input = items[0].json;\nconst post = input.originalPost;\nconst acf = post.acf || {};\n\n// === 🚨 IMPORTANT: UPDATE THESE KEYS 🚨 ===\n// These keys are specific to the Advanced Custom Fields (ACF) setup. \n// Replace these with the actual field names you use in your own ACF configuration!\nconst textKeys = ['title', 'headline', 'subheadline', 'text', 'description', 'body', 'intro', 'buttonLabel', 'quote', 'ctaText', 'chipText', 'content', 'keyCapabilities', 'sectionDescription', 'iconName', 'featureTitle', 'featureDescription', 'planName', 'planDescription', 'features', 'question', 'answer', 'label', 'context', 'authorRole', 'step_title', 'step_description'];\n\nlet stringsToTranslate = [post.title.rendered];\nlet mapPaths = ['post_title'];\n\nif (post.content && post.content.rendered && post.content.rendered.trim() !== '') {\n    stringsToTranslate.push(post.content.rendered);\n    mapPaths.push('post_content');\n}\n\nif (acf.intro) {\n  stringsToTranslate.push(acf.intro);\n  mapPaths.push('acf.intro');\n}\n\nfunction walk(obj, path) {\n  if (Array.isArray(obj)) {\n    obj.forEach((item, index) => walk(item, `${path}[${index}]`));\n  } else if (typeof obj === 'object' && obj !== null) {\n    for (const key in obj) {\n      if (textKeys.includes(key) && typeof obj[key] === 'string' && obj[key].trim() !== '') {\n        stringsToTranslate.push(obj[key]);\n        mapPaths.push(`${path}.${key}`);\n      } else {\n        walk(obj[key], `${path}.${key}`);\n      }\n    }\n  }\n}\n\n// === 🚨 CUSTOM ACF FLEXIBLE CONTENT 🚨 ===\n// 'product_flexible' is a specific field identifier. \n// If you use flexible content or repeater fields, adjust or duplicate the line below.\nif (acf.product_flexible) walk(acf.product_flexible, 'acf.product_flexible');\n\nreturn [{ json: { ...input, stringsToTranslate, mapPaths } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a96fb374-69b4-4770-a356-003d4d0ecf8a",
+        "name": "Split by Target Lang",
+        "type": "n8n-nodes-base.itemLists",
+        "position": [
+          672,
+          56
+        ],
+        "parameters": {
+          "include": "allOtherFields",
+          "options": {},
+          "fieldToSplitOut": "languagesNeeded"
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "6d8785f6-f053-4959-94a3-730d4dc38490",
+        "name": "DeepL Translate",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          896,
+          56
+        ],
+        "parameters": {
+          "url": "https://api-free.deepl.com/v2/translate",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "text",
+                "value": "={{ $json.stringsToTranslate }}"
+              },
+              {
+                "name": "target_lang",
+                "value": "={{ $json.languagesNeeded.toUpperCase() }}"
+              },
+              {
+                "name": "source_lang",
+                "value": "={{ $json.detectedLang.toUpperCase() }}"
+              },
+              {
+                "name": "tag_handling",
+                "value": "html"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "DeepL-Auth-Key YOUR_DEEPL_API_KEY_HERE"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "5a1a2eb4-f4e0-48fa-9cc3-52e8db6b0c84",
+        "name": "RECONSTRUCT JSON",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1120,
+          56
+        ],
+        "parameters": {
+          "jsCode": "const splitItems = $items(\"Split by Target Lang\");\nconst results = [];\n\nfunction set(obj, path, value) {\n    var schema = obj, pList = path.split('.'), len = pList.length;\n    for(var i = 0; i < len-1; i++) {\n        var elem = pList[i];\n        if(elem.includes('[')) {\n             const arrayName = elem.split('[')[0];\n             const index = parseInt(elem.split('[')[1].replace(']', ''));\n             schema = schema[arrayName][index];\n        } else {\n             if( !schema[elem] ) schema[elem] = {}\n             schema = schema[elem];\n        }\n    }\n    var lastElem = pList[len-1];\n     if(lastElem.includes('[')) {\n         const arrayName = lastElem.split('[')[0];\n         const index = parseInt(lastElem.split('[')[1].replace(']', ''));\n         schema[arrayName][index] = value;\n    } else {\n         schema[lastElem] = value;\n    }\n}\n\n// Cleans inside Arrays and Objects\nfunction cleanAcf(obj) {\n    if (!obj) return;\n    if (Array.isArray(obj)) {\n        obj.forEach(item => cleanAcf(item));\n    } else if (typeof obj === 'object') {\n        Object.keys(obj).forEach(key => {\n            if (obj[key] === \"\") {\n                obj[key] = null; \n            } else if (typeof obj[key] === 'object' && obj[key] !== null) {\n                cleanAcf(obj[key]);\n            }\n        });\n    }\n}\n\nfor (let i = 0; i < items.length; i++) {\n    const translatedTexts = items[i].json.translations;\n    const originalData = splitItems[i].json;\n    const mapPaths = originalData.mapPaths;\n    \n    let newPost = JSON.parse(JSON.stringify(originalData.originalPost));\n    \n    mapPaths.forEach((path, index) => {\n        const translatedString = translatedTexts[index].text;\n        \n        if (path === 'post_title') {\n            newPost.title.raw = translatedString;\n            newPost.title.rendered = translatedString;\n        } else if (path === 'post_content') {\n            newPost.content.raw = translatedString;\n            newPost.content.rendered = translatedString;\n        } else if (path.startsWith('acf.')) {\n            set(newPost.acf, path.replace('acf.', ''), translatedString);\n        }\n    });\n\n    cleanAcf(newPost.acf);\n    \n    const originalUrl = originalData.postTypeUrl;\n    const baseUrl = originalUrl.substring(0, originalUrl.lastIndexOf('/'));\n    \n    results.push({\n        json: {\n            lang: originalData.languagesNeeded, \n            originalId: originalData.originalId,\n            newTitle: newPost.title.raw,\n            newAcf: newPost.acf,\n            newContent: newPost.content?.raw || \"\",\n            createUrl: baseUrl\n        }\n    });\n}\n\nreturn results;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2e280904-8300-4cac-b537-6fa3843b6962",
+        "name": "Create Translated Post",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1344,
+          56
+        ],
+        "parameters": {
+          "url": "={{ $json.createUrl }}",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "authentication": "genericCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "title",
+                "value": "={{ $json.newTitle }}"
+              },
+              {
+                "name": "acf",
+                "value": "={{ $json.newAcf }}"
+              },
+              {
+                "name": "status",
+                "value": "draft"
+              },
+              {
+                "name": "lang",
+                "value": "={{ $json.lang }}"
+              },
+              {
+                "name": "translation_of",
+                "value": "={{ $json.originalId }}"
+              },
+              {
+                "name": "content",
+                "value": "=={{ $json.newContent }}"
+              }
+            ]
+          },
+          "genericAuthType": "httpBasicAuth"
+        },
+        "credentials": {
+          "httpBasicAuth": {
+            "id": "uOtGiCZl4h3hybVW",
+            "name": "WordPress Application"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "c3e32f1f-9c6f-482c-992a-52625b5e4a43",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2064,
+          -304
+        ],
+        "parameters": {
+          "width": 352,
+          "height": 768,
+          "content": "# Smart WP Translation (Gutenberg + ACF)\n\nThis workflow automatically translates new or updated WordPress posts into multiple languages using DeepL, while keeping your Advanced Custom Fields (ACF) JSON structure intact. It uses OpenAI to detect the source language and prevent duplicate translations.\n\n🛠️ Prerequisites:\n1. WordPress Application Password (for HTTP Basic Auth)\n2. OpenAI API Key\n3. DeepL API Key\n\n🚀 Setup Instructions:\n1. Add your credentials to the Webhook, Get Post Data, OpenAI, and Create Post nodes.\n2. In the \"Smart Router & Targets\" node, configure your supported languages.\n3. In the \"Extract Content\" node, update the array with your site's specific ACF keys.\n4. In the \"DeepL Translate\" node, add your DeepL API Key to the Header.\n\nP.S.\n\nYou can use the Deep Node, but in this template I use a generic node in case you get issues with the Deepl Node"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7a704daf-301f-4a7e-a39b-d6ba668b3fbc",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1648,
+          -32
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 464,
+          "height": 288,
+          "content": "## 1. Trigger & Fetch Raw WP Post Data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7d448172-2b66-4103-acc0-04a47c4dec73",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1168,
+          -32
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1312,
+          "height": 288,
+          "content": "## 2. AI Language Detection & Smart Routing"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e6691bca-a7fd-49bd-ad2c-0adf947a2a65",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          160,
+          -32
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 880,
+          "height": 288,
+          "content": "## 3. Flatten ACF Structure & Translate with DeepL"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d88a9828-8e59-4f5c-a8b2-d1481b8abe8c",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1056,
+          -32
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 528,
+          "height": 288,
+          "content": "## 4. Rebuild ACF Object & Push to WordPress"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d0057bbd-9ac6-4863-8b42-c8fed6d25e30",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1408,
+          208
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 208,
+          "height": 176,
+          "content": "### URL and WP APP Password\nUpdate the URL to your WP domain and select your WP App Password credentials."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "30e91335-d3c5-440a-ac42-05d1ed21e6af",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1296,
+          208
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 208,
+          "height": 176,
+          "content": "### URL and WP APP Password\nUpdate the URL to your WP domain and select your WP App Password credentials."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e3bfb431-9ac1-4ce7-853f-204ed19e8d19",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -720,
+          208
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 176,
+          "height": 176,
+          "content": "### Configuration: \nOpen this node and update the \"allSupported\" array to match your website's languages."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2898babf-c8fd-4407-b597-ed8d8df1456d",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          416,
+          208
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 176,
+          "height": 176,
+          "content": "### ACF Keys\nOpen this node and update the \"textKeys\" array to match the actual ACF field names used on your WordPress site"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ad985939-851f-46c1-8fe2-05ef2c582a5a",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          864,
+          224
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 176,
+          "height": 176,
+          "content": "### DEEPL Translate\nAdd your DeepL API Key in the Header Parameters."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "connections": {
+      "Merge": {
+        "main": [
+          [
+            {
+              "node": "Needs Translations?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Get Post Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Post Data": {
+        "main": [
+          [
+            {
+              "node": "Prepare Text Snippet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "DeepL Translate": {
+        "main": [
+          [
+            {
+              "node": "RECONSTRUCT JSON",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Content": {
+        "main": [
+          [
+            {
+              "node": "Split by Target Lang",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "RECONSTRUCT JSON": {
+        "main": [
+          [
+            {
+              "node": "Create Translated Post",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Needs WP Lang Fix?": {
+        "main": [
+          [
+            {
+              "node": "Fix WP Language Flag",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Needs Translations?": {
+        "main": [
+          [
+            {
+              "node": "Extract Content",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fix WP Language Flag": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Text Snippet": {
+        "main": [
+          [
+            {
+              "node": "OpenAI Language Detect",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split by Target Lang": {
+        "main": [
+          [
+            {
+              "node": "DeepL Translate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Language Detect": {
+        "main": [
+          [
+            {
+              "node": "Smart Router & Targets",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Smart Router & Targets": {
+        "main": [
+          [
+            {
+              "node": "Needs WP Lang Fix?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 24,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.openAi": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.function": {
+        "count": 2
+      },
+      "n8n-nodes-base.itemLists": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 10
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 4
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Roger",
+    "username": "japaneseknotweed",
+    "bio": "",
+    "verified": false,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/b4c1e1770c5297a2cb77b35ad2013a9c9607ba0bc9bd70528025736286abe2b8?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 14,
+      "icon": "fa:code",
+      "name": "n8n-nodes-base.function",
+      "codex": {
+        "data": {
+          "alias": [
+            "Code",
+            "Javascript",
+            "Custom Code",
+            "Script",
+            "cpde"
+          ],
+          "details": "The Function node allows you to execute JavaScript in your workflow. Unlike the Function Item node, this node does not operate on incoming node data per-item. Instead, you must iterate over multiple items of incoming data yourself. This can be useful if you're performing data transformation where you want to manipulate the number of items being outputted by the node (i.e. 1 item is inputted in with nested object, 10 items are outputted without any nested objects)",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-host-virtual-coffee-breaks-with-n8n/",
+                "icon": "☕️",
+                "label": "How to host virtual coffee breaks with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/tracking-time-spent-in-meetings-with-google-calendar-twilio-and-n8n/",
+                "icon": "🗓",
+                "label": "Tracking Time Spent in Meetings With Google Calendar, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-error-workflows-in-n8n/",
+                "icon": "🌪",
+                "label": "Creating Error Workflows in n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Function",
+        "color": "#FF9922"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Function",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 516,
+      "icon": "file:itemLists.svg",
+      "name": "n8n-nodes-base.itemLists",
+      "codex": {
+        "data": {
+          "alias": [
+            "Aggregate",
+            "Dedupe",
+            "Deduplicate",
+            "Duplicates",
+            "Limit",
+            "Remove",
+            "Slice",
+            "Sort",
+            "Split",
+            "Unique",
+            "JSON",
+            "Transform",
+            "Array",
+            "List",
+            "Object",
+            "Item",
+            "Map",
+            "Format",
+            "Nested",
+            "Iterate",
+            "Summarise",
+            "Summarize",
+            "Group",
+            "Pivot",
+            "Sum",
+            "Count",
+            "Min",
+            "Max"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.itemlists/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Item Lists"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbDpzcGFjZT0icHJlc2VydmUiIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgdmlld0JveD0iMCAwIDIxMCAyMTAiPjxwYXRoIGQ9Ik0xOC44IDE4LjhDOC40IDE4LjggMCAyNy4xIDAgMzcuNXM4LjQgMTguOCAxOC44IDE4LjggMTguOC04LjQgMTguOC0xOC44LTguNS0xOC43LTE4LjgtMTguN20wIDYyLjRDOC40IDgxLjIgMCA4OS42IDAgMTAwczguNCAxOC44IDE4LjggMTguOCAxOC44LTguNCAxOC44LTE4LjgtOC41LTE4LjgtMTguOC0xOC44bTAgNjIuNkM4LjQgMTQzLjggMCAxNTIuMSAwIDE2Mi41czguNCAxOC44IDE4LjggMTguOCAxOC44LTguNCAxOC44LTE4LjgtOC41LTE4LjctMTguOC0xOC43bTE3NSA2LjJoLTEyNWMtMy41IDAtNi4yIDIuOC02LjIgNi4ydjEyLjVjMCAzLjUgMi44IDYuMiA2LjIgNi4yaDEyNWMzLjUgMCA2LjItMi44IDYuMi02LjJ2LTEyLjVjMC0zLjQtMi44LTYuMi02LjItNi4ybTAtMTI1aC0xMjVjLTMuNSAwLTYuMiAyLjgtNi4yIDYuMnYxMi41YzAgMy41IDIuOCA2LjIgNi4yIDYuMmgxMjVjMy41IDAgNi4yLTIuOCA2LjItNi4yVjMxLjJjMC0zLjQtMi44LTYuMi02LjItNi4ybTAgNjIuNWgtMTI1Yy0zLjUgMC02LjIgMi44LTYuMiA2LjJ2MTIuNWMwIDMuNSAyLjggNi4yIDYuMiA2LjJoMTI1YzMuNSAwIDYuMi0yLjggNi4yLTYuMlY5My44YzAtMy41LTIuOC02LjMtNi4yLTYuMyIgc3R5bGU9ImZpbGw6I2ZmNmQ1YSIvPjwvc3ZnPg=="
+      },
+      "displayName": "Item Lists",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 840,
+      "icon": "file:openAi.svg",
+      "name": "n8n-nodes-base.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "ChatGPT",
+            "DallE"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/openai/"
+              }
+            ]
+          },
+          "categories": [
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMjYwIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZD0iTTIzOS4xODQgMTA2LjIwM2E2NC43MiA2NC43MiAwIDAgMC01LjU3Ni01My4xMDNDMjE5LjQ1MiAyOC40NTkgMTkxIDE1Ljc4NCAxNjMuMjEzIDIxLjc0QTY1LjU4NiA2NS41ODYgMCAwIDAgNTIuMDk2IDQ1LjIyYTY0LjcyIDY0LjcyIDAgMCAwLTQzLjIzIDMxLjM2Yy0xNC4zMSAyNC42MDItMTEuMDYxIDU1LjYzNCA4LjAzMyA3Ni43NGE2NC42NyA2NC42NyAwIDAgMCA1LjUyNSA1My4xMDJjMTQuMTc0IDI0LjY1IDQyLjY0NCAzNy4zMjQgNzAuNDQ2IDMxLjM2YTY0LjcyIDY0LjcyIDAgMCAwIDQ4Ljc1NCAyMS43NDRjMjguNDgxLjAyNSA1My43MTQtMTguMzYxIDYyLjQxNC00NS40ODFhNjQuNzcgNjQuNzcgMCAwIDAgNDMuMjI5LTMxLjM2YzE0LjEzNy0yNC41NTggMTAuODc1LTU1LjQyMy04LjA4My03Ni40ODNtLTk3LjU2IDEzNi4zMzhhNDguNCA0OC40IDAgMCAxLTMxLjEwNS0xMS4yNTVsMS41MzUtLjg3IDUxLjY3LTI5LjgyNWE4LjYgOC42IDAgMCAwIDQuMjQ3LTcuMzY3di03Mi44NWwyMS44NDUgMTIuNjM2Yy4yMTguMTExLjM3LjMyLjQwOS41NjN2NjAuMzY3Yy0uMDU2IDI2LjgxOC0yMS43ODMgNDguNTQ1LTQ4LjYwMSA0OC42MDFNMzcuMTU4IDE5Ny45M2E0OC4zNSA0OC4zNSAwIDAgMS01Ljc4MS0zMi41ODlsMS41MzQuOTIxIDUxLjcyMiAyOS44MjZhOC4zNCA4LjM0IDAgMCAwIDguNDQxIDBsNjMuMTgxLTM2LjQyNXYyNS4yMjFhLjg3Ljg3IDAgMCAxLS4zNTguNjY1bC01Mi4zMzUgMzAuMTg0Yy0yMy4yNTcgMTMuMzk4LTUyLjk3IDUuNDMxLTY2LjQwNC0xNy44MDNNMjMuNTQ5IDg1LjM4YTQ4LjUgNDguNSAwIDAgMSAyNS41OC0yMS4zMzN2NjEuMzlhOC4yOSA4LjI5IDAgMCAwIDQuMTk1IDcuMzE2bDYyLjg3NCAzNi4yNzItMjEuODQ1IDEyLjYzNmEuODIuODIgMCAwIDEtLjc2NyAwTDQxLjM1MyAxNTEuNTNjLTIzLjIxMS0xMy40NTQtMzEuMTcxLTQzLjE0NC0xNy44MDQtNjYuNDA1em0xNzkuNDY2IDQxLjY5NS02My4wOC0zNi42M0wxNjEuNzMgNzcuODZhLjgyLjgyIDAgMCAxIC43NjggMGw1Mi4yMzMgMzAuMTg0YTQ4LjYgNDguNiAwIDAgMS03LjMxNiA4Ny42MzV2LTYxLjM5MWE4LjU0IDguNTQgMCAwIDAtNC40LTcuMjEzbTIxLjc0Mi0zMi42OS0xLjUzNS0uOTIyLTUxLjYxOS0zMC4wODFhOC4zOSA4LjM5IDAgMCAwLTguNDkyIDBMOTkuOTggOTkuODA4Vjc0LjU4N2EuNzIuNzIgMCAwIDEgLjMwNy0uNjY1bDUyLjIzMy0zMC4xMzNhNDguNjUyIDQ4LjY1MiAwIDAgMSA3Mi4yMzYgNTAuMzkxek04OC4wNjEgMTM5LjA5N2wtMjEuODQ1LTEyLjU4NWEuODcuODcgMCAwIDEtLjQxLS42MTRWNjUuNjg1YTQ4LjY1MiA0OC42NTIgMCAwIDEgNzkuNzU3LTM3LjM0NmwtMS41MzUuODctNTEuNjcgMjkuODI1YTguNiA4LjYgMCAwIDAtNC4yNDYgNy4zNjd6bTExLjg2OC0yNS41OEwxMjguMDY3IDk3LjNsMjguMTg4IDE2LjIxOHYzMi40MzRsLTI4LjA4NiAxNi4yMTgtMjguMTg4LTE2LjIxOHoiLz48L3N2Zz4="
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 31,
+      "name": "Content Creation"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}

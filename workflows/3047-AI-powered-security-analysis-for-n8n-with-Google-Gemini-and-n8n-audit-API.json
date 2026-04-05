@@ -1,0 +1,885 @@
+{
+  "id": 11975,
+  "name": "AI-powered security analysis for n8n with Google Gemini and n8n audit API",
+  "views": 250,
+  "recentViews": 0,
+  "totalViews": 250,
+  "createdAt": "2025-12-19T22:30:15.417Z",
+  "description": "# Generate a security audit report from an n8n instance to a web form\nThis workflow provides a deep-dive security assessment of an n8n instance using the native Audit API and AI analysis.\n\n## Who’s it for\n* This template is for n8n administrators and DevSecOps engineers who need to maintain a high security standard across their automation infrastructure. \n* It is particularly useful for teams managing self-hosted instances with multiple users.\n\n## How it works\n* The workflow triggers via an n8n Form where you provide your instance URL and API key. \n* It calls the official n8n Audit API to scan for five categories of risk: instance settings, credentials, database (SQL injection), nodes, and filesystem access. \n* A Code node parses this data, which is then analyzed by Google Gemini to create a prioritized remediation plan.\n\n## Requirements\n* n8n version v1.0 or higher.\n* A Google Gemini API Key.\n* An n8n API Key with 'Audit' scope permissions.\n\n## How to set up\n1. Create a Google Gemini API credential in n8n.\n2. Ensure your n8n API key has the correct scopes.\n3. Execute the workflow and enter your credentials into the trigger form.\n\n## How to customize the workflow\n* You can easily swap the Google Gemini node for OpenAI or Anthropic. \n* You can also add a 'Send Email' or 'Slack' node at the end to automatically route the report to your security channel instead of just viewing it in the browser.\n",
+  "workflow": {
+    "meta": {
+      "instanceId": "cd4b0eacbc1b2a21d7cee630fecbe89999d48e480a3be707313ff365c70c50ca",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "bb1f1c8b-b31e-45e3-afd5-7d080517911c",
+        "name": "Prepare Audit Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          208,
+          -32
+        ],
+        "parameters": {
+          "jsCode": "// Prepare audit data for AI agent\nconst auditData = $input.first().json;\n\n// Extract key metrics\nconst instanceReport = auditData['Instance Risk Report'];\nconst credentialsReport = auditData['Credentials Risk Report'];\nconst databaseReport = auditData['Database Risk Report'];\nconst nodesReport = auditData['Nodes Risk Report'];\nconst filesystemReport = auditData['Filesystem Risk Report'];\n\n// Count issues\nconst unusedCredentials = credentialsReport?.sections?.[0]?.location?.length || 0;\nconst inactiveCredentials = credentialsReport?.sections?.[1]?.location?.length || 0;\nconst staleCredentials = credentialsReport?.sections?.[2]?.location?.length || 0;\nconst sqlIssues = databaseReport?.sections?.[0]?.location?.length || 0;\nconst riskyNodes = nodesReport?.sections?.[0]?.location?.length || 0;\nconst communityNodes = nodesReport?.sections?.[1]?.location?.length || 0;\nconst filesystemNodes = filesystemReport?.sections?.[0]?.location?.length || 0;\n\n// Calculate risk level\nconst totalIssues = unusedCredentials + sqlIssues + riskyNodes + filesystemNodes;\nlet riskLevel = 'LOW';\nif (totalIssues > 20) riskLevel = 'HIGH';\nelse if (totalIssues > 10) riskLevel = 'MEDIUM';\n\n// Build structured summary for AI\nconst summary = {\n  metrics: {\n    unusedCredentials,\n    inactiveCredentials,\n    staleCredentials,\n    sqlInjectionRisks: sqlIssues,\n    riskyOfficialNodes: riskyNodes,\n    communityNodes,\n    filesystemNodes,\n    totalIssues,\n    riskLevel\n  },\n  instanceSettings: instanceReport?.sections?.[0]?.settings || {},\n  \n  // Unused credentials list\n  unusedCredentialsList: credentialsReport?.sections?.[0]?.location?.map(c => c.name) || [],\n  \n  // SQL issues with workflow context\n  sqlIssuesList: databaseReport?.sections?.[0]?.location?.map(n => ({\n    workflow: n.workflowName,\n    node: n.nodeName\n  })) || [],\n  \n  // Group risky nodes by workflow\n  riskyNodesByWorkflow: {},\n  \n  // Community packages\n  communityPackages: nodesReport?.sections?.[1]?.location?.map(p => {\n    const name = p.packageUrl.split('/package/')[1] || p.nodeType;\n    return { name, url: p.packageUrl };\n  }) || [],\n  \n  // Filesystem nodes\n  filesystemNodesList: filesystemReport?.sections?.[0]?.location?.map(n => ({\n    workflow: n.workflowName,\n    node: n.nodeName,\n    type: n.nodeType\n  })) || []\n};\n\n// Group risky nodes by workflow for better AI analysis\nif (nodesReport?.sections?.[0]?.location) {\n  for (const node of nodesReport.sections[0].location) {\n    if (!summary.riskyNodesByWorkflow[node.workflowName]) {\n      summary.riskyNodesByWorkflow[node.workflowName] = [];\n    }\n    summary.riskyNodesByWorkflow[node.workflowName].push({\n      name: node.nodeName,\n      type: node.nodeType.split('.').pop()\n    });\n  }\n}\n\n// Create the prompt context\nconst auditContext = JSON.stringify(summary, null, 2);\n\nreturn {\n  json: {\n    auditContext,\n    summary,\n    generatedAt: new Date().toISOString(),\n    reportDate: new Date().toLocaleDateString('en-US', { \n      weekday: 'long', \n      year: 'numeric', \n      month: 'long', \n      day: 'numeric'\n    })\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "8f3f349d-e766-4b9e-8453-37358bebc09b",
+        "name": "AI Report Generator",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          400,
+          -32
+        ],
+        "parameters": {
+          "text": "=You are a senior DevOps security analyst preparing a professional security audit report for an n8n automation instance.\n\n## AUDIT DATA\n```json\n{{ $json.auditContext }}\n```\n\n## REPORT DATE\n{{ $json.reportDate }}\n\n## YOUR TASK\nAnalyze this n8n instance security audit data and write a comprehensive, professional security report. The report should be actionable and prioritized.\n\n## REPORT STRUCTURE\nWrite the report with these sections:\n\n### 1. EXECUTIVE SUMMARY\n- Overall risk assessment (use the riskLevel from data)\n- Key findings in 2-3 sentences\n- Immediate actions required\n\n### 2. METRICS OVERVIEW\nPresent the key metrics in a clear format:\n- Total issues found\n- Breakdown by category\n\n### 3. CRITICAL FINDINGS\nFor HIGH priority items (unused credentials, SQL injection risks):\n- What's the issue\n- Why it matters (security impact)\n- Specific remediation steps\n\n### 4. MEDIUM PRIORITY FINDINGS\nFor community nodes, filesystem access:\n- List the specific packages/nodes\n- Risk assessment for each\n- Recommendations\n\n### 5. INSTANCE CONFIGURATION REVIEW\nAnalyze the instance settings:\n- What's enabled/disabled\n- Security implications\n- Recommended changes\n\n### 6. DETAILED REMEDIATION PLAN\nCreate a prioritized action plan:\n1. Immediate (this week)\n2. Short-term (this month)\n3. Ongoing maintenance\n\n### 7. WORKFLOWS REQUIRING ATTENTION\nList specific workflows that need review, grouped by issue type.\n\n## WRITING STYLE\n- Professional but accessible\n- Use clear headings and bullet points\n- Be specific with names, counts, and workflows\n- Provide actionable recommendations\n- Don't be alarmist, but be clear about risks\n\n## OUTPUT FORMAT\nWrite the report in clean markdown format suitable for a Google Doc. Use proper headings (##, ###), bullet points, and tables where appropriate.",
+          "promptType": "define",
+          "hasOutputParser": true
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "07a759ad-3217-4272-922e-0a76b6d0fcba",
+        "name": "Format Report Output",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          720,
+          -32
+        ],
+        "parameters": {
+          "jsCode": "// Format the AI output for Google Doc\nconst aiOutput = $input.first().json.output;\nconst prepData = $('Prepare Audit Data').first().json;\n\n// Build the final report document\nlet reportContent = aiOutput.fullReport;\n\n// Add metadata header\nconst header = `# n8n Security Audit Report\n\n**Generated:** ${prepData.reportDate}  \n**Risk Level:** ${aiOutput.riskLevel}  \n**Report ID:** AUDIT-${Date.now()}\n\n---\n\n`;\n\nreportContent = header + reportContent;\n\n// Create report title for Google Doc\nconst reportTitle = `n8n Security Audit - ${new Date().toISOString().split('T')[0]} - ${aiOutput.riskLevel} Risk`;\n\nreturn {\n  json: {\n    // Document metadata\n    reportTitle,\n    reportContent,\n    \n    // Full AI output preserved\n    aiAnalysis: {\n      executiveSummary: aiOutput.executiveSummary,\n      riskLevel: aiOutput.riskLevel,\n      criticalFindings: aiOutput.criticalFindings,\n      immediateActions: aiOutput.immediateActions,\n      shortTermActions: aiOutput.shortTermActions || [],\n      fullReport: aiOutput.fullReport\n    },\n    \n    // Raw metrics for downstream use\n    metrics: prepData.summary.metrics,\n    \n    // Audit context\n    auditData: {\n      generatedAt: prepData.generatedAt,\n      reportDate: prepData.reportDate,\n      instanceSettings: prepData.summary.instanceSettings,\n      unusedCredentialsList: prepData.summary.unusedCredentialsList,\n      sqlIssuesList: prepData.summary.sqlIssuesList,\n      communityPackages: prepData.summary.communityPackages,\n      filesystemNodesList: prepData.summary.filesystemNodesList,\n      riskyNodesByWorkflow: prepData.summary.riskyNodesByWorkflow\n    }\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "fa6c9515-9e1b-41a4-818b-c42ab74d0545",
+        "name": "Structured Output Parser",
+        "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "position": [
+          544,
+          160
+        ],
+        "parameters": {
+          "schemaType": "manual",
+          "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"executiveSummary\": {\n      \"type\": \"string\",\n      \"description\": \"The executive summary section of the report\"\n    },\n    \"riskLevel\": {\n      \"type\": \"string\",\n      \"enum\": [\"LOW\", \"MEDIUM\", \"HIGH\"],\n      \"description\": \"Overall risk level assessment\"\n    },\n    \"criticalFindings\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"title\": { \"type\": \"string\" },\n          \"severity\": { \"type\": \"string\" },\n          \"description\": { \"type\": \"string\" },\n          \"remediation\": { \"type\": \"string\" }\n        }\n      },\n      \"description\": \"List of critical findings\"\n    },\n    \"immediateActions\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" },\n      \"description\": \"Actions to take this week\"\n    },\n    \"shortTermActions\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" },\n      \"description\": \"Actions to take this month\"\n    },\n    \"fullReport\": {\n      \"type\": \"string\",\n      \"description\": \"The complete formatted report in markdown\"\n    }\n  },\n  \"required\": [\"executiveSummary\", \"riskLevel\", \"criticalFindings\", \"immediateActions\", \"fullReport\"]\n}"
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "e98db5b8-2149-4f9b-850f-d096c780819d",
+        "name": "gemini-2.f-flash",
+        "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+        "position": [
+          400,
+          160
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "googlePalmApi": {
+            "id": "credential-id",
+            "name": "googlePalmApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cc0494a4-2357-41c1-a531-273ab4e97289",
+        "name": "On form submission",
+        "type": "n8n-nodes-base.formTrigger",
+        "position": [
+          -176,
+          -32
+        ],
+        "webhookId": "2c00f134-f4a2-4caf-91dd-666d2d4e626e",
+        "parameters": {
+          "options": {
+            "buttonLabel": "Generate Security Report"
+          },
+          "formTitle": "🔒 n8n Security Audit Report Generator",
+          "formFields": {
+            "values": [
+              {
+                "fieldLabel": "n8n Instance URL",
+                "placeholder": "https://your-instance.n8n.cloud",
+                "requiredField": true
+              },
+              {
+                "fieldLabel": "n8n API Key",
+                "placeholder": "n8n_api_xxxxxxxxxxxxxxxxxxxx",
+                "requiredField": true
+              }
+            ]
+          },
+          "formDescription": "This workflow generates a comprehensive AI-powered security audit report for your n8n instance.\n\n**What you'll get:**\n• Executive summary with risk assessment\n• Credential security analysis\n• SQL injection vulnerability scan\n• Community node risk evaluation\n• Prioritized remediation plan\n\n**Required:** Your n8n instance URL and API key."
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "5dd61136-6ed2-4539-b8e7-8c1e53d2d063",
+        "name": "Get Audit Data",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          16,
+          -32
+        ],
+        "parameters": {
+          "url": "={{ $('On form submission').item.json['n8n Instance URL'].replace(/\\/$/, '') }}/api/v1/audit",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "{\n  \"additionalOptions\": {\n    \"daysAbandonedWorkflow\": 1,\n    \"categories\": [\n      \"instance\",\n      \"credentials\",\n      \"database\",\n      \"nodes\",\n      \"filesystem\"\n    ]\n  }\n}",
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-N8N-API-KEY",
+                "value": "={{ $('On form submission').item.json['n8n API Key'] }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "ee97b156-50ff-466d-a477-3152182b7826",
+        "name": "Code Explanation",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          144,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 526,
+          "height": 320,
+          "content": "### 2. Data Logic & AI ANALYSIS\nFormats raw JSON into security metrics and uses Google Gemini to perform a deep-dive risk assessment of the instance configuration."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7e2fe717-5dd7-432c-8464-5a2f00aeb598",
+        "name": "Stage 1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -224,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 364,
+          "height": 316,
+          "content": "### 1. INGESTION\nCaptures instance details via an n8n Form and fetches the raw security audit data using the official n8n v1 API."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4a63188d-2e26-4178-a125-8ac8623f7165",
+        "name": "Stage 3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          704,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 350,
+          "height": 316,
+          "content": "### 3. PRESENTATION\nFinalizes the report formatting and displays an interactive, high-fidelity dashboard to the user."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4b9bf5b1-1a1e-4ecf-bf49-8d926adecb6d",
+        "name": "Workflow Documentation",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -848,
+          -464
+        ],
+        "parameters": {
+          "width": 600,
+          "height": 928,
+          "content": "# Generate a security audit report from an n8n instance to a web form\nThis workflow provides a deep-dive security assessment of an n8n instance using the native Audit API and AI analysis.\n\n## Who’s it for\n* This template is for n8n administrators and DevSecOps engineers who need to maintain a high security standard across their automation infrastructure. \n* It is particularly useful for teams managing self-hosted instances with multiple users.\n\n## How it works\n* The workflow triggers via an n8n Form where you provide your instance URL and API key. \n* It calls the official n8n Audit API to scan for five categories of risk: instance settings, credentials, database (SQL injection), nodes, and filesystem access. \n* A Code node parses this data, which is then analyzed by Google Gemini to create a prioritized remediation plan.\n\n## Requirements\n* n8n version v1.0 or higher.\n* A Google Gemini API Key.\n* An n8n API Key with 'Audit' scope permissions.\n\n## How to set up\n1. Create a Google Gemini API credential in n8n.\n2. Ensure your n8n API key has the correct scopes.\n3. Execute the workflow and enter your credentials into the trigger form.\n\n## How to customize the workflow\n* You can easily swap the Google Gemini node for OpenAI or Anthropic. \n* You can also add a 'Send Email' or 'Slack' node at the end to automatically route the report to your security channel instead of just viewing it in the browser.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "391ae9f1-fe41-482b-991f-f10402feb0ef",
+        "name": "Display Final Audit Report",
+        "type": "n8n-nodes-base.form",
+        "position": [
+          912,
+          -32
+        ],
+        "webhookId": "8cdbb828-2105-47fa-afcc-73a50a25f46c",
+        "parameters": {
+          "options": {},
+          "operation": "completion",
+          "completionTitle": "✅ n8n Security Audit Complete",
+          "completionMessage": "=<div style=\"font-family: 'Open Sans', sans-serif; max-width: 700px; margin: 0 auto; padding: 24px; background: #fbfcfe;\">\n\n  <div style=\"text-align: center; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 2px solid #dbdfe7;\">\n    <h1 style=\"margin: 0; color: #525356; font-size: 24px; font-weight: 600;\">🔒 n8n Security Audit Report</h1>\n    <p style=\"color: #7e8186; margin: 12px 0 0 0; font-size: 14px;\">Generated: {{ $json.auditData.reportDate }}</p>\n  </div>\n\n  <div style=\"background: {{ $json.metrics.riskLevel === 'HIGH' ? '#fef2f2' : $json.metrics.riskLevel === 'MEDIUM' ? '#fffbeb' : '#f0fdf4' }}; border-left: 5px solid {{ $json.metrics.riskLevel === 'HIGH' ? '#ef4444' : $json.metrics.riskLevel === 'MEDIUM' ? '#f59e0b' : '#22c55e' }}; padding: 20px; margin-bottom: 24px; border-radius: 0 8px 8px 0;\">\n    <h2 style=\"margin: 0 0 12px 0; color: {{ $json.metrics.riskLevel === 'HIGH' ? '#dc2626' : $json.metrics.riskLevel === 'MEDIUM' ? '#d97706' : '#16a34a' }}; font-size: 18px;\">⚡ Risk Level: {{ $json.metrics.riskLevel }}</h2>\n    <p style=\"margin: 0; color: #555; font-size: 14px; line-height: 1.7;\">{{ $json.aiAnalysis.executiveSummary }}</p>\n  </div>\n\n  <div style=\"background: #ffffff; border: 1px solid #dbdfe7; padding: 24px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0px 4px 16px 0px rgba(99, 77, 255, 0.06);\">\n    <h3 style=\"margin: 0 0 20px 0; color: #525356; font-size: 16px; font-weight: 600;\">📊 Metrics Overview</h3>\n    <div style=\"display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;\">\n      <div style=\"background: #fef2f2; padding: 16px; border-radius: 8px; text-align: center;\">\n        <div style=\"font-size: 28px; font-weight: 700; color: #dc2626;\">{{ $json.metrics.totalIssues }}</div>\n        <div style=\"font-size: 12px; color: #7e8186; margin-top: 4px;\">Total Issues</div>\n      </div>\n      <div style=\"background: #fffbeb; padding: 16px; border-radius: 8px; text-align: center;\">\n        <div style=\"font-size: 28px; font-weight: 700; color: #d97706;\">{{ $json.metrics.unusedCredentials }}</div>\n        <div style=\"font-size: 12px; color: #7e8186; margin-top: 4px;\">Unused Credentials</div>\n      </div>\n      <div style=\"background: #fef2f2; padding: 16px; border-radius: 8px; text-align: center;\">\n        <div style=\"font-size: 28px; font-weight: 700; color: #dc2626;\">{{ $json.metrics.sqlInjectionRisks }}</div>\n        <div style=\"font-size: 12px; color: #7e8186; margin-top: 4px;\">SQL Injection Risks</div>\n      </div>\n      <div style=\"background: #f5f3ff; padding: 16px; border-radius: 8px; text-align: center;\">\n        <div style=\"font-size: 28px; font-weight: 700; color: #7c3aed;\">{{ $json.metrics.communityNodes }}</div>\n        <div style=\"font-size: 12px; color: #7e8186; margin-top: 4px;\">Community Nodes</div>\n      </div>\n      <div style=\"background: #faf5ff; padding: 16px; border-radius: 8px; text-align: center;\">\n        <div style=\"font-size: 28px; font-weight: 700; color: #9333ea;\">{{ $json.metrics.riskyOfficialNodes }}</div>\n        <div style=\"font-size: 12px; color: #7e8186; margin-top: 4px;\">Risky Official Nodes</div>\n      </div>\n      <div style=\"background: #f0fdf4; padding: 16px; border-radius: 8px; text-align: center;\">\n        <div style=\"font-size: 28px; font-weight: 700; color: #16a34a;\">{{ $json.metrics.filesystemNodes }}</div>\n        <div style=\"font-size: 12px; color: #7e8186; margin-top: 4px;\">Filesystem Nodes</div>\n      </div>\n    </div>\n  </div>\n\n  <div style=\"background: #fef2f2; border: 1px solid #fecaca; padding: 20px; border-radius: 8px; margin-bottom: 24px;\">\n    <h3 style=\"margin: 0 0 16px 0; color: #dc2626; font-size: 16px; font-weight: 600;\">🚨 Immediate Actions Required (This Week)</h3>\n    <ul style=\"margin: 0; padding-left: 20px; color: #555; font-size: 14px; line-height: 2;\">{{ $json.aiAnalysis.immediateActions.map(action => '<li style=\"margin-bottom: 8px;\">' + action + '</li>').join('') }}</ul>\n  </div>\n\n  <div style=\"background: #fffbeb; border: 1px solid #fde68a; padding: 20px; border-radius: 8px; margin-bottom: 24px;\">\n    <h3 style=\"margin: 0 0 16px 0; color: #d97706; font-size: 16px; font-weight: 600;\">📋 Short-Term Actions (This Month)</h3>\n    <ul style=\"margin: 0; padding-left: 20px; color: #555; font-size: 14px; line-height: 2;\">{{ $json.aiAnalysis.shortTermActions.map(action => '<li style=\"margin-bottom: 8px;\">' + action + '</li>').join('') }}</ul>\n  </div>\n\n  <div style=\"background: #ffffff; border: 1px solid #dbdfe7; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0px 4px 16px 0px rgba(99, 77, 255, 0.06);\">\n    <h3 style=\"margin: 0 0 16px 0; color: #525356; font-size: 16px; font-weight: 600;\">🔑 Unused Credentials to Remove ({{ $json.auditData.unusedCredentialsList.length }})</h3>\n    <div style=\"display: flex; flex-wrap: wrap; gap: 10px;\">{{ $json.auditData.unusedCredentialsList.map(cred => '<span style=\"background: #fef2f2; color: #dc2626; padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; border: 1px solid #fecaca; display: inline-block;\">' + cred + '</span>').join('') }}</div>\n  </div>\n\n  <div style=\"background: #ffffff; border: 1px solid #dbdfe7; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0px 4px 16px 0px rgba(99, 77, 255, 0.06);\">\n    <h3 style=\"margin: 0 0 16px 0; color: #525356; font-size: 16px; font-weight: 600;\">⚠️ SQL Injection Vulnerabilities ({{ $json.auditData.sqlIssuesList.length }})</h3>\n    <table style=\"width: 100%; border-collapse: collapse; font-size: 14px;\">\n      <thead>\n        <tr style=\"background: #f8fafc;\">\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">Workflow</th>\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">Node</th>\n        </tr>\n      </thead>\n      <tbody>{{ $json.auditData.sqlIssuesList.map(issue => '<tr><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0; color: #555;\">' + issue.workflow + '</td><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-family: monospace; background: #f8fafc; color: #555; font-size: 13px;\">' + issue.node + '</td></tr>').join('') }}</tbody>\n    </table>\n  </div>\n\n  <div style=\"background: #ffffff; border: 1px solid #dbdfe7; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0px 4px 16px 0px rgba(99, 77, 255, 0.06);\">\n    <h3 style=\"margin: 0 0 16px 0; color: #525356; font-size: 16px; font-weight: 600;\">📦 Community Packages Installed</h3>\n    <table style=\"width: 100%; border-collapse: collapse; font-size: 14px;\">\n      <thead>\n        <tr style=\"background: #f8fafc;\">\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">Package Name</th>\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">NPM Link</th>\n        </tr>\n      </thead>\n      <tbody>{{ [...new Set($json.auditData.communityPackages.map(p => p.name))].map(name => { const pkg = $json.auditData.communityPackages.find(p => p.name === name); return '<tr><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-family: monospace; font-size: 13px; color: #555;\">' + name + '</td><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0;\"><a href=\"' + pkg.url + '\" target=\"_blank\" style=\"color: #ff6d5a; text-decoration: none; font-weight: 500;\">View on NPM ↗</a></td></tr>'; }).join('') }}</tbody>\n    </table>\n  </div>\n\n  <div style=\"background: #ffffff; border: 1px solid #dbdfe7; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0px 4px 16px 0px rgba(99, 77, 255, 0.06);\">\n    <h3 style=\"margin: 0 0 16px 0; color: #525356; font-size: 16px; font-weight: 600;\">💾 Filesystem Access Nodes ({{ $json.auditData.filesystemNodesList.length }})</h3>\n    <table style=\"width: 100%; border-collapse: collapse; font-size: 14px;\">\n      <thead>\n        <tr style=\"background: #f8fafc;\">\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">Workflow</th>\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">Node</th>\n          <th style=\"text-align: left; padding: 12px 16px; border-bottom: 2px solid #e2e8f0; color: #525356; font-weight: 600;\">Type</th>\n        </tr>\n      </thead>\n      <tbody>{{ $json.auditData.filesystemNodesList.map(node => '<tr><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0; color: #555;\">' + node.workflow + '</td><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0; color: #555;\">' + node.node + '</td><td style=\"padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-family: monospace; font-size: 12px; background: #f8fafc; color: #555;\">' + node.type + '</td></tr>').join('') }}</tbody>\n    </table>\n  </div>\n\n  <div style=\"background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; margin-bottom: 24px;\">\n    <h3 style=\"margin: 0 0 16px 0; color: #16a34a; font-size: 16px; font-weight: 600;\">⚙️ Instance Configuration</h3>\n    <table style=\"width: 100%; border-collapse: collapse; font-size: 14px;\">\n      <tbody>\n        <tr><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; font-weight: 500; color: #555; width: 50%;\">Community Packages</td><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; color: #555;\">{{ $json.auditData.instanceSettings.features.communityPackagesEnabled ? '✅ Enabled' : '❌ Disabled' }}</td></tr>\n        <tr><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; font-weight: 500; color: #555;\">Public API</td><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; color: #555;\">{{ $json.auditData.instanceSettings.features.publicApiEnabled ? '✅ Enabled' : '❌ Disabled' }}</td></tr>\n        <tr><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; font-weight: 500; color: #555;\">Templates</td><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; color: #555;\">{{ $json.auditData.instanceSettings.features.templatesEnabled ? '✅ Enabled' : '❌ Disabled' }}</td></tr>\n        <tr><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; font-weight: 500; color: #555;\">Diagnostics/Telemetry</td><td style=\"padding: 10px 0; border-bottom: 1px solid #dcfce7; color: #555;\">{{ $json.auditData.instanceSettings.telemetry.diagnosticsEnabled ? '✅ Enabled' : '❌ Disabled' }}</td></tr>\n        <tr><td style=\"padding: 10px 0; font-weight: 500; color: #555;\">Excluded Nodes</td><td style=\"padding: 10px 0; font-family: monospace; font-size: 12px; color: #555;\">{{ $json.auditData.instanceSettings.nodes.nodesExclude || 'None' }}</td></tr>\n      </tbody>\n    </table>\n  </div>\n\n  <div style=\"background: #ffffff; border: 1px solid #dbdfe7; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0px 4px 16px 0px rgba(99, 77, 255, 0.06);\">\n    <h3 style=\"margin: 0 0 16px 0; color: #525356; font-size: 16px; font-weight: 600;\">📝 Full Report</h3>\n    <div style=\"background: #f8fafc; padding: 20px; border-radius: 8px; font-size: 13px; line-height: 1.8; color: #555; max-height: 500px; overflow-y: auto; border: 1px solid #e2e8f0;\">\n      <div style=\"white-space: pre-wrap;\">{{ $json.aiAnalysis.fullReport.replace(/##\\s+/g, '\\n\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n').replace(/\\*\\*([^*]+)\\*\\*/g, '▸ $1').replace(/^- /gm, '  • ') }}</div>\n    </div>\n  </div>\n\n  <div style=\"text-align: center; padding: 24px; color: #7e8186; font-size: 13px; border-top: 1px solid #dbdfe7; margin-top: 32px;\">\n    <p style=\"margin: 0;\">Report generated by n8n Security Audit Workflow</p>\n    <p style=\"margin: 8px 0 0 0; font-family: monospace; font-size: 12px;\">Report ID: AUDIT-{{ Date.now() }}</p>\n  </div>\n\n</div>"
+        },
+        "typeVersion": 2.3
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Get Audit Data": {
+        "main": [
+          [
+            {
+              "node": "Prepare Audit Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "gemini-2.f-flash": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Report Generator",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "On form submission": {
+        "main": [
+          [
+            {
+              "node": "Get Audit Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Audit Data": {
+        "main": [
+          [
+            {
+              "node": "AI Report Generator",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Report Generator": {
+        "main": [
+          [
+            {
+              "node": "Format Report Output",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format Report Output": {
+        "main": [
+          [
+            {
+              "node": "Display Final Audit Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Structured Output Parser": {
+        "ai_outputParser": [
+          [
+            {
+              "node": "AI Report Generator",
+              "type": "ai_outputParser",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 12,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.form": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.formTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chainLlm": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatGoogleGemini": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.outputParserStructured": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Hatem Gifaeeri",
+    "username": "hatemgifaeeri",
+    "bio": "I help business owners reclaim 15-20 hours per week by automating the boring, repetitive tasks that drain their energy and steal their time. Use my link to book an initial consultation.",
+    "verified": false,
+    "links": [
+      "https://www.linkedin.com/in/hatemgifaeeri/"
+    ],
+    "avatar": "https://gravatar.com/avatar/ac5e7e2b7ad25faa816b3206a11e174ae391d2a46c4dfe45b3cb183ccd18d5c2?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1123,
+      "icon": "fa:link",
+      "name": "@n8n/n8n-nodes-langchain.chainLlm",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.chainllm/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Basic LLM Chain",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "link",
+        "type": "icon"
+      },
+      "displayName": "Basic LLM Chain",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1179,
+      "icon": "fa:code",
+      "name": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "codex": {
+        "data": {
+          "alias": [
+            "json",
+            "zod"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.outputparserstructured/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Output Parsers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Structured Output Parser"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Structured Output Parser",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1225,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.formTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "table",
+            "submit",
+            "post"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.formtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "On form submission"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form Trigger",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1262,
+      "icon": "file:google.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatgooglegemini/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Google Gemini Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgNDggNDgiPjxkZWZzPjxwYXRoIGlkPSJhIiBkPSJNNDQuNSAyMEgyNHY4LjVoMTEuOEMzNC43IDMzLjkgMzAuMSAzNyAyNCAzN2MtNy4yIDAtMTMtNS44LTEzLTEzczUuOC0xMyAxMy0xM2MzLjEgMCA1LjkgMS4xIDguMSAyLjlsNi40LTYuNEMzNC42IDQuMSAyOS42IDIgMjQgMiAxMS44IDIgMiAxMS44IDIgMjRzOS44IDIyIDIyIDIyYzExIDAgMjEtOCAyMS0yMiAwLTEuMy0uMi0yLjctLjUtNCIvPjwvZGVmcz48Y2xpcFBhdGggaWQ9ImIiPjx1c2UgeGxpbms6aHJlZj0iI2EiIG92ZXJmbG93PSJ2aXNpYmxlIi8+PC9jbGlwUGF0aD48cGF0aCBmaWxsPSIjRkJCQzA1IiBkPSJNMCAzN1YxMWwxNyAxM3oiIGNsaXAtcGF0aD0idXJsKCNiKSIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im0wIDExIDE3IDEzIDctNi4xTDQ4IDE0VjBIMHoiIGNsaXAtcGF0aD0idXJsKCNiKSIvPjxwYXRoIGZpbGw9IiMzNEE4NTMiIGQ9Im0wIDM3IDMwLTIzIDcuOSAxTDQ4IDB2NDhIMHoiIGNsaXAtcGF0aD0idXJsKCNiKSIvPjxwYXRoIGZpbGw9IiM0Mjg1RjQiIGQ9Ik00OCA0OCAxNyAyNGwtNC0zIDM1LTEweiIgY2xpcC1wYXRoPSJ1cmwoI2IpIi8+PC9zdmc+"
+      },
+      "displayName": "Google Gemini Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1274,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.form",
+      "codex": {
+        "data": {
+          "alias": [
+            "_Form",
+            "form",
+            "table",
+            "submit",
+            "post",
+            "page",
+            "step",
+            "stage",
+            "multi"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.form/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Form"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 29,
+      "name": "SecOps"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

@@ -1,0 +1,1677 @@
+{
+  "id": 12502,
+  "name": "Analyze failed workflows with Claude via OpenRouter and log to Sheets with Slack, Email, Discord alerts",
+  "views": 54,
+  "recentViews": 0,
+  "totalViews": 54,
+  "createdAt": "2026-01-05T23:42:56.709Z",
+  "description": "## Who is this for\n\nThis workflow is designed for n8n users who manage multiple production workflows and want to:\n- Receive intelligent, actionable error alerts instead of raw stack traces\n- Understand root causes without manually debugging every failure\n- Prevent alert fatigue from repeated similar errors\n- Maintain a searchable log of all workflow errors\n\nIt's ideal for animal advocacy organizations, campaign coordinators, and activists running mission-critical automation workflows for outreach, volunteer coordination, or campaign monitoring.\n\n## What it does\n\nWhen any workflow in your n8n instance fails, this agent automatically:\n1. Captures the error details including workflow name, failed node, error message, and stack trace\n2. Uses AI (via OpenRouter/Claude) to analyze the error and suggest root causes and fixes\n3. Generates a unique error signature for deduplication\n4. Logs the error with AI analysis to Google Sheets for historical tracking\n5. Checks for recent duplicate errors to prevent alert fatigue\n6. Sends enriched notifications through your choice of Slack, Discord, Email, or Webhook\n\nThe AI analysis includes root cause identification, error chain tracing, specific fix recommendations, and a confidence score indicating how certain the analysis is.\n\n## How to set up\n\n1. Import the workflow into your n8n instance\n2. Configure credentials for:\n   - **OpenRouter API** for AI analysis\n   - **Google Sheets** for error logging\n   - **Notification channels** you want to use (Slack, Discord, Gmail, or Webhook URL)\n3. Create a Google Sheet with columns matching the log fields\n4. Update the receiver email addresses in the \"Normalize Error Payload\" node\n5. Enable the workflow\n6. Set this workflow as the error handler for other workflows you want to monitor\n\n## Requirements\n\n- OpenRouter API key (for AI-powered error analysis)\n- Google Sheets OAuth2 credentials\n- At least one notification channel configured (Slack, Discord, Gmail, or custom webhook)\n- n8n instance with Error Trigger capability\n\n## How to customize\n\n- **Change the AI model**: Edit the OpenRouter Chat Model node to use a different LLM\n- **Adjust alert fatigue settings**: Modify the lookback count and time window in the \"Check Alert Fatigue\" code node\n- **Switch logging backend**: Replace the Google Sheets node with PostgreSQL, Notion, or any other storage\n- **Add notification channels**: The workflow sends to multiple channels in parallel - add or remove as needed\n- **Customize email recipients**: Update the receiver emails array in the normalize payload node\n",
+  "workflow": {
+    "id": "sLBblAK-xKcFM5JwQ6dyn",
+    "meta": {
+      "instanceId": "d0d0919ee2a246670c2a80cd2e44e3e0f7b3b2437f3e73af8501f9599a4a888b"
+    },
+    "name": "Analyze failed n8n workflows with AI and send Slack, Email, or Discord alerts",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "fde4bf6f-40b6-473e-9d67-38b2906e2381",
+        "name": "Error Trigger",
+        "type": "n8n-nodes-base.errorTrigger",
+        "position": [
+          880,
+          640
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "29d27254-f33a-404e-bd17-c8186cd1a21d",
+        "name": "Generate Error Signature",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2128,
+          640
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Generate a stable error signature for deduplication\n// Using custom hash function instead of crypto module\n\n// Simple string hash function (djb2 algorithm)\nfunction simpleHash(str) {\n  let hash = 5381;\n  for (let i = 0; i < str.length; i++) {\n    hash = ((hash << 5) + hash) + str.charCodeAt(i); // hash * 33 + c\n    hash = hash & hash; // Convert to 32-bit integer\n  }\n  // Convert to positive hex string\n  return Math.abs(hash).toString(16).padStart(8, '0');\n}\n\n// Get input data\nconst failedNode = $input.item.json.failed_node || '';\nconst errorMessage = $input.item.json.error_message || '';\nconst workflowId = $input.item.json.workflow_id || '';\n\n// Normalize error message by removing variable content\nlet normalizedError = errorMessage\n  .replace(/\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z/g, 'TIMESTAMP') // ISO timestamps\n  .replace(/\\d{13,}/g, 'TIMESTAMP') // Unix timestamps\n  .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, 'UUID') // UUIDs\n  .replace(/\\b\\d+\\b/g, 'NUMBER') // Generic numbers\n  .replace(/\"[^\"]*\"/g, 'STRING') // Quoted strings\n  .replace(/\\s+/g, ' ') // Normalize whitespace\n  .trim();\n\n// Create signature from stable components\nconst signatureInput = `${failedNode}|${normalizedError}|${workflowId}`;\nconst errorSignature = simpleHash(signatureInput);\n\n// Return all input fields plus new fields\nreturn {\n  ...$input.item.json,\n  error_signature: errorSignature,\n  normalized_error: normalizedError\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2bd5467f-178c-4c0b-97ba-0d9636adbf57",
+        "name": "Check Alert Fatigue",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2800,
+          640
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// OPTIONAL: Alert Fatigue Prevention\n// This node checks if the same error has occurred recently to prevent notification spam.\n// You can disable this node if you want to receive all error notifications.\n\n// Configuration\nconst LOOKBACK_COUNT = 10; // Number of recent entries to check\nconst TIME_WINDOW_HOURS = 1; // Time window in hours to check for duplicates\n\n// Get current item data\nconst currentItem = $input.item.json;\nconst currentSignature = currentItem.error_signature;\nconst currentTimestamp = new Date(currentItem.timestamp);\n\n// Get all items from Google Sheets (previous node output)\nconst sheetsData = $('Log to Google Sheets1').all();\n\n// Initialize output fields\nlet alertSuppressed = false;\nlet downgradeUrgency = false;\nlet duplicateCount = 0;\nlet lastOccurrence = null;\n\n// Check recent entries for duplicates\nif (sheetsData && sheetsData.length > 0) {\n  // Get the most recent entries (excluding current one)\n  const recentEntries = sheetsData.slice(-LOOKBACK_COUNT);\n  \n  for (const entry of recentEntries) {\n    const entryData = entry.json;\n    const entrySignature = entryData.error_signature;\n    const entryTimestamp = new Date(entryData.timestamp);\n    \n    // Check if signatures match\n    if (entrySignature === currentSignature) {\n      // Calculate time difference in hours\n      const timeDiffHours = (currentTimestamp - entryTimestamp) / (1000 * 60 * 60);\n      \n      // Check if within time window\n      if (timeDiffHours <= TIME_WINDOW_HOURS) {\n        duplicateCount++;\n        \n        // Update last occurrence if this is more recent\n        if (!lastOccurrence || entryTimestamp > new Date(lastOccurrence)) {\n          lastOccurrence = entryData.timestamp;\n        }\n      }\n    }\n  }\n  \n  // Set suppression flags if duplicates found\n  if (duplicateCount > 0) {\n    alertSuppressed = true;\n    downgradeUrgency = true;\n  }\n}\n\n// Return all input fields plus alert fatigue fields\nreturn {\n  ...currentItem,\n  alert_suppressed: alertSuppressed,\n  downgrade_urgency: downgradeUrgency,\n  duplicate_count: duplicateCount,\n  last_occurrence: lastOccurrence\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "1632fea4-ba7f-4b0d-ac19-3ec2bb7c6d03",
+        "name": "Prepare Log Record",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2352,
+          640
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "id-1",
+                "name": "timestamp",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.timestamp }}"
+              },
+              {
+                "id": "id-2",
+                "name": "workflowName",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.workflow_name }}"
+              },
+              {
+                "id": "id-3",
+                "name": "workflowId",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.workflow_id }}"
+              },
+              {
+                "id": "id-4",
+                "name": "executionId",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.execution_id }}"
+              },
+              {
+                "id": "id-5",
+                "name": "failedNode",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.failed_node }}"
+              },
+              {
+                "id": "id-6",
+                "name": "errorMessage",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.error_message }}"
+              },
+              {
+                "id": "id-7",
+                "name": "errorSignature",
+                "type": "string",
+                "value": "={{ $json.error_signature }}"
+              },
+              {
+                "id": "id-8",
+                "name": "aiRootCause",
+                "type": "string",
+                "value": "={{ $('AI Error Analysis1').item.json.text.split('\\n\\n')[0].substring(0, 500) }}"
+              },
+              {
+                "id": "id-9",
+                "name": "aiFixSummary",
+                "type": "string",
+                "value": "={{ $('AI Error Analysis1').item.json.text.split('\\n\\n')[2]?.substring(0, 500) || 'N/A' }}"
+              },
+              {
+                "id": "id-10",
+                "name": "aiConfidence",
+                "type": "number",
+                "value": "={{ $json.ai_confidence || 0.5 }}"
+              },
+              {
+                "id": "id-11",
+                "name": "severity",
+                "type": "string",
+                "value": "high"
+              },
+              {
+                "id": "id-12",
+                "name": "executionMode",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.execution_mode }}"
+              },
+              {
+                "id": "id-13",
+                "name": "triggerType",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.trigger_type }}"
+              },
+              {
+                "id": "id-14",
+                "name": "environment",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.environment }}"
+              },
+              {
+                "id": "id-15",
+                "name": "inputPayload",
+                "type": "string",
+                "value": "={{ $('Normalize Error Payload1').item.json.input_payload }}"
+              }
+            ]
+          },
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "3ef615f5-885c-477c-82df-17b287ea2183",
+        "name": "Extract AI Confidence",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1904,
+          640
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Extract AI confidence score from the AI analysis output\n// The AI is instructed to output a line like: CONFIDENCE: 0.85\n\nconst inputData = $input.item.json;\nconst aiOutput = inputData.text || inputData.output || '';\n\n// Use regex to find the confidence score\nconst confidenceMatch = aiOutput.match(/CONFIDENCE:\\s*([0-9.]+)/i);\n\nlet aiConfidence = 0.5; // Default confidence if not found\n\nif (confidenceMatch && confidenceMatch[1]) {\n  const parsedConfidence = parseFloat(confidenceMatch[1]);\n  // Validate that it's a number between 0 and 1\n  if (!isNaN(parsedConfidence) && parsedConfidence >= 0 && parsedConfidence <= 1) {\n    aiConfidence = parsedConfidence;\n  }\n}\n\n// Return all input fields plus the extracted confidence score\nreturn {\n  ...inputData,\n  ai_confidence: aiConfidence\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "84fd0d60-d271-4ec3-9961-e4727fe8a06c",
+        "name": "Normalize Error Payload1",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          1104,
+          640
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "id-1",
+                "name": "workflow_name",
+                "type": "string",
+                "value": "={{ $json.workflow.name }}"
+              },
+              {
+                "id": "id-2",
+                "name": "workflow_id",
+                "type": "string",
+                "value": "={{ $json.workflow.id }}"
+              },
+              {
+                "id": "id-3",
+                "name": "execution_id",
+                "type": "string",
+                "value": "={{ $json.execution.id }}"
+              },
+              {
+                "id": "id-4",
+                "name": "execution_mode",
+                "type": "string",
+                "value": "={{ $json.execution.mode }}"
+              },
+              {
+                "id": "id-5",
+                "name": "failed_node",
+                "type": "string",
+                "value": "={{ $json.execution.lastNodeExecuted }}"
+              },
+              {
+                "id": "id-6",
+                "name": "error_message",
+                "type": "string",
+                "value": "={{ $json.execution.error.message }}"
+              },
+              {
+                "id": "id-7",
+                "name": "error_stack",
+                "type": "string",
+                "value": "={{ $json.execution.error.stack || 'N/A' }}"
+              },
+              {
+                "id": "id-8",
+                "name": "timestamp",
+                "type": "string",
+                "value": "={{ $now.toISO() }}"
+              },
+              {
+                "id": "0c1a8386-a882-4ab1-ad20-d15d4582d961",
+                "name": "receiver emails",
+                "type": "array",
+                "value": "=[]"
+              },
+              {
+                "id": "id-9",
+                "name": "trigger_type",
+                "type": "string",
+                "value": "={{ $json.execution.data?.triggerData?.type || 'unknown' }}"
+              },
+              {
+                "id": "id-10",
+                "name": "input_payload",
+                "type": "string",
+                "value": "={{ JSON.stringify($json.execution.data?.startData?.destinationNode ? $json.execution.data.startData : {}, null, 2).substring(0, 1000) }}"
+              },
+              {
+                "id": "id-11",
+                "name": "environment",
+                "type": "string",
+                "value": "production"
+              }
+            ]
+          },
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "e56d7473-23d8-4755-a7ae-452c8387c36f",
+        "name": "AI Error Analysis1",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          1552,
+          640
+        ],
+        "parameters": {
+          "text": "=You are analyzing a workflow execution error. Below is the complete context:\n\n## WORKFLOW DEFINITION\n```json\n{{ $json.workflow_json }}\n```\n\n## EXECUTION DETAILS\n```json\n{{ $json.execution_json }}\n```\n\n## ERROR INFORMATION\n- **Failed Node**: {{ $json.failed_node }}\n- **Error Message**: {{ $json.error_message }}\n- **Error Stack**: {{ $json.error_stack }}\n- **Timestamp**: {{ $json.timestamp }}\n\n## REPRODUCTION CONTEXT\n- **Trigger Type**: {{ $json.trigger_type }}\n- **Execution Mode**: {{ $json.execution_mode }}\n- **Environment**: {{ $json.environment }}\n- **Input Payload**: {{ $json.input_payload }}\n\nPlease provide a comprehensive analysis including:\n\n1. **Root Cause**: What is the fundamental reason this error occurred?\n\n2. **Error Chain Tracing**: Trace the execution path that led to this failure, identifying which nodes were involved and how data flowed between them.\n\n3. **Precise Fix Steps**: Provide specific, actionable steps to fix this error. Include:\n   - Exact node names that need to be modified\n   - Specific fields/parameters to change\n   - Recommended values or configurations\n   - Any new nodes that should be added\n\n4. **Prevention Strategies**: Suggest how to prevent similar errors in the future, including:\n   - Validation checks to add\n   - Error handling improvements\n   - Best practices to follow\n\n5. **Confidence Assessment**: Rate your confidence in this analysis from 0.0 to 1.0, where 1.0 means you are certain about the root cause and fix. Output this as a single line: CONFIDENCE: [score]\n\nProvide your analysis in a clear, structured format.",
+          "batching": {},
+          "promptType": "define"
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "e4e51024-1629-43df-a2c9-c98607990e42",
+        "name": "Send Email1",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          3024,
+          640
+        ],
+        "webhookId": "dfe10f33-3060-4780-9a10-07d2025e0fa3",
+        "parameters": {
+          "sendTo": "={{ $('Normalize Error Payload1').item.json['receiver emails'].join(', ') }}",
+          "message": "=<h2>🚨 Workflow Error Alert</h2>\n\n<p><strong>Workflow Name:</strong> {{ $('Normalize Error Payload1').item.json.workflow_name }}</p>\n<p><strong>Failed Node:</strong> {{ $('Normalize Error Payload1').item.json.failed_node }}</p>\n<p><strong>Error Message:</strong> {{ $('Normalize Error Payload1').item.json.error_message }}</p>\n<p><strong>Execution ID:</strong> {{ $('Normalize Error Payload1').item.json.execution_id }}</p>\n<p><strong>Timestamp:</strong> {{ $('Normalize Error Payload1').item.json.timestamp }}</p>\n<p><strong>Error Signature:</strong> {{ $('Generate Error Signature').item.json.error_signature }}</p>\n\n<hr>\n\n<h3>🔄 Reproduction Context</h3>\n<p><strong>Execution Mode:</strong> {{ $('Normalize Error Payload1').item.json.execution_mode }}</p>\n<p><strong>Error Stack:</strong></p>\n<pre>{{ $('Normalize Error Payload1').item.json.error_stack }}</pre>\n\n<hr>\n\n<h3>🤖 AI Analysis {{ $('Check Alert Fatigue').item.json.ai_confidence < 0.6 ? '(⚠️ Low Confidence: ' + ($('Check Alert Fatigue').item.json.ai_confidence * 100).toFixed(0) + '%)' : '(Confidence: ' + ($('Check Alert Fatigue').item.json.ai_confidence * 100).toFixed(0) + '%)' }}</h3>\n<pre>{{ $('AI Error Analysis1').item.json.text }}</pre>\n\n<hr>\n\n<p><a href=\"https://sacogov.app.n8n.cloud/workflow/{{ $('Normalize Error Payload1').item.json.workflow_id }}/executions/{{ $('Normalize Error Payload1').item.json.execution_id }}\">View Execution Details</a></p>",
+          "options": {},
+          "subject": "=[n8n Error]{{ $('Check Alert Fatigue').item.json.ai_confidence < 0.6 ? '[⚠️ Low Confidence]' : '[High]' }} Workflow \"{{ $('Normalize Error Payload1').item.json.workflow_name }}\" failed"
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "d018b3ff-2296-40b0-a3d1-3f49820bd644",
+        "name": "OpenRouter Chat Model1",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+        "position": [
+          1632,
+          864
+        ],
+        "parameters": {
+          "model": "anthropic/claude-3.5-sonnet",
+          "options": {}
+        },
+        "credentials": {
+          "openRouterApi": {
+            "id": "bXzeDNe3czHzToYH",
+            "name": "Reddit Replies"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0e0bba81-2708-490c-b518-e0825175b0cc",
+        "name": "Log to Google Sheets1",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2576,
+          640
+        ],
+        "parameters": {
+          "columns": {
+            "value": {},
+            "schema": [],
+            "mappingMode": "autoMapInputData",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1OgkqYM1vYDi5bLrxfOBete2Og7hL8JVjBAvfskXZk5Y/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1OgkqYM1vYDi5bLrxfOBete2Og7hL8JVjBAvfskXZk5Y",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1OgkqYM1vYDi5bLrxfOBete2Og7hL8JVjBAvfskXZk5Y/edit?usp=drivesdk",
+            "cachedResultName": "Test Test Test"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "OnREAVMrotNp4kqA",
+            "name": "Google Sheets - sam@openpaws.ai"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "df5c4a8a-6517-4d0b-bc94-a87f607b5904",
+        "name": "Send Slack Message1",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          3248,
+          448
+        ],
+        "webhookId": "3595315c-9c3a-4e72-a1fb-9a23950e339a",
+        "parameters": {
+          "text": "=🚨 *Workflow Error Alert*{{ $json.downgrade_urgency ? ' (Recurring)' : '' }}\n\n*Workflow:* {{ $('Normalize Error Payload1').item.json.workflow_name }}\n*Failed Node:* {{ $('Normalize Error Payload1').item.json.failed_node }}\n*Error Message:* {{ $('Normalize Error Payload1').item.json.error_message }}\n*Error Signature:* `{{ $json.error_signature }}`\n\n*🤖 AI Root Cause Summary:* {{ $json.ai_confidence >= 0.8 ? '🟢' : $json.ai_confidence >= 0.5 ? '🟡' : '🔴' }}\n{{ $('AI Error Analysis1').item.json.output.split('\\n').slice(0, 5).join('\\n') }}\n\n*Reproduction Context:*\n{{ $json.reproduction_context }}\n\n*Execution ID:* {{ $('Normalize Error Payload1').item.json.execution_id }}\n\n<https://sacogov.app.n8n.cloud/workflow/{{ $('Normalize Error Payload1').item.json.workflow_id }}/executions/{{ $('Normalize Error Payload1').item.json.execution_id }}|View Execution Details>",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "<__PLACEHOLDER_VALUE__Slack Channel ID or Name__>"
+          },
+          "otherOptions": {}
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "f022b0c6-9d5f-4587-bd33-e56fd3629ab8",
+        "name": "Send Discord Message1",
+        "type": "n8n-nodes-base.discord",
+        "position": [
+          3248,
+          640
+        ],
+        "webhookId": "25a623c4-9aa1-49be-80a8-b3efdbb0a051",
+        "parameters": {
+          "content": "=🚨 **Workflow Error Alert**\n\n**Workflow Name:** {{ $('Normalize Error Payload1').item.json.workflow_name }}\n**Failed Node:** {{ $('Normalize Error Payload1').item.json.failed_node }}\n**Error Message:** {{ $('Normalize Error Payload1').item.json.error_message }}\n**Execution ID:** {{ $('Normalize Error Payload1').item.json.execution_id }}\n**Error Signature:** {{ $('Generate Error Signature').item.json.error_signature }}\n\n---\n\n**🤖 AI Analysis Summary:**\n{{ $('AI Error Analysis1').item.json.output.substring(0, 500) }}...\n\n**Confidence Level:** {{ $('Generate Error Signature').item.json.ai_confidence >= 0.8 ? '🟢 High' : ($('Generate Error Signature').item.json.ai_confidence >= 0.5 ? '🟡 Medium' : '🔴 Low') }}\n\n**Reproduction Context:**\n{{ $('Prepare Log Record').item.json.reproduction_context }}\n\n{{ $('Check Alert Fatigue').item.json.downgrade_urgency ? '⚠️ Note: Similar error detected recently - urgency downgraded' : '' }}\n\n[View Full Execution](https://sacogov.app.n8n.cloud/workflow/{{ $('Normalize Error Payload1').item.json.workflow_id }}/executions/{{ $('Normalize Error Payload1').item.json.execution_id }})",
+          "options": {},
+          "authentication": "webhook"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "4bd4bb7d-2b51-471b-864a-ece92c884b48",
+        "name": "Webhook Notification1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          3248,
+          832
+        ],
+        "parameters": {
+          "url": "<__PLACEHOLDER_VALUE__Webhook URL__>",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "workflow_name",
+                "value": "={{ $('Normalize Error Payload1').item.json.workflow_name }}"
+              },
+              {
+                "name": "failed_node",
+                "value": "={{ $('Normalize Error Payload1').item.json.failed_node }}"
+              },
+              {
+                "name": "error_message",
+                "value": "={{ $('Normalize Error Payload1').item.json.error_message }}"
+              },
+              {
+                "name": "ai_analysis",
+                "value": "={{ $('AI Error Analysis1').item.json.output }}"
+              },
+              {
+                "name": "execution_id",
+                "value": "={{ $('Normalize Error Payload1').item.json.execution_id }}"
+              },
+              {
+                "name": "timestamp",
+                "value": "={{ $('Normalize Error Payload1').item.json.timestamp }}"
+              },
+              {
+                "name": "error_signature",
+                "value": "={{ $json.error_signature }}"
+              },
+              {
+                "name": "ai_confidence",
+                "value": "={{ $json.ai_confidence }}"
+              },
+              {
+                "name": "reproduction_context",
+                "value": "={{ JSON.stringify({ trigger_type: $json.trigger_type, execution_mode: $json.execution_mode, environment: $json.environment }) }}"
+              },
+              {
+                "name": "alert_suppressed",
+                "value": "={{ $json.alert_suppressed }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "e72f26c2-7cd2-4614-b168-55c42dafa01e",
+        "name": "Prepare AI Context1",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1328,
+          640
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// ============================================================================\n// GREEDY MIDDLE-OUT CONTEXT EXTRACTION ALGORITHM\n// ============================================================================\n// \n// PURPOSE:\n// When workflows fail, we need to send context to an AI for analysis.\n// However, full workflow/execution dumps can be massive (100K+ chars),\n// exceeding LLM context windows and wasting tokens on irrelevant data.\n//\n// STRATEGY:\n// Instead of dumping everything, we use a \"middle-out\" approach:\n// 1. Start at the FAILED NODE (the epicenter of the error)\n// 2. Expand outward in \"hops\" - first direct connections, then their connections\n// 3. For each node, include: definition, parameters, input data, output data\n// 4. Stop when we hit our character budget (default 50K chars)\n// 5. NEVER truncate mid-node - either include a full node or skip it\n//\n// WHY THIS WORKS:\n// - The failed node and its immediate neighbors contain 90% of relevant context\n// - Distant nodes are rarely relevant to the root cause\n// - This gives AI the \"smoking gun\" without drowning it in noise\n// - We respect token limits while maximizing signal-to-noise ratio\n//\n// ============================================================================\n\nconst MAX_CONTEXT_CHARS = 50000; // Configurable budget - adjust based on your LLM\n\n// Get input data from previous node\nconst inputData = $input.item.json;\nconst failedNode = inputData.failed_node;\n\n// Parse workflow and execution JSON from error trigger\nlet workflowData, executionData;\ntry {\n  workflowData = inputData.workflow || {};\n  executionData = inputData.execution || {};\n} catch (e) {\n  // Fallback if parsing fails\n  return {\n    ...inputData,\n    workflow_json: JSON.stringify({ error: 'Failed to parse workflow data' }),\n    execution_json: JSON.stringify({ error: 'Failed to parse execution data' })\n  };\n}\n\n// ============================================================================\n// STEP 1: BUILD NODE CONNECTION GRAPH\n// ============================================================================\n// We need to know which nodes connect to which, so we can expand outward\n\nconst nodeConnections = new Map(); // node_name -> Set of connected node names\nconst nodeDefinitions = new Map(); // node_name -> node definition\n\n// Parse workflow nodes\nif (workflowData.nodes) {\n  workflowData.nodes.forEach(node => {\n    nodeDefinitions.set(node.name, node);\n    nodeConnections.set(node.name, new Set());\n  });\n}\n\n// Parse connections to build adjacency graph\nif (workflowData.connections) {\n  Object.keys(workflowData.connections).forEach(sourceNode => {\n    const connections = workflowData.connections[sourceNode];\n    if (connections.main) {\n      connections.main.forEach(outputConnections => {\n        if (outputConnections) {\n          outputConnections.forEach(conn => {\n            // Add bidirectional edges (we want to traverse both ways)\n            nodeConnections.get(sourceNode)?.add(conn.node);\n            nodeConnections.get(conn.node)?.add(sourceNode);\n          });\n        }\n      });\n    }\n  });\n}\n\n// ============================================================================\n// STEP 2: EXTRACT EXECUTION DATA FOR EACH NODE\n// ============================================================================\n// Get the actual input/output data from the execution\n\nconst nodeExecutionData = new Map(); // node_name -> execution data\n\nif (executionData.data && executionData.data.resultData) {\n  const runData = executionData.data.resultData.runData || {};\n  Object.keys(runData).forEach(nodeName => {\n    nodeExecutionData.set(nodeName, runData[nodeName]);\n  });\n}\n\n// ============================================================================\n// STEP 3: GREEDY MIDDLE-OUT EXPANSION\n// ============================================================================\n// Start from failed node, expand outward hop by hop until budget exhausted\n\nconst includedNodes = new Set();\nconst nodesToProcess = [failedNode]; // Queue for BFS traversal\nconst processedNodes = new Set();\nlet currentHop = 0;\nlet totalChars = 0;\n\n// Helper function to estimate size of a node's context\nfunction estimateNodeSize(nodeName) {\n  let size = 0;\n  \n  // Node definition size\n  const nodeDef = nodeDefinitions.get(nodeName);\n  if (nodeDef) {\n    size += JSON.stringify(nodeDef).length;\n  }\n  \n  // Execution data size\n  const execData = nodeExecutionData.get(nodeName);\n  if (execData) {\n    size += JSON.stringify(execData).length;\n  }\n  \n  return size;\n}\n\n// BFS traversal with budget constraint\nwhile (nodesToProcess.length > 0 && currentHop < 10) { // Max 10 hops as safety\n  const currentLevelSize = nodesToProcess.length;\n  const nextLevel = [];\n  \n  // Process all nodes at current hop level\n  for (let i = 0; i < currentLevelSize; i++) {\n    const nodeName = nodesToProcess.shift();\n    \n    if (processedNodes.has(nodeName)) continue;\n    processedNodes.add(nodeName);\n    \n    // Check if adding this node would exceed budget\n    const nodeSize = estimateNodeSize(nodeName);\n    \n    if (totalChars + nodeSize <= MAX_CONTEXT_CHARS) {\n      // We have budget - include this node\n      includedNodes.add(nodeName);\n      totalChars += nodeSize;\n      \n      // Add neighbors to next level\n      const neighbors = nodeConnections.get(nodeName) || new Set();\n      neighbors.forEach(neighbor => {\n        if (!processedNodes.has(neighbor)) {\n          nextLevel.push(neighbor);\n        }\n      });\n    } else {\n      // Budget exhausted - stop expansion\n      break;\n    }\n  }\n  \n  // Move to next hop level\n  nodesToProcess.push(...nextLevel);\n  currentHop++;\n  \n  // If we couldn't add any nodes this level, stop\n  if (nextLevel.length === 0) break;\n}\n\n// ============================================================================\n// STEP 4: BUILD FILTERED WORKFLOW AND EXECUTION JSON\n// ============================================================================\n// Only include nodes that made it into our budget\n\n// Filter workflow nodes\nconst filteredNodes = [];\nincludedNodes.forEach(nodeName => {\n  const nodeDef = nodeDefinitions.get(nodeName);\n  if (nodeDef) {\n    filteredNodes.push(nodeDef);\n  }\n});\n\n// Filter workflow connections\nconst filteredConnections = {};\nif (workflowData.connections) {\n  Object.keys(workflowData.connections).forEach(sourceNode => {\n    if (includedNodes.has(sourceNode)) {\n      const connections = workflowData.connections[sourceNode];\n      const filteredNodeConnections = { main: [] };\n      \n      if (connections.main) {\n        connections.main.forEach(outputConnections => {\n          if (outputConnections) {\n            const filtered = outputConnections.filter(conn => \n              includedNodes.has(conn.node)\n            );\n            filteredNodeConnections.main.push(filtered.length > 0 ? filtered : null);\n          } else {\n            filteredNodeConnections.main.push(null);\n          }\n        });\n      }\n      \n      if (filteredNodeConnections.main.some(c => c && c.length > 0)) {\n        filteredConnections[sourceNode] = filteredNodeConnections;\n      }\n    }\n  });\n}\n\n// Build filtered workflow JSON\nconst filteredWorkflow = {\n  ...workflowData,\n  nodes: filteredNodes,\n  connections: filteredConnections,\n  _context_metadata: {\n    extraction_method: 'middle-out',\n    failed_node: failedNode,\n    hops_included: currentHop,\n    nodes_included: includedNodes.size,\n    total_nodes: nodeDefinitions.size,\n    estimated_chars: totalChars,\n    budget_chars: MAX_CONTEXT_CHARS\n  }\n};\n\n// Filter execution data\nconst filteredRunData = {};\nincludedNodes.forEach(nodeName => {\n  const execData = nodeExecutionData.get(nodeName);\n  if (execData) {\n    filteredRunData[nodeName] = execData;\n  }\n});\n\nconst filteredExecution = {\n  ...executionData,\n  data: {\n    ...executionData.data,\n    resultData: {\n      ...executionData.data?.resultData,\n      runData: filteredRunData\n    }\n  },\n  _context_metadata: {\n    extraction_method: 'middle-out',\n    nodes_included: includedNodes.size\n  }\n};\n\n// ============================================================================\n// STEP 5: RETURN RESULTS\n// ============================================================================\n// Return all input fields plus our extracted context\n\nreturn {\n  ...inputData,\n  workflow_json: JSON.stringify(filteredWorkflow, null, 2),\n  execution_json: JSON.stringify(filteredExecution, null, 2),\n  _extraction_stats: {\n    nodes_included: Array.from(includedNodes),\n    hops_traversed: currentHop,\n    total_chars: totalChars,\n    budget_chars: MAX_CONTEXT_CHARS,\n    compression_ratio: (totalChars / (JSON.stringify(workflowData).length + JSON.stringify(executionData).length)).toFixed(2)\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0b436351-63d9-451f-ab6e-51cbbf7fbac0",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          896,
+          -64
+        ],
+        "parameters": {
+          "width": 832,
+          "height": 592,
+          "content": "#  Analyze failed n8n workflows with AI and send Slack, Email, or Discord alerts\n\n## How it works\n\nThis workflow automatically runs whenever an n8n workflow fails.\nIt captures the error details, sends them to an AI model for analysis,\nand generates a clear explanation of what went wrong, why it happened,\nand how it can be fixed.\n\nThe workflow then logs the error and sends notifications to selected\nchannels such as Slack, Email, or Discord. It also includes basic\nalert fatigue control to avoid sending repeated alerts for the same issue.\n\n## Setup steps\n\n1. Add your AI provider credentials (OpenAI or OpenRouter).\n2. Configure notification channels (Slack, Email, Discord, or Webhook).\n3. (Optional) Enable Google Sheets or another database for error logging.\n4. Activate the workflow to start monitoring failures.\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "467757b2-227e-4106-a40a-d10f46de4b47",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1760,
+          -64
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 624,
+          "height": 400,
+          "content": "## 🔐 Credentials Required\n\nThis workflow uses:\n- **OpenRouter API** — for AI root-cause analysis  \n- **Google Sheets** — for centralized error logging  \n- **Slack / Discord / Email credentials** — for notifications  \n- Optional **Webhook URL** for external integrations  \n\nNo credentials are included.  \nUsers must add their own before running the workflow.\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "cd5b6a6a-fd48-4f14-b1b0-1ca95f8520cb",
+    "connections": {
+      "Send Email1": {
+        "main": [
+          [
+            {
+              "node": "Send Slack Message1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Send Discord Message1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Webhook Notification1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Error Trigger": {
+        "main": [
+          [
+            {
+              "node": "Normalize Error Payload1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Error Analysis1": {
+        "main": [
+          [
+            {
+              "node": "Extract AI Confidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Log Record": {
+        "main": [
+          [
+            {
+              "node": "Log to Google Sheets1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Alert Fatigue": {
+        "main": [
+          [
+            {
+              "node": "Send Email1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare AI Context1": {
+        "main": [
+          [
+            {
+              "node": "AI Error Analysis1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract AI Confidence": {
+        "main": [
+          [
+            {
+              "node": "Generate Error Signature",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log to Google Sheets1": {
+        "main": [
+          [
+            {
+              "node": "Check Alert Fatigue",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenRouter Chat Model1": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Error Analysis1",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Error Signature": {
+        "main": [
+          [
+            {
+              "node": "Prepare Log Record",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Error Payload1": {
+        "main": [
+          [
+            {
+              "node": "Prepare AI Context1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 16,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.discord": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 2
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.errorTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chainLlm": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenRouter": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Open Paws",
+    "username": "openpaws",
+    "bio": "Open Paws is a nonprofit building open-source AI tools to accelerate animal advocacy. \n\nWe create machine learning models and automation workflows trained on real-world campaign data to help end industrial animal exploitation. \n\nAll tools are free, transparent, and designed for real-world impact.",
+    "verified": true,
+    "links": [
+      "https://www.openpaws.ai/"
+    ],
+    "avatar": "https://gravatar.com/avatar/c23bc104617a5a562fe9efe0dad98e78652efd6171b81a960cbbcdf236d09cc8?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 12,
+      "icon": "fa:bug",
+      "name": "n8n-nodes-base.errorTrigger",
+      "codex": {
+        "data": {
+          "details": "In n8n, when a workflow execution fails, it can start another workflow. This second workflow can be any arbitrary workflow on your n8n instance. Use the Error Trigger node as your Trigger in the Error workflow.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/creating-error-workflows-in-n8n/",
+                "icon": "🌪",
+                "label": "Creating Error Workflows in n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.errortrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Error Trigger",
+        "color": "#0000FF"
+      },
+      "iconData": {
+        "icon": "bug",
+        "type": "icon"
+      },
+      "displayName": "Error Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "icon": "file:discord.svg",
+      "name": "n8n-nodes-base.discord",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.discord/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/discord/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Discord"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTk5IiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzU4NjVGMiIgZD0iTTIxNi44NTYgMTYuNTk3QTIwOC41IDIwOC41IDAgMCAwIDE2NC4wNDIgMGMtMi4yNzUgNC4xMTMtNC45MzMgOS42NDUtNi43NjYgMTQuMDQ2cS0yOS41MzgtNC40NDItNTguNTMzIDBjLTEuODMyLTQuNC00LjU1LTkuOTMzLTYuODQ2LTE0LjA0NmEyMDcuOCAyMDcuOCAwIDAgMC01Mi44NTUgMTYuNjM4QzUuNjE4IDY3LjE0Ny0zLjQ0MyAxMTYuNCAxLjA4NyAxNjQuOTU2YzIyLjE2OSAxNi41NTUgNDMuNjUzIDI2LjYxMiA2NC43NzUgMzMuMTkzQTE2MSAxNjEgMCAwIDAgNzkuNzM1IDE3NS4zYTEzNi40IDEzNi40IDAgMCAxLTIxLjg0Ni0xMC42MzIgMTA5IDEwOSAwIDAgMCA1LjM1Ni00LjIzN2M0Mi4xMjIgMTkuNzAyIDg3Ljg5IDE5LjcwMiAxMjkuNTEgMGExMzIgMTMyIDAgMCAwIDUuMzU1IDQuMjM3IDEzNiAxMzYgMCAwIDEtMjEuODg2IDEwLjY1M2M0LjAwNiA4LjAyIDguNjM4IDE1LjY3IDEzLjg3MyAyMi44NDggMjEuMTQyLTYuNTggNDIuNjQ2LTE2LjYzNyA2NC44MTUtMzMuMjEzIDUuMzE2LTU2LjI4OC05LjA4LTEwNS4wOS0zOC4wNTYtMTQ4LjM2TTg1LjQ3NCAxMzUuMDk1Yy0xMi42NDUgMC0yMy4wMTUtMTEuODA1LTIzLjAxNS0yNi4xOHMxMC4xNDktMjYuMiAyMy4wMTUtMjYuMiAyMy4yMzYgMTEuODA0IDIzLjAxNSAyNi4yYy4wMiAxNC4zNzUtMTAuMTQ4IDI2LjE4LTIzLjAxNSAyNi4xOG04NS4wNTEgMGMtMTIuNjQ1IDAtMjMuMDE0LTExLjgwNS0yMy4wMTQtMjYuMThzMTAuMTQ4LTI2LjIgMjMuMDE0LTI2LjJjMTIuODY3IDAgMjMuMjM2IDExLjgwNCAyMy4wMTUgMjYuMiAwIDE0LjM3NS0xMC4xNDggMjYuMTgtMjMuMDE1IDI2LjE4Ii8+PC9zdmc+"
+      },
+      "displayName": "Discord",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1123,
+      "icon": "fa:link",
+      "name": "@n8n/n8n-nodes-langchain.chainLlm",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.chainllm/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Basic LLM Chain",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "link",
+        "type": "icon"
+      },
+      "displayName": "Basic LLM Chain",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1281,
+      "icon": "file:openrouter.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenrouter/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenRouter Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyBmaWxsPSIjOTRBM0I4IiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCIgdmlld0JveD0iMCAwIDI0IDI0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjx0aXRsZT5PcGVuUm91dGVyPC90aXRsZT48cGF0aCBkPSJNMTYuODA0IDEuOTU3bDcuMjIgNC4xMDV2LjA4N0wxNi43MyAxMC4yMWwuMDE3LTIuMTE3LS44MjEtLjAzYy0xLjA1OS0uMDI4LTEuNjExLjAwMi0yLjI2OC4xMS0xLjA2NC4xNzUtMi4wMzguNTc3LTMuMTQ3IDEuMzUyTDguMzQ1IDExLjAzYy0uMjg0LjE5NS0uNDk1LjMzNi0uNjguNDU1bC0uNTE1LjMyMi0uMzk3LjIzNC4zODUuMjMuNTMuMzM4Yy40NzYuMzE0IDEuMTcuNzk2IDIuNzAxIDEuODY2IDEuMTEuNzc1IDIuMDgzIDEuMTc3IDMuMTQ3IDEuMzUybC4zLjA0NWMuNjk0LjA5MSAxLjM3NS4wOTQgMi44MjUuMDMzbC4wMjItMi4xNTkgNy4yMiA0LjEwNXYuMDg3TDE2LjU4OSAyMmwuMDE0LTEuODYyLS42MzUuMDIyYy0xLjM4Ni4wNDItMi4xMzcuMDAyLTMuMTM4LS4xNjItMS42OTQtLjI4LTMuMjYtLjkyNi00Ljg4MS0yLjA1OWwtMi4xNTgtMS41YTIxLjk5NyAyMS45OTcgMCAwMC0uNzU1LS40OThsLS40NjctLjI4YTU1LjkyNyA1NS45MjcgMCAwMC0uNzYtLjQzQzIuOTA4IDE0LjczLjU2MyAxNC4xMTYgMCAxNC4xMTZWOS44ODhsLjE0LjAwNGMuNTY0LS4wMDcgMi45MS0uNjIyIDMuODA5LTEuMTI0bDEuMDE2LS41OC40MzgtLjI3NGMuNDI4LS4yOCAxLjA3Mi0uNzI2IDIuNjg2LTEuODUzIDEuNjIxLTEuMTMzIDMuMTg2LTEuNzggNC44ODEtMi4wNTkgMS4xNTItLjE5IDEuOTc0LS4yMTMgMy44MTQtLjEzOGwuMDItMS45MDd6Ij48L3BhdGg+PC9zdmc+Cg=="
+      },
+      "displayName": "OpenRouter Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

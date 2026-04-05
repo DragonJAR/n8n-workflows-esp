@@ -1,0 +1,2549 @@
+{
+  "id": 11425,
+  "name": "Create personalized news digests with GPT-5.1, SerpAPI, and Telegram delivery",
+  "views": 154,
+  "recentViews": 0,
+  "totalViews": 154,
+  "createdAt": "2025-12-02T09:00:36.243Z",
+  "description": "## Overview\n\nStaying up to date with fast-moving topics like AI, machine learning, or your specific industry can be overwhelming. You either drown in daily noise or miss important developments between weekly digests.\n\nThis **AI News Agent** workflow delivers a curated newsletter only when there's genuinely relevant news. I use it myself for AI and n8n topics.\n\n**Key features:**\n\n- **AI-driven send decision**: An AI agent evaluates whether today's news is worth sending.\n- **Deduplication**: Compares candidate articles against past newsletters to avoid repetition.\n- **Real-time news**: Uses [SerpAPI's DuckDuckGo News engine](https://serpapi.com/duckduckgo-news-api) for fresh results.\n- **Frequency guardrails**: Configure minimum and maximum days between newsletters.\n\nIn this post, I'll walk you through the complete workflow, explain each component, and show you how to set it up yourself.\n\n## What this workflow does\n\nAt a high level, the AI News Agent:\n\n1. **Fetches fresh news** twice daily via SerpAPI's DuckDuckGo News engine.\n2. **Stores articles** in a persistent data table with automatic deduplication.\n3. **Filters for freshness** - only considers articles newer than your last newsletter.\n4. **Applies frequency guardrails** - respects your min/max sending preferences.\n5. **Makes an editorial decision** - AI evaluates if the news is worth sending.\n6. **Enriches selected articles** - uses Tavily web search for fact-checking and depth.\n7. **Delivers via Telegram** - sends a clean, formatted newsletter.\n8. **Remembers what it sent** - stores each edition to prevent future repetition.\n\nThis allows you to get newsletters **only when there's genuinely relevant news** - in contrast to a fixed schedule.\n\n## Requirements\n\nTo run this workflow, you need:\n\n- **SerpAPI key**  \n  Create an account at [serpapi.com](https://serpapi.com) and generate an API key. They offer 250 free searches/month.\n\n- **Tavily API key**  \n  Sign up at [app.tavily.com](https://app.tavily.com) and create an API key. Generous free tier available.\n\n- **OpenAI API key**  \n  Get one from [OpenAI](https://platform.openai.com) - required for AI agent calls.\n\n- **Telegram bot + chat ID**  \n  A free Telegram bot (via BotFather) and the chat/channel ID where you want the newsletter. See [Telegram's bot tutorial](https://core.telegram.org/bots/tutorial) for setup.\n\n## How it works\n\nThe workflow is organized into five logical stages.\n\n### Stage 1: Schedule & Configuration\n\n- **Schedule Trigger**  \n  Runs the workflow on a cron schedule. Default: `0 0 9,17 * * *` (twice daily at 9:00 and 17:00). These frequent checks enable the AI to send newsletters at these times when it observes actually relevant news, not only once a week.\n_I picked 09:00 and 17:00 as natural check‑in points at the start and end of a typical workday, so you see updates when you’re most likely to read them without being interrupted in the middle of deep work. With SerpAPI’s 250 free searches/month, running twice per day with a small set of topics (e.g. 2–3) keeps you comfortably below the limit; if you add more topics or increase the schedule frequency, either tighten the cron window or move to a paid SerpAPI plan to avoid hitting the cap._\n\n- **Set topics and language**  \n  A `Set` node that defines your configuration:\n  - `topics`: comma-separated list (e.g., `AI, n8n`)\n  - `language`: output language (e.g., `English`)\n  - `minDaysBetween`: minimum days to wait (0 = no minimum)\n  - `maxDaysBetween`: maximum days without sending (triggers a \"must-send\" fallback)\n\n### Stage 2: Fetch & Store News\n\n- **Build topic queries**  \n  Splits your comma-separated topics into individual search queries:\n_In DuckDuckGo News via SerpAPI, a query like `AI,n8n` looks for news where both “AI” and “n8n” appear. For a niche tool like `n8n`, this is often almost identical to just searching for `n8n` ([docs](https://serpapi.com/duckduckgo-news-api)). It’s therefore better to split the topics, search for each of them separately, and let the AI later decide which news articles to select._\n\n```javascript\nreturn $input.first().json.topics.split(',').map(topic =&gt; ({\n  json: { topic: topic.trim() }\n}));\n```\n\n- **Fetch news from SerpAPI (DuckDuckGo News)**  \n  HTTP Request node calling SerpAPI with:\n  - `engine`: `duckduckgo_news`\n  - `q`: your topic\n  - `df`: `d` (last day)\n  \n  Auth is handled via `httpQueryAuth` credentials with your SerpAPI key.\n_SerpAPI also offers other news engines such as the Google News API ([see here](https://serpapi.com/google-news-api)). DuckDuckGo News is used here because, unlike Google News, it returns an excerpt/snippet in addition to the title, source, and URL ([see here](https://serpapi.com/duckduckgo-news-api))—giving the AI more context to work with._\n_Another option is NewsAPI, but its [free tier delays articles by 24 hours](https://newsapi.org/pricing), so you miss the freshness window that makes these twice-daily checks valuable. DuckDuckGo News through SerpAPI keeps the workflow real-time without that lag._\n_n8n has official SerpAPI nodes, but as of writing there is no dedicated node for the DuckDuckGo News API. That’s why this workflow uses a custom `HTTP Request` node instead, which works the same under the hood while giving you full control over the DuckDuckGo News parameters._\n\n- **Split SerpAPI results into articles**  \n  Expands the `results` array so each article becomes its own item.\n\n- **Upsert articles into News table**  \n  Stores each article in an n8n data table with fields: `title`, `source`, `url`, `excerpt`, `date`. Uses **upsert** on title + URL to avoid duplicates. Date is normalized to ISO UTC:\n\n```javascript\nDateTime.fromSeconds(Number($json.date), {zone: 'utc'}).toISO()\n```\n\n### Stage 3: Filtering & Frequency Guardrails\n\nThis is where the workflow gets smart about *what* to consider and *when* to send.\n\n- **Get previous newsletters → Sort → Get most recent**  \n  Pulls all editions from the `Newsletters` table and isolates the latest one with its `createdAt` timestamp.\n\n- **Combine articles with last newsletter metadata**  \n  Attaches the last newsletter timestamp to each candidate article.\n\n- **Filter articles newer than last newsletter**  \n  Keeps only articles published *after* the last edition. Uses a safe default date (`2024-01-01`) if no previous newsletter exists:\n\n```javascript\n$json.date_2 &gt; ($json.createdAt_1 || DateTime.fromISO('2024-01-01T00:00:00.000Z'))\n```\n\n- **Stop if last newsletter is too recent**  \n  Compares `createdAt` against your `minDaysBetween` setting. If you're still in the \"too soon to send\" window, the workflow short-circuits here.\n\n### Stage 4: AI Editorial Decision\n\nThis is the core intelligence of the workflow - an AI that decides *whether* to send and *what* to include. This stage is also the actual agentic part of the workflow, where the system makes its own decisions instead of just following a fixed schedule.\n\n- **Aggregate candidate articles for AI**  \n  Bundles today's filtered articles into a compact list with `title`, `excerpt`, `source`, and `url`.\n\n- **Limit previous newsletters to last 5 → Aggregate**  \n  Prepares the last 5 newsletter contents for the AI to check against for repetition.\n\n- **Combine candidate articles with past newsletters**  \n  Merges both lists so the AI sees \"today's candidates\" + \"recent history\" side by side.\n\n- **AI: decide send + select articles**  \n  The heart of the workflow. A GPT-5.1 call with a comprehensive editorial prompt:\n\n```text\nYou are an **AI Newsletter Editor**. Your job is to decide whether today’s newsletter edition should be sent, and to select the best articles.\n\nYou will receive a list of articles with:\n'title', 'excerpt', `source`, `url`.\n\nYou will also receive content of **previously sent newsletters** (markdown).\n\n# Your Tasks\n\n## 1. Decide whether to send the newsletter\n\nOutput \"YES\" only if all of the following are satisfied **OR** the fallback rule applies:\n\n### **Base Criteria**\n\n1. There are **at least 3 meaningful articles**.\n   *Meaningful = not trivial, not purely promotional, not clickbait, contains actual informational value.*\n\n2. Articles must be **non-duplicate and non-overlapping**:\n\n   * Not the same topic/headline rephrased\n   * Not reporting identical events with minor variations\n   * Not the same news covered by multiple sources without distinct insights\n\n3. Articles must be **relevant to the user's topics**:\n   **{{ $('Set topics and language').item.json.topics }}**\n\n4. Articles must be **novel** relative to the **topics in previous newsletters**:\n\n   * Compare against all previous newsletters below\n   * Exclude articles that discuss topics already substantially covered\n\n5. Articles must offer **clear value**:\n\n   * New information\n   * Impact that matters to the user\n   * Insight, analysis, or meaningful expansion\n\n### **Fallback rule: Newsletter frequency requirement**\n\nIf **at least 1 relevant article exists** *and*\nthe last newsletter was sent **more than {{ $('Set topics and language').item.json.maxDaysBetween }} days ago**, then you **MUST** return \"YES\" as a decision even if the other criteria are not completely met.\n\nLast newsletter was sent {{ $('Get most recent newsletter').item.json.createdAt ? Math.floor($now.diff(DateTime.fromISO($('Get most recent newsletter').item.json.createdAt), 'days').days) : 999 }} days ago.\n\n### Otherwise → \"NO\"\n\n## **2. If \"YES\": Select Articles**\n\nSelect the **top 3–5** articles that best fulfill the criteria above.\n\nFor each selected article, output:\n\n* **title** (rewrite for clarity, conciseness, and impact)\n* **summary** (1–2 sentences; written in the output language)\n* **source**\n* **url**\n\nAll summaries **must** be written in:\n**{{ $('Set topics and language').item.json.language }}**\n\n---\n\n# **Output Format (JSON)**\n\n{\n  \"decision\": \"YES or NO\",\n  \"articles\": [\n    {\n      \"title\": \"...\",\n      \"summary\": \"...\",\n      \"source\": \"...\",\n      \"url\": \"...\"\n    }\n  ]\n}\n\nWhen \"decision\": \"NO\", return an empty array for \"articles\".\n\n# **Article Input**\n\nUse these articles:\n\n{{\n  $json.results.map(\n   article =&gt;\n    `Title: ${article.title_2}\n     Excerpt: ${article.excerpt_2}\n     Source: ${article.source_2}\n     URL: ${article.url_2}`\n  ).join('\\n---\\n')\n}}\n\nYou must also consider the topics already covered in previous newsletters to avoid repetition:\n\n{{ $json.newsletters.map(x =&gt; `Newsletter: ${x.content}`).join('\\n---\\n') }}\n```\n\nThe AI outputs structured JSON:\n\n```json\n{\n  \"decision\": \"YES\",\n  \"articles\": [\n    {\n      \"title\": \"...\",\n      \"summary\": \"...\",\n      \"source\": \"...\",\n      \"url\": \"...\"\n    }\n  ]\n}\n```\n\n- **If AI decided to send newsletter**  \n  Routes based on `decision === \"YES\"`. If NO, the workflow ends gracefully.\n\n### Stage 5: Content Enrichment & Delivery\n\n- **Split selected articles for enrichment**  \n  Each selected article becomes its own item for individual processing.\n\n- **AI: enrich & write article**  \n  An AI Agent node with GPT-5.1 + Tavily web search tool. For each article:\n\n```text\nYou are a research writer that updates short news summaries into concise, factual articles.\n\n**Input:**\nTitle: {{ $json[\"title\"] }}\nSummary: {{ $json[\"summary\"] }}\nSource: {{ $json[\"source\"] }}\nOriginal URL: {{ $json[\"url\"] }}\nLanguage: {{ $('Set topics and language').item.json.language }}\n\n**Instructions:**\n\n1. Use **Tavily Search** to gather 2–3 reliable, recent, and relevant sources on this topic.\n2. Update the **title** if a more accurate or engaging one exists.\n3. Write **1–2 sentences** summarizing the topic, combining the original summary and information from the new sources.\n4. Return the original source name and url as well.\n\n**Output (JSON):**\n\n{\n  \"title\": \"final article title\",\n  \"content\": \"concise 1–2 sentence article content\",\n  \"source\": \"the name of the original source\",\n  \"url\": \"the url of the original source\"\n}\n\n**Rules:**\n\n* Ensure the topic is relevant, informative, and timely.\n* Translate the article if necessary to comply with the desired language {{ $('Set topics and language').item.json.language }}.\n```\n\nThe **Output Parser** enforces the JSON schema with `title`, `content`, `source`, and `url` fields.\n\n- **Aggregate enriched articles**  \n  Collects all enriched articles back into a single array.\n\n- **Insert newsletter content into Newsletters table**  \n  Stores the final markdown content for future deduplication:\n\n```javascript\n$json.output.map(article =&gt; {\n  const title = JSON.stringify(article.title).slice(1, -1);\n  const content = JSON.stringify(article.content).slice(1, -1);\n  const source = JSON.stringify(article.source).slice(1, -1);\n  const url = JSON.stringify(article.url).slice(1, -1);\n  return `*${title}*\\n${content}\\nSource: [${source}](${url})`;\n}).join('\\n\\n')\n```\n\n- **Send newsletter to Telegram**  \n  Sends the formatted newsletter to your Telegram chat/channel.\n\n## Why this workflow is powerful\n\n- **Intelligent send decisions**  \n  The AI evaluates news quality before sending, leading to a less noisy and more relevant news digest.\n\n- **Memory across editions**  \n  By persisting newsletters and comparing against history, the workflow avoids repetition.\n\n- **Frequency guardrails with flexibility**  \n  Set boundaries (e.g., \"at least 1 day between sends\" and \"must send within 5 days\"), but let the AI decide the optimal moment within those bounds.\n\n- **Source-level deduplication**  \n  The news table with upsert prevents the same article from being considered multiple times across runs.\n\n- **Grounded in facts**  \n  SerpAPI provides real news sources; Tavily enriches with additional verification. The newsletter stays factual.\n\n- **Configurable and extensible**  \n  Change topics, language, frequency - all in one `Set` node. In addition, the workflow is modular, allowing to add new news sources or new delivery channels without touching the core logic.\n\n## Configuration guide\n\nTo customize this workflow for your needs:\n\n1. **Topics and language**  \n   Open `Set topics and language` and modify:\n   - `topics`: your interests (e.g., `machine learning, startups, TypeScript`)\n   - `language`: your preferred output language\n\n2. **Frequency settings**  \n   - `minDaysBetween`: minimum days between newsletters (0 = no limit)\n   - `maxDaysBetween`: maximum gap before forcing a send\n   - For very high-volume topics (such as `\"AI\"`), expect the workflow to send almost every time once `minDaysBetween` has passed, because the content-quality criteria are usually met.\n\n3. **Schedule**  \n   Modify the `Schedule Trigger` cron expression. Default runs twice daily at 9:00 am and 5:00 pm; adjust to your preference.\n\n4. **Telegram**  \n   Update the `chatId` in the Telegram node to your chat/channel.\n\n5. **Credentials**  \n   Set up credentials for: SerpAPI (httpQueryAuth), Tavily, OpenAI, Telegram.\n\n## Next steps and improvements\n\nHere are concrete directions to take this workflow further:\n\n- **Multi-agent architecture**  \n  Split the current AI calls into specialized agents: signal detection, relevance scoring, editorial decision, content enhancement, and formatting - each with a single responsibility.\n\n- **1:1 personalization**  \n  Move from static topics to weighted preferences. Learn from click behavior and feedback.\n\n- **Telegram feedback buttons**  \n  Add inline buttons (👍 Useful / 👎 Not relevant / 🔎 More like this) and feed signals back into ranking.\n\n- **Email with HTML template**  \n  For more flexibility, send the newsletter via email.\n- **Incorporating other news APIs or RSS feeds**  \n  Add more sources such as other news APIs and RSS feeds from blogs, newsletters, or communities.\n- **Adjust for arxiv paper search and research news**  \n  Swap SerpAPI for arxiv search or other academic sources to obtain a personal research digest newsletter.\n- **Images and thumbnails**  \n  Fetch representative images for each article and include them in the newsletter.\n\n- **Web archive**  \n  Auto-publish each edition as a web page with permalinks.\n\n- **Retry logic and error handling**  \n  Add exponential backoff for external APIs and route failures to an error workflow.\n\n- **Prompt versioning**  \n  Move prompts to a data table with versioning for A/B testing and rollback.\n\n- **Audio and video news**  \n  Use audio or video models for better news communication.\n\n\n## Wrap-up\n\nThis AI News Agent workflow represents a significant evolution from simple scheduled newsletters. By adding **intelligent send decisions**, **historical deduplication**, and **frequency guardrails**, you get a newsletter that respects the quality of available news.\n\nI use this workflow myself to stay informed on AI and automation topics without the overload of daily news or the delayed delivery caused by a fixed newsletter schedule.\n\n\nNeed help with your automations? [Contact me here](https://akribic.com/contact).",
+  "workflow": {
+    "meta": {
+      "instanceId": "33096ba7f58f02bb80c1ae17821e6d79073a6c7ab685cc827f3faacd5f65f9e5",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "30a41334-edc9-46fc-aaba-95712e52bf3e",
+        "name": "Set topics and language",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -880,
+          -368
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "2e1993fe-ae4d-46e0-be9f-6b02a18cc610",
+                "name": "topics",
+                "type": "string",
+                "value": "AI, n8n"
+              },
+              {
+                "id": "2c6e2dad-d54a-4387-9bf5-4751037f99d9",
+                "name": "language",
+                "type": "string",
+                "value": "English"
+              },
+              {
+                "id": "d1b520a6-2be1-4ca4-ac56-bd202cd91db1",
+                "name": "minDaysBetween",
+                "type": "number",
+                "value": 2
+              },
+              {
+                "id": "f77efe55-ab66-465d-aa4e-34e63e8fab17",
+                "name": "maxDaysBetween",
+                "type": "number",
+                "value": 5
+              }
+            ]
+          },
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "54136f01-80b7-4075-859b-54883fd13915",
+        "name": "Build topic queries",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -656,
+          -368
+        ],
+        "parameters": {
+          "jsCode": "return $input.first().json.topics.split(',').map(topic => ({\n  json: { topic: topic.trim() }\n}));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5437a25b-4c4b-43b6-8dd3-422da7fc6856",
+        "name": "Fetch news from SerpAPI (DuckDuckGo News)",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -432,
+          -368
+        ],
+        "parameters": {
+          "url": "https://serpapi.com/search.html",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendQuery": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpQueryAuth",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "engine",
+                "value": "duckduckgo_news"
+              },
+              {
+                "name": "q",
+                "value": "={{ $json.topic }}"
+              },
+              {
+                "name": "df",
+                "value": "d"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpQueryAuth": {
+            "id": "credential-id",
+            "name": "httpQueryAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "96501c79-9e18-4ae1-92df-504a4939ffa2",
+        "name": "Split SerpAPI results into articles",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          -208,
+          -368
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "results"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a118cc21-1454-436a-8f0e-e5104e28d1a9",
+        "name": "Upsert articles into News table",
+        "type": "n8n-nodes-base.dataTable",
+        "position": [
+          16,
+          -368
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "url": "={{ $json.url }}",
+              "date": "={{ DateTime.fromSeconds(Number($json.date), {zone: 'utc'}).toISO() }}",
+              "title": "={{ $json.title }}",
+              "source": "={{ $json.source }}",
+              "excerpt": "={{ $json.excerpt }}"
+            },
+            "schema": [
+              {
+                "id": "title",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "title",
+                "defaultMatch": false
+              },
+              {
+                "id": "source",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "source",
+                "defaultMatch": false
+              },
+              {
+                "id": "url",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "url",
+                "defaultMatch": false
+              },
+              {
+                "id": "excerpt",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "excerpt",
+                "defaultMatch": false
+              },
+              {
+                "id": "date",
+                "type": "dateTime",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "date",
+                "defaultMatch": false
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "title",
+                "keyValue": "={{ $json.title }}"
+              },
+              {
+                "keyName": "url",
+                "keyValue": "={{ $json.url }}"
+              }
+            ]
+          },
+          "options": {
+            "dryRun": false
+          },
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gGl7dr2dlh3davuE",
+            "cachedResultUrl": "/projects/qtrMjn4i49GhWSSe/datatables/gGl7dr2dlh3davuE",
+            "cachedResultName": "News"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "29f24b95-cd08-4141-943d-da16e54a18be",
+        "name": "Get previous newsletters",
+        "type": "n8n-nodes-base.dataTable",
+        "position": [
+          -1104,
+          32
+        ],
+        "parameters": {
+          "operation": "get",
+          "returnAll": true,
+          "dataTableId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "70dNVBaVmekyxH50",
+            "cachedResultUrl": "/projects/qtrMjn4i49GhWSSe/datatables/70dNVBaVmekyxH50",
+            "cachedResultName": "Newsletters"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "2f5f51c0-4b1e-4148-91cb-fb0ae820bd07",
+        "name": "Sort newsletters by newest first",
+        "type": "n8n-nodes-base.sort",
+        "onError": "continueRegularOutput",
+        "position": [
+          -912,
+          32
+        ],
+        "parameters": {
+          "options": {},
+          "sortFieldsUi": {
+            "sortField": [
+              {
+                "order": "descending",
+                "fieldName": "createdAt"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "312b873b-822a-454d-a65a-ac326e887891",
+        "name": "Get most recent newsletter",
+        "type": "n8n-nodes-base.limit",
+        "position": [
+          -720,
+          32
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "4c8a0574-d7a5-40cc-ae0a-7abcfd6ea96f",
+        "name": "Limit previous newsletters to last 5",
+        "type": "n8n-nodes-base.limit",
+        "position": [
+          -1104,
+          480
+        ],
+        "parameters": {
+          "maxItems": 5
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2acf19c2-f0d1-4435-8f83-4b53266a4362",
+        "name": "Aggregate previous newsletters into list",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          -896,
+          480
+        ],
+        "parameters": {
+          "options": {},
+          "aggregate": "aggregateAllItemData",
+          "destinationFieldName": "newsletters"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "eb5e8dc6-4553-45e2-859c-4eccd3464c1f",
+        "name": "Combine articles with last newsletter metadata",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          -496,
+          48
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {
+            "clashHandling": {
+              "values": {
+                "resolveClash": "addSuffix"
+              }
+            }
+          },
+          "combineBy": "combineAll"
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "a605ccda-aa6e-44b6-9e06-a3ce7f04e4bb",
+        "name": "Filter articles newer than last newsletter",
+        "type": "n8n-nodes-base.filter",
+        "position": [
+          -272,
+          48
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "daf65a43-e643-4f64-a4ac-bc562418f4c8",
+                "operator": {
+                  "type": "dateTime",
+                  "operation": "after"
+                },
+                "leftValue": "={{ $json.date_2 }}",
+                "rightValue": "={{ $json.createdAt_1 ? $json.createdAt_1 : DateTime.fromISO('2024-01-01T00:00:00.000Z') }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "fdf0ec1f-c9b2-44ff-96b6-7ef80f2838d3",
+        "name": "Stop if last newsletter is too recent",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -64,
+          48
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "4efef626-77be-4e29-8aa5-f9520cfa3127",
+                "operator": {
+                  "type": "dateTime",
+                  "operation": "before"
+                },
+                "leftValue": "={{ $('Get most recent newsletter').item.json.createdAt }}",
+                "rightValue": "={{ $now.minus({ days: $('Set topics and language').item.json.minDaysBetween }) }}"
+              },
+              {
+                "id": "6c5410f0-2e2e-4212-9779-bf3a3a4fb009",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "772bbbf3-2d67-41b0-ad47-13aff0407cde",
+        "name": "Aggregate candidate articles for AI",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          -1104,
+          640
+        ],
+        "parameters": {
+          "include": "specifiedFields",
+          "options": {},
+          "aggregate": "aggregateAllItemData",
+          "fieldsToInclude": "title_2, excerpt_2, source_2, url_2",
+          "destinationFieldName": "results"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8f7881fd-9243-449a-81f3-1ec49b8c8582",
+        "name": "Combine candidate articles with past newsletters",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          -608,
+          560
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {},
+          "combineBy": "combineAll"
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "b3d1150a-0f2a-4be2-9db6-1e1733700105",
+        "name": "If AI decided to send newsletter",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -96,
+          560
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "717c70de-dfc0-4ed5-86d6-3d1a612d0694",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.message.content.decision }}",
+                "rightValue": "YES"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "7026acbc-aad2-491e-bdad-996ce1ffefe8",
+        "name": "Split selected articles for enrichment",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          -1104,
+          992
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "message.content.articles"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "08067a28-c5a6-4907-80f4-f125bf091b44",
+        "name": "GPT-5.1",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          -1024,
+          1216
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-5.1",
+            "cachedResultName": "gpt-5.1"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "afee7f71-646b-489f-b17d-d01d86365fab",
+        "name": "Tavily web search tool",
+        "type": "@tavily/n8n-nodes-tavily.tavilyTool",
+        "position": [
+          -896,
+          1216
+        ],
+        "parameters": {
+          "query": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Query', ``, 'string') }}",
+          "options": {}
+        },
+        "credentials": {
+          "tavilyApi": {
+            "id": "credential-id",
+            "name": "tavilyApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "efeac211-e0d4-4778-b0c3-60f0e03de8b9",
+        "name": "Parse enriched article JSON",
+        "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "position": [
+          -752,
+          1216
+        ],
+        "parameters": {
+          "schemaType": "manual",
+          "inputSchema": "{\n\t\"type\": \"object\",\n\t\"properties\": {\n\t\t\"title\": {\n\t\t\t\"type\": \"string\"\n\t\t},\n\t\t\"content\": {\n\t\t\t\"type\": \"string\"\n\t\t},\n        \"source\": {\n\t\t\t\"type\": \"string\"\n\t\t},\n        \"url\": {\n\t\t\t\"type\": \"string\"\n\t\t}\n\t}\n}"
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "9b5fb614-4e91-4e9c-88a3-7e36529fd1c5",
+        "name": "AI: enrich & write article",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          -960,
+          992
+        ],
+        "parameters": {
+          "text": "=You are a research writer that updates short news summaries into concise, factual articles.\n\n**Input:**\nTitle: {{ $json[\"title\"] }}\nSummary: {{ $json[\"summary\"] }}\nSource: {{ $json[\"source\"] }}\nOriginal URL: {{ $json[\"url\"] }}\nLanguage: {{ $('Set topics and language').item.json.language }}\n\n**Instructions:**\n\n1. Use **Tavily Search** to gather 2–3 reliable, recent, and relevant sources on this topic.\n2. Update the **title** if a more accurate or engaging one exists.\n3. Write **1–2 sentences** summarizing the topic, combining the original summary and information from the new sources.\n4. Return the original source name and url as well.\n\n**Output (JSON):**\n\n```json\n{\n  \"title\": \"final article title\",\n  \"content\": \"concise 1–3 sentence article content\",\n  \"source\": \"the name of the original source\",\n  \"url\": \"the url of the original source\"\n}\n```\n\n**Rules:**\n\n* Ensure the topic is relevant, informative, and timely.\n* Translate the article if necessary to comply with the desired language {{ $('Set topics and language').item.json.language }}.",
+          "options": {},
+          "promptType": "define",
+          "hasOutputParser": true
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "2e8c420d-ac78-4eea-9866-3220f123f880",
+        "name": "AI: decide send + select articles",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          -416,
+          560
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-5.1",
+            "cachedResultName": "GPT-5.1"
+          },
+          "options": {},
+          "messages": {
+            "values": [
+              {
+                "content": "=You are an **AI Newsletter Editor**. Your job is to decide whether today’s newsletter edition should be sent, and to select the best articles.\n\nYou will receive a list of articles with:\n'title', 'excerpt', `source`, `url`.\n\nYou will also receive content of **previously sent newsletters** (markdown).\n\n# Your Tasks\n\n## 1. Decide whether to send the newsletter\n\nOutput \"YES\" only if all of the following are satisfied **OR** the fallback rule applies:\n\n### **Base Criteria**\n\n1. There are **at least 3 meaningful articles**.\n   *Meaningful = not trivial, not purely promotional, not clickbait, contains actual informational value.*\n\n2. Articles must be **non-duplicate and non-overlapping**:\n\n   * Not the same topic/headline rephrased\n   * Not reporting identical events with minor variations\n   * Not the same news covered by multiple sources without distinct insights\n\n3. Articles must be **relevant to the user's topics**:\n   **{{ $('Set topics and language').item.json.topics }}**\n\n4. Articles must be **novel** relative to the **topics in previous newsletters**:\n\n   * Compare against all previous newsletters below\n   * Exclude articles that discuss topics already substantially covered\n\n5. Articles must offer **clear value**:\n\n   * New information\n   * Impact that matters to the user\n   * Insight, analysis, or meaningful expansion\n\n### **Fallback rule: Newsletter frequency requirement**\n\nIf **at least 1 relevant article exists** *and*\nthe last newsletter was sent **more than {{ $('Set topics and language').item.json.maxDaysBetween }} days ago**, then you **MUST** return \"YES\" as a decision even if the other criteria are not completely met.\n\nLast newsletter was sent {{ $('Get most recent newsletter').item.json.createdAt ? Math.floor($now.diff(DateTime.fromISO($('Get most recent newsletter').item.json.createdAt), 'days').days) : 999 }} days ago.\n\n### Otherwise → \"NO\"\n\n## **2. If \"YES\": Select Articles**\n\nSelect the **top 3–5** articles that best fulfill the criteria above.\n\nFor each selected article, output:\n\n* **title** (rewrite for clarity, conciseness, and impact)\n* **summary** (1–2 sentences; written in the output language)\n* **source**\n* **url**\n\nAll summaries **must** be written in:\n**{{ $('Set topics and language').item.json.language }}**\n\n---\n\n# **Output Format (JSON)**\n\n```json\n{\n  \"decision\": \"YES or NO\",\n  \"articles\": [\n    {\n      \"title\": \"...\",\n      \"summary\": \"...\",\n      \"source\": \"...\",\n      \"url\": \"...\"\n    }\n  ]\n}\n```\n\nWhen \"decision\": \"NO\", return an empty array for \"articles\".\n\n# **Article Input**\n\nUse these articles:\n\n{{\n$json.results.map(\narticle =>\n`Title: ${article.title_2}\nExcerpt: ${article.excerpt_2}\nSource: ${article.source_2}\nURL: ${article.url_2}`\n).join('\\n---\\n')\n}}\n\nYou must also consider the topics already covered in previous newsletters to avoid repetition:\n\n{{ $json.newsletters.map(x => `Newsletter: ${x.content}`).join('\\n---\\n') }}\n\n"
+              }
+            ]
+          },
+          "jsonOutput": true
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "f77c6e6f-966a-4448-a18a-2fbc76a1abdc",
+        "name": "Aggregate enriched articles",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          -672,
+          992
+        ],
+        "parameters": {
+          "options": {},
+          "fieldsToAggregate": {
+            "fieldToAggregate": [
+              {
+                "fieldToAggregate": "output"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "72d2c603-6e58-456d-9567-cb2c3aef1387",
+        "name": "Insert newsletter content into Newsletters table",
+        "type": "n8n-nodes-base.dataTable",
+        "position": [
+          -448,
+          992
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "content": "={{    $json.output.map(article => {     const title = JSON.stringify(article.title).slice(1, -1);     const content = JSON.stringify(article.content).slice(1, -1);     const source = JSON.stringify(article.source).slice(1, -1);     const url = JSON.stringify(article.url).slice(1, -1);      return `*${title}*\\n${content}\\nSource: [${source}](${url})`;   }).join('\\n\\n') }}"
+            },
+            "schema": [
+              {
+                "id": "content",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "content",
+                "defaultMatch": false
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "content"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "dataTableId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "70dNVBaVmekyxH50",
+            "cachedResultUrl": "/projects/qtrMjn4i49GhWSSe/datatables/70dNVBaVmekyxH50",
+            "cachedResultName": "Newsletters"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b69987aa-c78d-47d9-9cd6-54810108c9c1",
+        "name": "Send newsletter to Telegram",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          -256,
+          992
+        ],
+        "webhookId": "40ea7332-d4bf-41ed-a940-58b5635eb841",
+        "parameters": {
+          "text": "={{ \n  $('Aggregate enriched articles').item.json.output.map(article => {\n    const title = JSON.stringify(article.title).slice(1, -1);\n    const content = JSON.stringify(article.content).slice(1, -1);\n    const source = JSON.stringify(article.source).slice(1, -1);\n    const url = JSON.stringify(article.url).slice(1, -1);\n\n    return `*${title}*\\n${content}\\nSource: [${source}](${url})`;\n  }).join('\\n\\n')\n}}",
+          "chatId": "89066090",
+          "additionalFields": {
+            "appendAttribution": false
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "credential-id",
+            "name": "telegramApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "23353202-c911-44b1-b8f0-0d506b8d72b0",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1152,
+          -560
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 432,
+          "height": 400,
+          "content": "## Schedule & Configuration\n\nTriggers the workflow and sets global parameters.\n\n• Schedule Trigger: Runs at 9am and 5pm daily per default\n• Set topics and language: Configure your topics (comma-separated), output language, and frequency guardrails"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3d3eda3a-1309-4e8b-a852-e009116d3b7a",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -704,
+          -560
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 896,
+          "height": 400,
+          "content": "## Fetch News\n\n• Build topic queries: Splits comma-separated topics into individual search queries\n• Fetch news from [SerpAPI](https://serpapi.com): Queries `DuckDuckGo News` via SerpAPI for each topic (last 24h)\n• Split results: Extracts individual articles from API response\n• Upsert into News table: Stores articles with deduplication by title+URL"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8e14c373-3165-4015-98ab-3304427dc9b7",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1152,
+          -144
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1344,
+          "height": 384,
+          "content": "## News Filtering & Frequency Guardrails\n\n• Get previous newsletters: Retrieves all past editions from the `Newsletters` table\n• Filter by date: Keeps only articles newer than the last newsletter\n• Frequency check: Stops execution if last newsletter was sent within `minDaysBetween`\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4fbf49f0-5b04-4f23-94d0-310a8e813b61",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1152,
+          256
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1344,
+          "height": 544,
+          "content": "## Newsletter Selection & Editorial AI\n\n- Aggregate articles: Bundles candidate articles with last 5 newsletters for context\n- AI: decide send + select articles: GPT-5.1 evaluates novelty, relevance, and value\n  - Returns `YES/NO` decision\n  - Selects top 3-5 articles when `YES`\n- Fallback rule: Forces `YES` if 1+ relevant article exists and `maxDaysBetween` exceeded"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0d5908e4-fe0b-4dae-95d7-88c3705009e4",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1152,
+          816
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1344,
+          "height": 560,
+          "content": "## Newsletter Writing & Delivery\n\n- Split selected articles: Processes each article individually\n- AI: enrich & write article: GPT-5.1 + Tavily research enhance each article (1-3 sentences)\n- Insert into `Newsletters` table: Archives the edition\n- Send to Telegram: Delivers formatted newsletter with bold titles and source links"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a1405405-407b-4caf-9d7c-d50d2b41e6f4",
+        "name": "Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1104,
+          -368
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 0 9,17 * * *"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "02f82f94-3543-45bf-890a-0fa78f72aa5d",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1744,
+          -560
+        ],
+        "parameters": {
+          "width": 576,
+          "height": 752,
+          "content": "# AI News Agent\n\nAutomated AI-powered newsletter that curates, filters, and delivers personalized news to Telegram.\n\n## How it works\n1. Schedule Trigger runs twice daily (9am & 5pm) and fetches news via SerpAPI's DuckDuckGo News engine for your configured topics.\n2. Articles are deduplicated and stored in an n8n Data Table.\n3. AI Editor (GPT-5.1) evaluates articles against past newsletters, checking for novelty, relevance, and value.\n4. Selected articles are enriched with Tavily web search and rewritten into concise summaries.\n5. Final newsletter is saved to the Newsletters table and sent to Telegram.\n\n## Setup\n- Add SerpAPI credentials (httpQueryAuth)\n- Add OpenAI API key\n- Add Tavily API key\n- Add Telegram Bot credentials\n- Set your Telegram Chat ID in the \"Send newsletter to Telegram\" node\n\n## Customize\n- Topics: Change the topics in \"Set topics and language\" node (comma-separated)\n- Language: Set output language\n- Frequency guardrails :Adjust minDaysBetween/maxDaysBetween to control send cadence\n- Timings: Modify cron expression for different run times"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {
+      "Schedule Trigger": [
+        {
+          "Hour": "09",
+          "Year": "2025",
+          "Month": "November",
+          "Minute": "00",
+          "Second": "00",
+          "Timezone": "Europe/Berlin (UTC+01:00)",
+          "timestamp": "2025-11-28T09:00:00.009+01:00",
+          "Day of week": "Friday",
+          "Day of month": "28",
+          "Readable date": "November 28th 2025, 9:00:00 am",
+          "Readable time": "9:00:00 am"
+        }
+      ]
+    },
+    "connections": {
+      "GPT-5.1": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI: enrich & write article",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Set topics and language",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build topic queries": {
+        "main": [
+          [
+            {
+              "node": "Fetch news from SerpAPI (DuckDuckGo News)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Tavily web search tool": {
+        "ai_tool": [
+          [
+            {
+              "node": "AI: enrich & write article",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set topics and language": {
+        "main": [
+          [
+            {
+              "node": "Build topic queries",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Get previous newsletters",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get previous newsletters": {
+        "main": [
+          [
+            {
+              "node": "Sort newsletters by newest first",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI: enrich & write article": {
+        "main": [
+          [
+            {
+              "node": "Aggregate enriched articles",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get most recent newsletter": {
+        "main": [
+          [
+            {
+              "node": "Combine articles with last newsletter metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Aggregate enriched articles": {
+        "main": [
+          [
+            {
+              "node": "Insert newsletter content into Newsletters table",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse enriched article JSON": {
+        "ai_outputParser": [
+          [
+            {
+              "node": "AI: enrich & write article",
+              "type": "ai_outputParser",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send newsletter to Telegram": {
+        "main": [
+          []
+        ]
+      },
+      "Upsert articles into News table": {
+        "main": [
+          [
+            {
+              "node": "Combine articles with last newsletter metadata",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "If AI decided to send newsletter": {
+        "main": [
+          [
+            {
+              "node": "Split selected articles for enrichment",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sort newsletters by newest first": {
+        "main": [
+          [
+            {
+              "node": "Get most recent newsletter",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Limit previous newsletters to last 5",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI: decide send + select articles": {
+        "main": [
+          [
+            {
+              "node": "If AI decided to send newsletter",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Aggregate candidate articles for AI": {
+        "main": [
+          [
+            {
+              "node": "Combine candidate articles with past newsletters",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Split SerpAPI results into articles": {
+        "main": [
+          [
+            {
+              "node": "Upsert articles into News table",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Limit previous newsletters to last 5": {
+        "main": [
+          [
+            {
+              "node": "Aggregate previous newsletters into list",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Stop if last newsletter is too recent": {
+        "main": [
+          [
+            {
+              "node": "Aggregate candidate articles for AI",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split selected articles for enrichment": {
+        "main": [
+          [
+            {
+              "node": "AI: enrich & write article",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Aggregate previous newsletters into list": {
+        "main": [
+          [
+            {
+              "node": "Combine candidate articles with past newsletters",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch news from SerpAPI (DuckDuckGo News)": {
+        "main": [
+          [
+            {
+              "node": "Split SerpAPI results into articles",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter articles newer than last newsletter": {
+        "main": [
+          [
+            {
+              "node": "Stop if last newsletter is too recent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Combine articles with last newsletter metadata": {
+        "main": [
+          [
+            {
+              "node": "Filter articles newer than last newsletter",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Combine candidate articles with past newsletters": {
+        "main": [
+          [
+            {
+              "node": "AI: decide send + select articles",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Insert newsletter content into Newsletters table": {
+        "main": [
+          [
+            {
+              "node": "Send newsletter to Telegram",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 32,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 1
+      },
+      "n8n-nodes-base.sort": {
+        "count": 1
+      },
+      "n8n-nodes-base.limit": {
+        "count": 2
+      },
+      "n8n-nodes-base.merge": {
+        "count": 2
+      },
+      "n8n-nodes-base.filter": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitOut": {
+        "count": 2
+      },
+      "n8n-nodes-base.telegram": {
+        "count": 1
+      },
+      "n8n-nodes-base.aggregate": {
+        "count": 3
+      },
+      "n8n-nodes-base.dataTable": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 1
+      },
+      "@tavily/n8n-nodes-tavily.tavilyTool": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.outputParserStructured": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Felix Kemeth",
+    "username": "fkemeth",
+    "bio": "",
+    "verified": false,
+    "links": [
+      "https://www.akribic.com/"
+    ],
+    "avatar": "https://gravatar.com/avatar/91eaf460ce31022237ef5cf5b4920758056943824c6e475cd6b6f08d7f653af0?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "icon": "file:telegram.svg",
+      "name": "n8n-nodes-base.telegram",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-telegram-bots-with-n8n-a-no-code-platform/",
+                "icon": "💬",
+                "label": "Creating Telegram Bots with n8n, a No-Code Platform"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.telegram/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/telegram/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Telegram"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNjYgNjYiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzM3YWVlMiIgZD0iTTAgMzJjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMyczMyLTE0LjMyNyAzMi0zMlM0OS42NzMgMCAzMiAwIDAgMTQuMzI3IDAgMzIiLz48cGF0aCBmaWxsPSIjYzhkYWVhIiBkPSJtMjEuNjYxIDM0LjMzOCAzLjc5NyAxMC41MDhzLjQ3NS45ODMuOTgzLjk4MyA4LjA2OC03Ljg2NCA4LjA2OC03Ljg2NGw4LjQwNy0xNi4yMzctMjEuMTE5IDkuODk4eiIvPjxwYXRoIGZpbGw9IiNhOWM2ZDgiIGQ9Im0yNi42OTUgMzcuMDM0LS43MjkgNy43NDZzLS4zMDUgMi4zNzMgMi4wNjggMGw0LjY0NC00LjIwMyIvPjxwYXRoIGQ9Im0yMS43MyAzNC43MTItNy44MDktMi41NDVzLS45MzItLjM3OC0uNjMzLTEuMjM3Yy4wNjItLjE3Ny4xODYtLjMyOC41NTktLjU4OCAxLjczMS0xLjIwNiAzMi4wMjgtMTIuMDk2IDMyLjAyOC0xMi4wOTZzLjg1Ni0uMjg4IDEuMzYxLS4wOTdjLjIzMS4wODguMzc4LjE4Ny41MDMuNTQ4LjA0NS4xMzIuMDcxLjQxMS4wNjguNjg5LS4wMDMuMjAxLS4wMjcuMzg2LS4wNDUuNjc4LS4xODQgMi45NzgtNS43MDYgMjUuMTk4LTUuNzA2IDI1LjE5OHMtLjMzIDEuMy0xLjUxNCAxLjM0NWMtLjQzMi4wMTYtLjk1Ni0uMDcxLTEuNTgyLS42MS0yLjMyMy0xLjk5OC0xMC4zNTItNy4zOTQtMTIuMTI2LTguNThhLjM0LjM0IDAgMCAxLS4xNDYtLjIzOWMtLjAyNS0uMTI1LjEwOC0uMjguMTA4LS4yOHMxMy45OC0xMi40MjcgMTQuMzUyLTEzLjczMWMuMDI5LS4xMDEtLjA3OS0uMTUxLS4yMjYtLjEwNy0uOTI5LjM0Mi0xNy4wMjUgMTAuNTA2LTE4LjgwMSAxMS42MjktLjEwNC4wNjYtLjM5NS4wMjMtLjM5NS4wMjMiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Telegram",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 844,
+      "icon": "fa:filter",
+      "name": "n8n-nodes-base.filter",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The Filter node can be used to filter items based on a condition. If the condition is met, the item will be passed on to the next node. If the condition is not met, the item will be omitted. Conditions can be combined together by AND(meet all conditions), or OR(meet at least one condition).",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.filter/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Filter",
+        "color": "#229eff"
+      },
+      "iconData": {
+        "icon": "filter",
+        "type": "icon"
+      },
+      "displayName": "Filter",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1179,
+      "icon": "fa:code",
+      "name": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "codex": {
+        "data": {
+          "alias": [
+            "json",
+            "zod"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.outputparserstructured/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Output Parsers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Structured Output Parser"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Structured Output Parser",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1236,
+      "icon": "file:aggregate.svg",
+      "name": "n8n-nodes-base.aggregate",
+      "codex": {
+        "data": {
+          "alias": [
+            "Aggregate",
+            "Combine",
+            "Flatten",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.aggregate/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Aggregate"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjRkY2RDVBIiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTMyIDE0OGMwLTYuNjI3IDUuMzczLTEyIDEyLTEyaDE0NmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJINDRjLTYuNjI3IDAtMTItNS4zNzMtMTItMTJ6bTAgOTZjMC02LjYyNyA1LjM3My0xMiAxMi0xMmgxNDZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnYyNGMwIDYuNjI3LTUuMzczIDEyLTEyIDEySDQ0Yy02LjYyNyAwLTEyLTUuMzczLTEyLTEyem0wIDk2YzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMTQ2YzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MjRjMCA2LjYyNy01LjM3MyAxMi0xMiAxMkg0NGMtNi42MjcgMC0xMi01LjM3My0xMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjxwYXRoIGQ9Ik03NCA3NmMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDExNi4yMTdjMTcuNjczIDAgMzIgMTQuMzI3IDMyIDMydjU2YzAgMjYuOTc4IDEwLjI3MiA1MS41NTcgMjcuMTE5IDcwLjAzOSA1LjA1NSA1LjU0NSA1LjA1NSAxNC4zNzcgMCAxOS45MjItMTYuODQ3IDE4LjQ4Mi0yNy4xMTkgNDMuMDYxLTI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMtMTQuMzI3IDMyLTMyIDMySDg2Yy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTE2LjIxN2M0NC4xODMgMCA4MC0zNS44MTcgODAtODB2LTU2YzAtMzAuOTI4IDI1LjA3Mi01NiA1Ni01NmE1Ljc4MyA1Ljc4MyAwIDAgMCA1Ljc4My01Ljc4M3YtMzYuNDM0YTUuNzgzIDUuNzgzIDAgMCAwLTUuNzgzLTUuNzgzYy0zMC45MjggMC01Ni0yNS4wNzItNTYtNTZ2LTU2YzAtNDQuMTgzLTM1LjgxNy04MC04MC04MEg4NmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0zNzYgMjQ0YzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMTEyYzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MjRjMCA2LjYyNy01LjM3MyAxMi0xMiAxMkgzODhjLTYuNjI3IDAtMTItNS4zNzMtMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48L2c+PGRlZnM+PGNsaXBQYXRoIGlkPSJhIj48cGF0aCBmaWxsPSIjZmZmIiBkPSJNMCAwaDUxMnY1MTJIMHoiLz48L2NsaXBQYXRoPjwvZGVmcz48L3N2Zz4="
+      },
+      "displayName": "Aggregate",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1237,
+      "icon": "file:limit.svg",
+      "name": "n8n-nodes-base.limit",
+      "codex": {
+        "data": {
+          "alias": [
+            "Limit",
+            "Remove",
+            "Slice",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.limit/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Limit"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjMkZCNjdDIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcGF0aD0idXJsKCNhKSIgY2xpcC1ydWxlPSJldmVub2RkIj48cGF0aCBkPSJNNTEyIDQ1OGMwLTYuNjI3LTUuMzczLTEyLTEyLTEyaC02OGMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDY4YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6bS0xNDAgMGMwLTYuNjI3LTUuMzczLTEyLTEyLTEyaC02OGMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDY4YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6bS0xNDAgMGMwLTYuNjI3LTUuMzczLTEyLTEyLTEyaC02OGMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDY4YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6bS0xNDAgMGMwLTYuNjI3LTUuMzczLTEyLTEyLTEySDEyYy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoNjhjNi42MjcgMCAxMi01LjM3MyAxMi0xMnptMTUyLTIyMmMtNi42MjcgMC0xMi01LjM3My0xMi0xMlYzMGMwLTYuNjI3IDUuMzczLTEyIDEyLTEyaDI0YzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MTk0YzAgNi42MjctNS4zNzMgMTItMTIgMTJ6Ii8+PHBhdGggZD0iTTE0OS41NzcgMTQ2Ljk4MmM5LjM5OC05LjM0NiAyNC41OTQtOS4zMDQgMzMuOTQxLjA5NUwyNTYgMjE5Ljk2NGw3Mi40ODItNzIuODg3YzkuMzQ3LTkuMzk5IDI0LjU0My05LjQ0MSAzMy45NDEtLjA5NXM5LjQ0MSAyNC41NDMuMDk1IDMzLjk0MWwtODkuNSA5MGEyNCAyNCAwIDAgMS0zNC4wMzYgMGwtODkuNS05MGMtOS4zNDYtOS4zOTgtOS4zMDQtMjQuNTk0LjA5NS0zMy45NDFNMCAzNTBjMC02LjYyNyA1LjM3My0xMiAxMi0xMmg0ODhjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnYyNGMwIDYuNjI3LTUuMzczIDEyLTEyIDEySDEyYy02LjYyNyAwLTEyLTUuMzczLTEyLTEyeiIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik0wIDBoNTEydjUxMkgweiIvPjwvY2xpcFBhdGg+PC9kZWZzPjwvc3ZnPg=="
+      },
+      "displayName": "Limit",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1239,
+      "icon": "file:splitOut.svg",
+      "name": "n8n-nodes-base.splitOut",
+      "codex": {
+        "data": {
+          "alias": [
+            "Split",
+            "Nested",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitout/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Split Out"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjOUI2REQ1IiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTQ4MCAxNDhjMC02LjYyNy01LjM3My0xMi0xMi0xMkgzMjJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxNDZjNi42MjcgMCAxMi01LjM3MyAxMi0xMnptMCA5NmMwLTYuNjI3LTUuMzczLTEyLTEyLTEySDMyMmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDE0NmM2LjYyNyAwIDEyLTUuMzczIDEyLTEyem0wIDk2YzAtNi42MjctNS4zNzMtMTItMTItMTJIMzIyYy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTQ2YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48cGF0aCBkPSJNNDM4IDc2YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtMTcuNjczIDAtMzIgMTQuMzI3LTMyIDMydjU2YzAgMjYuOTc4LTEwLjI3MiA1MS41NTctMjcuMTE5IDcwLjAzOS01LjA1NSA1LjU0NS01LjA1NSAxNC4zNzcgMCAxOS45MjIgMTYuODQ3IDE4LjQ4MiAyNy4xMTkgNDMuMDYxIDI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMySDQyNmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtNDQuMTgzIDAtODAtMzUuODE3LTgwLTgwdi01NmMwLTMwLjkyOC0yNS4wNzItNTYtNTYtNTZhNS43ODMgNS43ODMgMCAwIDEtNS43ODMtNS43ODN2LTM2LjQzNGE1Ljc4MyA1Ljc4MyAwIDAgMSA1Ljc4My01Ljc4M2MzMC45MjggMCA1Ni0yNS4wNzIgNTYtNTZ2LTU2YzAtNDQuMTgzIDM1LjgxNy04MCA4MC04MEg0MjZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMzYgMjQ0YzAtNi42MjctNS4zNzMtMTItMTItMTJIMTJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxMTJjNi42MjcgMCAxMi01LjM3MyAxMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik01MTIgMEgwdjUxMmg1MTJ6Ii8+PC9jbGlwUGF0aD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Split Out",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1240,
+      "icon": "file:sort.svg",
+      "name": "n8n-nodes-base.sort",
+      "codex": {
+        "data": {
+          "alias": [
+            "Sort",
+            "Order",
+            "Transform",
+            "Array",
+            "List",
+            "Item",
+            "Random"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.sort/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Sort"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48cGF0aCBmaWxsPSIjODI4N0VCIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMzAuNSA0MjIuNWMtNi42MjcgMC0xMi01LjM3My0xMi0xMnYtMzUxYzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMjRjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnYzNTFjMCA2LjYyNy01LjM3MyAxMi0xMiAxMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjxwYXRoIGZpbGw9IiM4Mjg3RUIiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTM2LjA3NyAzMzMuNDgyYzkuMzk4LTkuMzQ2IDI0LjU5NC05LjMwNCAzMy45NC4wOTVsNzIuNDgzIDcyLjg4NyA3Mi40ODItNzIuODg3YzkuMzQ3LTkuMzk5IDI0LjU0My05LjQ0MSAzMy45NDEtLjA5NXM5LjQ0MSAyNC41NDMuMDk1IDMzLjk0MWwtODkuNSA5MGEyNCAyNCAwIDAgMS0zNC4wMzYgMGwtODkuNS05MGMtOS4zNDYtOS4zOTgtOS4zMDQtMjQuNTk0LjA5NS0zMy45NDFNMzgxLjUgODkuNWM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjM1MWMwIDYuNjI3LTUuMzczIDEyLTEyIDEyaC0yNGMtNi42MjcgMC0xMi01LjM3My0xMi0xMnYtMzUxYzAtNi42MjcgNS4zNzMtMTIgMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48cGF0aCBmaWxsPSIjODI4N0VCIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00NzUuOTIzIDE3OC41MThjLTkuMzk4IDkuMzQ2LTI0LjU5NCA5LjMwNC0zMy45NDEtLjA5NUwzNjkuNSAxMDUuNTM2bC03Mi40ODIgNzIuODg3Yy05LjM0NyA5LjM5OS0yNC41NDMgOS40NDEtMzMuOTQxLjA5NXMtOS40NDEtMjQuNTQzLS4wOTUtMzMuOTQxbDg5LjUtOTBhMjQgMjQgMCAwIDEgMzQuMDM2IDBsODkuNSA5MGM5LjM0NiA5LjM5OCA5LjMwNCAyNC41OTQtLjA5NSAzMy45NDEiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjwvc3ZnPg=="
+      },
+      "displayName": "Sort",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1315,
+      "icon": "fa:table",
+      "name": "n8n-nodes-base.dataTable",
+      "codex": {
+        "data": {
+          "alias": [
+            "data",
+            "table",
+            "knowledge",
+            "data table",
+            "table",
+            "sheet",
+            "database",
+            "data base",
+            "mysql",
+            "postgres",
+            "postgresql",
+            "airtable",
+            "supabase",
+            "noco",
+            "notion"
+          ],
+          "details": "Data table",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.datatable/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Development"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\",\"transform\"]",
+      "defaults": {
+        "name": "Data table"
+      },
+      "iconData": {
+        "icon": "table",
+        "type": "icon"
+      },
+      "displayName": "Data table",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 33,
+      "name": "Social Media"
+    },
+    {
+      "id": 48,
+      "name": "AI RAG"
+    }
+  ],
+  "image": []
+}

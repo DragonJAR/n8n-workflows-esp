@@ -1,0 +1,1430 @@
+{
+  "id": 13839,
+  "name": "Aggregate tech trend signals from RSS feeds into Google Sheets and Slack",
+  "views": 61,
+  "recentViews": 1,
+  "totalViews": 61,
+  "createdAt": "2026-03-03T12:54:14.898Z",
+  "description": "## Who is this for?\n\nFounders, product managers, content strategists, indie hackers, and anyone who wants to automatically monitor tech industry trends across multiple sources — without manually browsing Hacker News and Product Hunt every day.\n\n## What this workflow does\n\nThis workflow scans public RSS feeds from Hacker News and Product Hunt daily, scores every item against configurable keyword groups (AI, SaaS, No-Code, Dev Tools, etc.), clusters the results into ranked themes, and delivers a prioritized intelligence report via Slack and email. All signals and themes are logged to Google Sheets for historical trend analysis.\n\n## How it works\n\n1. **Daily trigger** fires on a configurable schedule (default: every 24 hours).\n2. **Fetches RSS feeds** from Hacker News (posts with 50+ points) and Product Hunt in parallel.\n3. **Parses and normalizes** all feed items — extracting titles, descriptions, URLs, and publish dates from RSS/Atom XML.\n4. **Scores each item** against 7 weighted keyword groups. Title matches receive a bonus multiplier. Source weights (Hacker News 1.5x, Product Hunt 1.3x) amplify signals from higher-authority sources.\n5. **Clusters into themes** — groups scored items by primary category, calculates theme strength using source diversity and volume bonuses, and classifies each as VERY_STRONG, STRONG, MODERATE, or WEAK.\n6. **Builds an intelligence report** with theme rankings, top 10 signals, and action items for surging topics. Generated in both plain text (Slack) and HTML (email).\n7. **Delivers and logs** — posts to Slack, sends HTML email, and appends both individual signals and theme summaries to separate Google Sheet tabs.\n\n## Setup steps\n\n1. **Connect Google Sheets OAuth2** credentials and update the Sheet ID in both \"Log Signals to Sheet\" and \"Log Themes to Sheet\" nodes.\n2. **Create a Google Sheet** with two tabs:\n   - `signal` — headers: `date`, `title`, `source`, `score`, `category`, `url`\n   - `themes` — headers: `date`, `category`, `signal_level`, `theme_strength`, `item_count`, `sources`, `top_keywords`\n3. **Connect Slack OAuth2** credentials and configure your target channel in the \"Post Report to Slack\" node.\n4. **Connect Gmail OAuth2** credentials and update `YOUR_EMAIL@EXAMPLE.COM` in the \"Email Daily Report\" node.\n5. **Activate** the workflow.\n\n## Requirements\n\n- n8n instance (self-hosted or cloud)\n- Google Cloud project with Sheets API enabled\n- Slack workspace with a bot configured\n- Gmail account with OAuth2 credentials (or swap for SMTP)\n- No API keys needed for RSS feeds — they are publicly accessible\n\n## How to customize\n\n- **Add more RSS feeds** — duplicate a feed node (e.g., TechCrunch, Reddit, Lobsters), connect it to the Merge node as an additional input, and add the parsing logic in the \"Parse All RSS Feeds\" code node.\n- **Edit keyword groups** — modify the `keywordGroups` object in the \"Score and Classify Signals\" node. Add your industry-specific keywords, adjust weights, and rename categories.\n- **Adjust source weights** — change the weight multipliers in the parser node to reflect which sources you trust most.\n- **Theme thresholds** — modify the strength cutoffs (30 = VERY_STRONG, 15 = STRONG, 8 = MODERATE) in the \"Aggregate Signals into Themes\" node.\n- **Schedule** — change from daily to hourly for real-time monitoring, or weekly for a digest format.\n- **Add AI analysis** — insert an LLM node after the report builder to generate strategic commentary on detected trends.",
+  "workflow": {
+    "id": "CprHW1jo93EjF1wy",
+    "meta": {
+      "instanceId": "8f8ee4eb853c20789e317beb113798e3d078c0c7ef754b4b9fad98c2eee7e79d"
+    },
+    "name": "Aggregate trend signals to Google Sheets and Slack",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "e0aa7c36-3e3b-4433-8fe9-2df2a24bbfda",
+        "name": "Daily Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          736,
+          432
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 24
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "44403338-5ecd-4d8f-a423-4794ed804449",
+        "name": "Fetch Hacker News RSS",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          960,
+          336
+        ],
+        "parameters": {
+          "url": "https://hnrss.org/newest?points=50&count=30",
+          "options": {
+            "timeout": 15000,
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            }
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "856fee05-7dd2-4bbe-8580-b8e10986238e",
+        "name": "Fetch Product Hunt RSS",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          960,
+          528
+        ],
+        "parameters": {
+          "url": "https://www.producthunt.com/feed",
+          "options": {
+            "timeout": 15000,
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            }
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "5e540b05-7780-41e7-aa16-88bf0a7cbedd",
+        "name": "Wait for All Feeds",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          1184,
+          432
+        ],
+        "parameters": {},
+        "typeVersion": 3
+      },
+      {
+        "id": "80c7a7f6-84fe-4d81-be24-498bc4a0e87a",
+        "name": "Parse All RSS Feeds",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1408,
+          432
+        ],
+        "parameters": {
+          "jsCode": "// Parse RSS/Atom feeds into normalized items\n// Grab data from each named feed node directly\n\nconst rawFeeds = [];\n\ntry {\n  const hn = $('Fetch Hacker News RSS').all();\n  for (const item of hn) {\n    const str = typeof item.json === 'string' ? item.json : (item.json.data || JSON.stringify(item.json));\n    rawFeeds.push({ name: 'hackernews', weight: 1.5, xml: str });\n  }\n} catch(e) {}\n\ntry {\n  const ph = $('Fetch Product Hunt RSS').all();\n  for (const item of ph) {\n    const str = typeof item.json === 'string' ? item.json : (item.json.data || JSON.stringify(item.json));\n    rawFeeds.push({ name: 'producthunt', weight: 1.3, xml: str });\n  }\n} catch(e) {}\n\nfunction extractItems(xml, sourceName, weight) {\n  const items = [];\n  if (!xml || xml.length < 50) return items;\n  \n  const itemRegex = /<(?:item|entry)[^>]*>([\\s\\S]*?)<\\/(?:item|entry)>/gi;\n  let match;\n  \n  while ((match = itemRegex.exec(xml)) !== null) {\n    const block = match[1];\n    \n    const getTag = (tag) => {\n      const r = new RegExp(\n        '<' + tag + '[^>]*><!\\\\[CDATA\\\\[([\\\\s\\\\S]*?)\\\\]\\\\]><\\\\/' + tag + '>|' +\n        '<' + tag + '[^>]*>([\\\\s\\\\S]*?)<\\\\/' + tag + '>',\n        'i'\n      );\n      const m = block.match(r);\n      return m ? (m[1] || m[2] || '').trim() : '';\n    };\n    \n    let link = getTag('link');\n    if (!link) {\n      const hrefMatch = block.match(/href=\"([^\"]+)\"/i);\n      if (hrefMatch) link = hrefMatch[1];\n    }\n    \n    const title = getTag('title').replace(/<[^>]+>/g, '').trim();\n    const desc = getTag('description').replace(/<[^>]+>/g, '').substring(0, 300);\n    const content = getTag('content').replace(/<[^>]+>/g, '').substring(0, 300) || desc;\n    const pubDate = getTag('pubDate') || getTag('published') || getTag('updated') || '';\n    \n    if (!title) continue;\n    \n    items.push({\n      source: sourceName,\n      source_weight: weight,\n      title: title,\n      url: link,\n      description: (content || desc).substring(0, 200),\n      published: pubDate,\n      raw_text: (title + ' ' + desc + ' ' + content).toLowerCase()\n    });\n  }\n  \n  return items;\n}\n\nlet allItems = [];\n\nfor (const feed of rawFeeds) {\n  try {\n    const items = extractItems(feed.xml, feed.name, feed.weight);\n    allItems = allItems.concat(items);\n  } catch(e) {}\n}\n\nif (allItems.length === 0) {\n  return [{ json: { items: [], total_fetched: 0, feeds_processed: rawFeeds.length, error: 'No items parsed from any feed.' } }];\n}\n\nreturn [{ json: { items: allItems, total_fetched: allItems.length, feeds_processed: rawFeeds.length } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e44a28b9-0a58-4298-9213-ebe8f72c3871",
+        "name": "Score and Classify Signals",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1632,
+          432
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst items = data.items;\n\nif (!items || items.length === 0) {\n  return [{ json: { scored_items: [], total_signals: 0, total_fetched: 0, error: 'No items to score' } }];\n}\n\n// ============================================\n// CUSTOMIZE YOUR KEYWORD GROUPS BELOW\n// Add, remove, or adjust keywords and weights\n// to match your industry and interests\n// ============================================\nconst keywordGroups = {\n  'ai_automation': {\n    keywords: ['ai agent', 'ai automation', 'llm', 'gpt', 'claude', 'copilot', 'ai tool', 'artificial intelligence', 'machine learning', 'generative ai', 'ai-powered', 'langchain', 'rag'],\n    weight: 2.0,\n    category: 'AI & Automation'\n  },\n  'no_code': {\n    keywords: ['no-code', 'nocode', 'low-code', 'lowcode', 'n8n', 'zapier', 'make.com', 'automation platform', 'workflow automation', 'airtable'],\n    weight: 1.8,\n    category: 'No-Code / Low-Code'\n  },\n  'saas_business': {\n    keywords: ['saas', 'mrr', 'arr', 'churn', 'b2b saas', 'micro-saas', 'bootstrapped', 'indie hacker', 'recurring revenue', 'subscription'],\n    weight: 1.5,\n    category: 'SaaS & Business'\n  },\n  'developer_tools': {\n    keywords: ['developer tool', 'dev tool', 'api', 'sdk', 'open source', 'cli tool', 'developer experience', 'dx', 'devops', 'infrastructure'],\n    weight: 1.3,\n    category: 'Developer Tools'\n  },\n  'marketing_growth': {\n    keywords: ['seo', 'content marketing', 'growth hack', 'conversion', 'landing page', 'email marketing', 'organic traffic', 'product-led', 'plg', 'go-to-market'],\n    weight: 1.4,\n    category: 'Marketing & Growth'\n  },\n  'pricing_monetization': {\n    keywords: ['pricing', 'monetization', 'freemium', 'paywall', 'revenue model', 'billing', 'payment', 'stripe', 'pricing strategy'],\n    weight: 1.6,\n    category: 'Pricing & Monetization'\n  },\n  'remote_productivity': {\n    keywords: ['remote work', 'async', 'productivity', 'collaboration tool', 'project management', 'notion', 'obsidian', 'second brain', 'knowledge management'],\n    weight: 1.1,\n    category: 'Remote & Productivity'\n  }\n};\n\nconst scoredItems = [];\n\nfor (const item of items) {\n  const text = item.raw_text || '';\n  let totalScore = 0;\n  const matchedGroups = [];\n  const matchedKeywords = [];\n  \n  for (const [groupId, group] of Object.entries(keywordGroups)) {\n    let groupHits = 0;\n    \n    for (const kw of group.keywords) {\n      if (text.includes(kw)) {\n        groupHits++;\n        matchedKeywords.push(kw);\n      }\n    }\n    \n    if (groupHits > 0) {\n      const groupScore = groupHits * group.weight;\n      totalScore += groupScore;\n      matchedGroups.push({\n        group: group.category,\n        hits: groupHits,\n        score: parseFloat(groupScore.toFixed(2))\n      });\n    }\n  }\n  \n  totalScore = totalScore * (item.source_weight || 1);\n  \n  const titleText = (item.title || '').toLowerCase();\n  let titleBonus = 0;\n  for (const [groupId, group] of Object.entries(keywordGroups)) {\n    for (const kw of group.keywords) {\n      if (titleText.includes(kw)) {\n        titleBonus += 1.5;\n      }\n    }\n  }\n  totalScore += titleBonus;\n  \n  if (totalScore > 0) {\n    scoredItems.push({\n      title: item.title,\n      url: item.url,\n      source: item.source,\n      description: item.description,\n      published: item.published,\n      signal_score: parseFloat(totalScore.toFixed(2)),\n      matched_groups: matchedGroups,\n      matched_keywords: [...new Set(matchedKeywords)],\n      primary_category: matchedGroups.length > 0 \n        ? matchedGroups.sort((a, b) => b.score - a.score)[0].group \n        : 'General',\n      title_match: titleBonus > 0\n    });\n  }\n}\n\nscoredItems.sort((a, b) => b.signal_score - a.signal_score);\n\nreturn [{ json: { scored_items: scoredItems, total_signals: scoredItems.length, total_fetched: items.length } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5c8edc2d-9950-40b3-b722-5d372f13cd04",
+        "name": "Aggregate Signals into Themes",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1856,
+          432
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst items = data.scored_items || [];\n\nif (items.length === 0) {\n  const today = new Date().toISOString().split('T')[0];\n  return [{\n    json: {\n      date: today,\n      themes: [],\n      total_signals: 0,\n      total_fetched: data.total_fetched || 0,\n      top_items: [],\n      note: 'No keyword matches found today.'\n    }\n  }];\n}\n\nconst themes = {};\n\nfor (const item of items) {\n  const cat = item.primary_category;\n  if (!themes[cat]) {\n    themes[cat] = {\n      category: cat,\n      items: [],\n      total_score: 0,\n      source_diversity: new Set(),\n      all_keywords: []\n    };\n  }\n  themes[cat].items.push(item);\n  themes[cat].total_score += item.signal_score;\n  themes[cat].source_diversity.add(item.source);\n  themes[cat].all_keywords.push(...(item.matched_keywords || []));\n}\n\nconst themeResults = [];\n\nfor (const [cat, theme] of Object.entries(themes)) {\n  const itemCount = theme.items.length;\n  const sourceDiversity = theme.source_diversity.size;\n  const avgScore = theme.total_score / itemCount;\n  \n  const diversityBonus = 1 + (sourceDiversity - 1) * 0.3;\n  const volumeBonus = 1 + Math.log2(Math.max(itemCount, 1)) * 0.2;\n  const themeStrength = parseFloat((theme.total_score * diversityBonus * volumeBonus).toFixed(2));\n  \n  let signalLevel;\n  if (themeStrength >= 30) signalLevel = 'VERY_STRONG';\n  else if (themeStrength >= 15) signalLevel = 'STRONG';\n  else if (themeStrength >= 8) signalLevel = 'MODERATE';\n  else signalLevel = 'WEAK';\n  \n  const kwFreq = {};\n  for (const kw of theme.all_keywords) {\n    kwFreq[kw] = (kwFreq[kw] || 0) + 1;\n  }\n  const topKeywords = Object.entries(kwFreq)\n    .sort((a, b) => b[1] - a[1])\n    .slice(0, 5)\n    .map(([kw, count]) => kw + ' (' + count + ')');\n  \n  themeResults.push({\n    category: cat,\n    signal_level: signalLevel,\n    theme_strength: themeStrength,\n    item_count: itemCount,\n    sources: [...theme.source_diversity],\n    source_count: sourceDiversity,\n    avg_item_score: parseFloat(avgScore.toFixed(2)),\n    top_keywords: topKeywords,\n    top_items: theme.items\n      .sort((a, b) => b.signal_score - a.signal_score)\n      .slice(0, 5)\n      .map(i => ({\n        title: i.title,\n        source: i.source,\n        score: i.signal_score,\n        url: i.url\n      }))\n  });\n}\n\nthemeResults.sort((a, b) => b.theme_strength - a.theme_strength);\n\nconst today = new Date().toISOString().split('T')[0];\n\nreturn [{\n  json: {\n    date: today,\n    themes: themeResults,\n    total_signals: data.total_signals,\n    total_fetched: data.total_fetched,\n    top_items: items.slice(0, 15).map(i => ({\n      title: i.title,\n      source: i.source,\n      score: i.signal_score,\n      category: i.primary_category,\n      url: i.url\n    }))\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7a566c27-041c-4164-9d7b-be035c22a036",
+        "name": "Build Intelligence Report",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2080,
+          432
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst themes = data.themes || [];\nconst topItems = data.top_items || [];\nconst today = data.date || new Date().toISOString().split('T')[0];\n\nif (themes.length === 0 && topItems.length === 0) {\n  const report = 'SIGNAL INTELLIGENCE REPORT — ' + today + '\\n\\nSources scanned: ' + (data.total_fetched || 0) + ' items\\nNo matching signals found today.\\n\\nTip: Broaden keywords in the Score node, or add more RSS sources.';\n  return [{\n    json: {\n      report: report,\n      report_html: '<h2>Signal Report — ' + today + '</h2><p>No matching signals found today.</p>',\n      date: today,\n      themes: [],\n      top_items: [],\n      strong_theme_count: 0,\n      total_signals: 0\n    }\n  }];\n}\n\nlet report = 'SIGNAL INTELLIGENCE REPORT — ' + today + '\\n';\nreport += 'Sources scanned: ' + data.total_fetched + ' items → ' + data.total_signals + ' signals detected\\n';\nreport += '━━━━━━━━━━━━━━━━━━━━━━━━━━\\n\\n';\nreport += 'THEME STRENGTH RANKING:\\n\\n';\n\nfor (const theme of themes) {\n  report += theme.signal_level + '  ' + theme.category + '\\n';\n  report += '   Strength: ' + theme.theme_strength + ' | Items: ' + theme.item_count + ' | Sources: ' + theme.sources.join(', ') + '\\n';\n  report += '   Keywords: ' + theme.top_keywords.join(', ') + '\\n\\n';\n}\n\nreport += '━━━━━━━━━━━━━━━━━━━━━━━━━━\\n';\nreport += 'TOP 10 STRONGEST SIGNALS:\\n\\n';\n\nfor (let i = 0; i < Math.min(topItems.length, 10); i++) {\n  const item = topItems[i];\n  report += (i + 1) + '. ' + item.title + '\\n';\n  report += '   Score: ' + item.score + ' | Source: ' + item.source + ' | Theme: ' + item.category + '\\n';\n  if (item.url) report += '   ' + item.url + '\\n';\n  report += '\\n';\n}\n\nconst strongThemes = themes.filter(t => t.theme_strength >= 15);\nif (strongThemes.length > 0) {\n  report += '━━━━━━━━━━━━━━━━━━━━━━━━━━\\n';\n  report += 'ACTION ITEMS — Strong signals detected:\\n\\n';\n  for (const t of strongThemes) {\n    report += '• ' + t.category + ' is surging across ' + t.source_count + ' sources. ';\n    report += 'Top keyword: ' + (t.top_keywords[0] || 'n/a') + '. ';\n    report += 'Consider creating content or building in this space.\\n';\n  }\n}\n\nlet html = '<h2>Signal Intelligence Report — ' + today + '</h2>';\nhtml += '<p>Sources scanned: ' + data.total_fetched + ' items → <strong>' + data.total_signals + ' signals</strong></p><hr/>';\nhtml += '<h3>Theme Strength</h3><table style=\"border-collapse:collapse;width:100%;\">';\nhtml += '<tr style=\"background:#f0f0f0;\"><th style=\"padding:8px;text-align:left;border:1px solid #ddd;\">Theme</th><th style=\"padding:8px;border:1px solid #ddd;\">Signal</th><th style=\"padding:8px;border:1px solid #ddd;\">Strength</th><th style=\"padding:8px;border:1px solid #ddd;\">Items</th><th style=\"padding:8px;border:1px solid #ddd;\">Sources</th></tr>';\nfor (const theme of themes) {\n  html += '<tr><td style=\"padding:8px;border:1px solid #ddd;\">' + theme.category + '</td>';\n  html += '<td style=\"padding:8px;border:1px solid #ddd;\">' + theme.signal_level + '</td>';\n  html += '<td style=\"padding:8px;border:1px solid #ddd;\">' + theme.theme_strength + '</td>';\n  html += '<td style=\"padding:8px;border:1px solid #ddd;\">' + theme.item_count + '</td>';\n  html += '<td style=\"padding:8px;border:1px solid #ddd;\">' + theme.sources.join(', ') + '</td></tr>';\n}\nhtml += '</table>';\nhtml += '<h3>Top Signals</h3><ol>';\nfor (let i = 0; i < Math.min(topItems.length, 10); i++) {\n  const item = topItems[i];\n  html += '<li><strong>' + item.title + '</strong><br/>Score: ' + item.score + ' | ' + item.source + ' | ' + item.category;\n  if (item.url) html += ' | <a href=\"' + item.url + '\">Link</a>';\n  html += '</li>';\n}\nhtml += '</ol>';\n\nreturn [{\n  json: {\n    report: report,\n    report_html: html,\n    date: today,\n    themes: themes,\n    top_items: topItems,\n    strong_theme_count: strongThemes.length,\n    total_signals: data.total_signals\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9ca1e3b4-a677-44f0-9f04-7fcf6d480dad",
+        "name": "Flatten Top Signals for Sheet",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2304,
+          336
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst items = data.top_items || [];\n\nif (items.length === 0) {\n  return [{ json: { date: data.date, title: 'No signals detected', source: '-', score: 0, category: '-', url: '-' } }];\n}\n\nreturn items.map(item => ({\n  json: {\n    date: data.date,\n    title: item.title || '',\n    source: item.source || '',\n    score: item.score || 0,\n    category: item.category || '',\n    url: item.url || ''\n  }\n}));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ea3b55cb-bf55-4fea-a5db-4b5cc8f4b2d8",
+        "name": "Log Signals to Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2528,
+          336
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "date": "={{ $json.date }}",
+              "category": "={{ $json.category }}"
+            },
+            "schema": [
+              {
+                "id": "date",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "category",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "category",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "signal_level",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "signal_level",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "theme_strength",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "theme_strength",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "item_count",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "item_count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sources",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sources",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "top_keywords",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "top_keywords",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "autoMapInputData",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_SIGNALS_SHEET_GID",
+            "cachedResultUrl": "YOUR_SIGNALS_SHEET_URL",
+            "cachedResultName": "signal"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "YOUR_GOOGLE_SHEET_URL",
+            "cachedResultName": "Your Signal Tracking Sheet"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "a13b13c1-42c3-4f3e-97a5-c61611d51f4e",
+        "name": "Post Report to Slack",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          2304,
+          528
+        ],
+        "webhookId": "f27fc60f-c098-4f14-9086-f702a16bbbcf",
+        "parameters": {
+          "text": "={{ $json.report }}",
+          "otherOptions": {}
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "487352c5-339f-4210-8bb6-8aee9fef77e8",
+        "name": "Prepare Themes for Sheet",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2304,
+          144
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst themes = data.themes || [];\n\nif (themes.length === 0) {\n  return [{ json: { date: data.date, category: 'No themes', signal_level: '-', theme_strength: 0, item_count: 0, sources: '-', top_keywords: '-' } }];\n}\n\nreturn themes.map(theme => ({\n  json: {\n    date: data.date,\n    category: theme.category,\n    signal_level: theme.signal_level,\n    theme_strength: theme.theme_strength,\n    item_count: theme.item_count,\n    sources: theme.sources.join(', '),\n    top_keywords: theme.top_keywords.join(', ')\n  }\n}));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0c0c570b-35c1-4025-b039-02fbc3bc68e5",
+        "name": "Log Themes to Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2528,
+          144
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "date": "={{ $json.date }}",
+              "sources": "={{ $json.sources }}",
+              "category": "={{ $json.category }}",
+              "item_count": "={{ $json.item_count }}",
+              "signal_level": "={{ $json.signal_level }}",
+              "top_keywords": "={{ $json.top_keywords }}",
+              "theme_strength": "={{ $json.theme_strength }}"
+            },
+            "schema": [
+              {
+                "id": "date",
+                "type": "string",
+                "required": false,
+                "displayName": "date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "category",
+                "type": "string",
+                "required": false,
+                "displayName": "category",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "signal_level",
+                "type": "string",
+                "required": false,
+                "displayName": "signal_level",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "theme_strength",
+                "type": "string",
+                "required": false,
+                "displayName": "theme_strength",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "item_count",
+                "type": "string",
+                "required": false,
+                "displayName": "item_count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sources",
+                "type": "string",
+                "required": false,
+                "displayName": "sources",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "top_keywords",
+                "type": "string",
+                "required": false,
+                "displayName": "top_keywords",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_THEMES_SHEET_GID",
+            "cachedResultUrl": "YOUR_THEMES_SHEET_URL",
+            "cachedResultName": "themes"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "YOUR_GOOGLE_SHEET_URL",
+            "cachedResultName": "Your Signal Tracking Sheet"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "677fd5a7-a775-4c41-8250-70795d778306",
+        "name": "Email Daily Report",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          2304,
+          720
+        ],
+        "webhookId": "200a7c26-5a3f-494d-af9d-f428f5cedf55",
+        "parameters": {
+          "sendTo": "user@example.com",
+          "message": "={{ $json.report_html }}",
+          "options": {},
+          "subject": "=Signal Report — {{ $json.date }} | {{ $json.total_signals }} signals, {{ $json.strong_theme_count }} strong themes"
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "6783701c-801b-4908-b97c-04ae73afa864",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -288,
+          -496
+        ],
+        "parameters": {
+          "color": "#80883F",
+          "width": 680,
+          "height": 960,
+          "content": "## Aggregate trend signals to Google Sheets and Slack\n\nThis workflow scans multiple RSS feeds daily, scores each item against configurable keyword groups, clusters them into themes, and delivers a prioritized intelligence report.\n\n## How it works\n1. **Daily trigger** fetches RSS feeds from Hacker News (50+ points) and Product Hunt in parallel\n2. **Merge node** waits for all feeds to complete before proceeding\n3. **RSS parser** extracts and normalizes titles, descriptions, URLs, and dates from all feeds\n4. **Keyword scorer** matches each item against 7 configurable keyword groups (AI, No-Code, SaaS, Dev Tools, Marketing, Pricing, Productivity) with weighted scoring\n5. **Theme aggregator** clusters scored items into themes, calculates theme strength using source diversity and volume bonuses, and classifies as VERY_STRONG / STRONG / MODERATE / WEAK\n6. **Report builder** generates a complete intelligence report (plain text for Slack, HTML for email)\n7. **Outputs** — sends report to Slack + email, logs individual signals and themes to separate Google Sheet tabs\n\n## Setup steps\n1. Connect **Google Sheets OAuth2** credentials and update the Sheet ID in both \"Log Signals to Sheet\" and \"Log Themes to Sheet\" nodes\n2. Create a Google Sheet with two tabs:\n   - `signal` — headers: `date`, `title`, `source`, `score`, `category`, `url`\n   - `themes` — headers: `date`, `category`, `signal_level`, `theme_strength`, `item_count`, `sources`, `top_keywords`\n3. Connect **Slack OAuth2** credentials and configure the target channel\n4. Connect **Gmail OAuth2** credentials and update the recipient email address\n5. Activate the workflow\n\n## Customization\n- **Add more RSS feeds** — duplicate a feed node, connect it to the Merge node, and add parsing logic in the \"Parse All RSS Feeds\" node\n- **Edit keyword groups** — modify the `keywordGroups` object in the \"Score and Classify Signals\" node to match your industry\n- **Adjust source weights** — change the weight multipliers (Hacker News: 1.5x, Product Hunt: 1.3x) in the parser\n- **Theme thresholds** — modify the strength cutoffs (30/15/8) in the aggregator node\n- **Schedule** — change from daily to hourly or weekly in the trigger node"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9b9a6837-a077-4c0c-ad82-ae2cecec182c",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          880,
+          128
+        ],
+        "parameters": {
+          "color": "#564343",
+          "width": 284,
+          "height": 164,
+          "content": "## 1. Fetch RSS Feeds\nTrigger fires daily. Hacker News and Product Hunt feeds are fetched in parallel. Merge node waits for both to complete before passing data forward."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7f4bab62-2c1e-4b09-b5d0-61de8a8b01f3",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1408,
+          192
+        ],
+        "parameters": {
+          "color": "#564343",
+          "width": 292,
+          "height": 164,
+          "content": "## 2. Parse and Score\nRSS XML is parsed into normalized items. Each item is scored against 7 keyword groups with configurable weights. Title matches get a bonus multiplier."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "24c55502-0595-4c20-84a2-7aa9189786be",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1888,
+          144
+        ],
+        "parameters": {
+          "color": "#564343",
+          "width": 324,
+          "height": 196,
+          "content": "## 3. Aggregate Themes and Build Report\nSignals are clustered into themes with strength scores (using source diversity and volume bonuses). A full intelligence report is generated in both plain text and HTML."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9805b4b7-5bf6-41f3-a5e0-0023ba8b5025",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2352,
+          -80
+        ],
+        "parameters": {
+          "color": "#564343",
+          "width": 308,
+          "height": 164,
+          "content": "## 4. Deliver and Log\nReport is posted to Slack and emailed. Individual signals and theme summaries are logged to separate Google Sheet tabs for historical analysis."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "efedef54-8924-49a0-a487-42594a15fd1e",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2480,
+          832
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 340,
+          "height": 80,
+          "content": "⚠️ **Update the email address** in this node to your own recipient before activating."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5fe3987d-3e12-4165-8e68-6bbc7155d71c",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          496,
+          656
+        ],
+        "parameters": {
+          "color": "#564343",
+          "width": 388,
+          "height": 332,
+          "content": "## Keyword Group Reference\nEdit these in the \"Score and Classify Signals\" node:\n\n| Group | Weight |\n|---|---|\n| AI & Automation | 2.0 |\n| No-Code / Low-Code | 1.8 |\n| Pricing & Monetization | 1.6 |\n| SaaS & Business | 1.5 |\n| Marketing & Growth | 1.4 |\n| Developer Tools | 1.3 |\n| Remote & Productivity | 1.1 |\n\n**Source Weights:**\n- Hacker News: 1.5x\n- Product Hunt: 1.3x"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "81e0d68c-faac-4d6f-b955-e0a06184a893",
+    "connections": {
+      "Wait for All Feeds": {
+        "main": [
+          [
+            {
+              "node": "Parse All RSS Feeds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse All RSS Feeds": {
+        "main": [
+          [
+            {
+              "node": "Score and Classify Signals",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Hacker News RSS": {
+        "main": [
+          [
+            {
+              "node": "Wait for All Feeds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Daily Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Fetch Hacker News RSS",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch Product Hunt RSS",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Product Hunt RSS": {
+        "main": [
+          [
+            {
+              "node": "Wait for All Feeds",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Prepare Themes for Sheet": {
+        "main": [
+          [
+            {
+              "node": "Log Themes to Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Intelligence Report": {
+        "main": [
+          [
+            {
+              "node": "Flatten Top Signals for Sheet",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Prepare Themes for Sheet",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Email Daily Report",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Post Report to Slack",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Score and Classify Signals": {
+        "main": [
+          [
+            {
+              "node": "Aggregate Signals into Themes",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Aggregate Signals into Themes": {
+        "main": [
+          [
+            {
+              "node": "Build Intelligence Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Flatten Top Signals for Sheet": {
+        "main": [
+          [
+            {
+              "node": "Log Signals to Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 21,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Veena Pandian",
+    "username": "veenapandian",
+    "bio": "Veena is a GTM Engineer with 6 years of experience in Revenue Operations, specializing in building scalable outbound systems that turn data into pipeline. As a Clay expert, she designs signal-based prospecting workflows, enrichment automations, and AI-led personalization sequences that drive consistent, qualified meetings for B2B companies. She now brings that same systems-thinking approach to building powerful automations in n8n.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/veenareddyhere/"
+    ],
+    "avatar": "https://gravatar.com/avatar/74ae38b621079dfbdd0ab6bf5da66389ac331caf189c2384195f681daebcb8f6?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

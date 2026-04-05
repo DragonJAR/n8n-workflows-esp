@@ -1,0 +1,2426 @@
+{
+  "id": 9280,
+  "name": "Event ticketing backend: auto QR tickets with Google Sheets & Gmail",
+  "views": 431,
+  "recentViews": 0,
+  "totalViews": 431,
+  "createdAt": "2025-10-05T14:28:20.843Z",
+  "description": "Ticketing Backend automates registration, QR-ticket generation, email delivery, and check-in validation using Google Sheets, Gmail, and a webhook scanner — reducing manual ticket prep from ~3 hours to under 5 minutes for 200 attendees.\n\n![Screenshot 20251005 at 15.01.48.png](fileId:2765)\n\n## Why Use This Workflow?\n\n- **Time Savings:** Automates ticket generation & delivery. reduces manual processing for 200 attendees from ~3 hours to &lt;5 minutes.\n- **Cost Reduction:** Removes dependency on paid ticketing platforms for basic events — save up to $150–$300/month for small organizations.\n- **Error Prevention:** Single-source truth in Google Sheets with QR-based check-in reduces double-checkin and human errors by &gt;90%.\n- **Scalability:** Runs on a schedule and webhooks; scales from dozens to thousands of tickets (watch API/email quotas).\n\n\n\n## Ideal For\n\n- **Event Organizers / Community Managers:** Sell & distribute tickets for meetups, runs, and local events with immediate QR delivery.\n- **Operations / Venue Staff:** Fast, reliable check-in via mobile scanner POSTing to webhook for instant validation.\n- **Small Agencies & SaaS Teams:** Lightweight, low-cost ticketing backend that integrates with existing Google accounts.\n\n\n\n## How It Works\n\n1. **Trigger (Registration):** `POST /v1/register` receives registration payload (nama, email, no_hp, jumlah_tiket, total_price, payment_method).\n2. **Data Collection (Registration):** Validate input → check existing participant in Register sheet → append registration.\n3. **Processing (Ticket Generation):** Scheduled job (START runs every minute) finds rows with Payment Status = PAID and Email Sent = NO.\n4. **Intelligence Layer:** For each ticket: generate unique Ticket ID (TL-YYYYMMDD-XXXX-N-HASH), build QR payload JSON, create QR image via qrserver API, and build HTML email with embedded base64 QR.\n5. **Output & Delivery:** Send ticket email(s) via Gmail; write one Tickets row per generated ticket and mark Email Sent = YES in Register.\n6. **Storage & Logging:** All participant & ticket records persisted to Google Sheets; check-in events update row (Checked In = YES and Checkin TIme).\n\n### Core Endpoints\n\n- Registration webhook: `POST /v1/register`\n- Scanner webhook (check-in): `POST /v1/scanner`\n\n### Event Metadata\n\n- **Event:** TABRAK_LARI\n- **Event date:** 15 November 2025\n- **Event location:** GOR Pontianak\n\n\n\n## Setup Guide\n\n### Prerequisites\n\n| Requirement | Type | Purpose |\n|-------------|------|---------|\n| [n8n instance]([https://n8n.partnerlinks.io/khmuhtadin](https://n8n.partnerlinks.io/khmuhtadin)) | Essential | Host the workflow and webhooks |\n| Google account (Sheets + Gmail) | Essential | Store tickets & send emails |\n| Google Sheet | Essential | Register & Tickets data store |\n| Public webhook URL / reverse proxy | Essential | Expose /v1/register & /v1/scanner to scanners/clients |\n| qrserver.com (public API) | Optional | Generate QR images (no credentials) |\n\n&gt; **Important:** Make sure your n8n instance URL is publicly accessible or use a tunneling/reverse proxy so webhooks can receive POSTs.\n\n### Installation Steps\n\n1. Import the JSON into your [n8n instance([https://n8n.partnerlinks.io/khmuhtadin](https://n8n.partnerlinks.io/khmuhtadin)).\n2. **Configure credentials:**\n   - **Google Sheets OAuth2:** Grant access to Google Drive & Sheets API (spreadsheets.readonly & spreadsheets).\n   - **Gmail OAuth2:** Grant send email scope (Gmail send).\n3. **Update environment-specific values:**\n   - Verify Google Sheet ID.\n   - Set the public base URL for ticket scanner clients to POST /v1/scanner.\n4. **Customize settings:**\n   - Event name/date/location (variables in Generate Ticket Data / Build HTML Email).\n   - Email sender address and subject line in Gmail node.\n5. **Test execution:**\n   - Use a sample POST to `/v1/register` with valid fields to create a registration.\n   - Mark a row as PAID and Email Sent = NO to trigger scheduled ticket generation.\n   - Simulate a scanner POST to `/v1/scanner` with the barcode JSON payload to test check-in.\n\n\n\n## Technical Details\n\n### Core Nodes\n\n| Node | Purpose | Key Configuration |\n|------|---------|-------------------|\n| REGISTER (Webhook) | Accepts registration POSTs | Path: `/v1/register` |\n| Validate Input (Code) | Server-side validation | Validates nama, email, no_hp, jumlah_tiket, payment_method |\n| Get Participant (Google Sheets) | Check duplicate email | Filters Register tab by Email |\n| Store Data (Google Sheets) | Append registration | Tab: Register (gid=0) |\n| START (Schedule Trigger) | Finds paid registrations | Runs every 1 minute |\n| Get Rows (Google Sheets) | Reads Register rows | Reads full Register tab |\n| Filter Paid Not Sent (Filter) | Finds rows with Payment Status=PAID & Email Sent=NO | Filter node conditions |\n| Generate Ticket Data (Code) | Generate ticket IDs & QR payloads | Ticket ID format TL-YYYYMMDD-XXXX-N-HASH |\n| Generate QR Code (HTTP Request) | Calls qrserver.com to build PNG | URL: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=... |\n| Build HTML Email (Code) | Builds ticket HTML & embeds Base64 QR | Template contains ticket details & QR |\n| Send Email (Gmail) | Sends ticket email | To: recipient Email; Subject configurable |\n| Update Sheet (Tickets) | Append ticket rows | Tab: Tickets (gid=2010454173) |\n| Parse Data (Code) | Aggregates ticket IDs per email | Updates Register with combined ticket IDs |\n| SCAN TICKET (Webhook) | Check-in endpoint | Path: `/v1/scanner` |\n| Parse Barcode (Code) | Parses incoming scanner payload | Expects JSON in body.barcode |\n| Get Tickets (Google Sheets) | Lookup ticket by Ticket ID | Filters Tickets tab by Ticket ID |\n| Ticket Available? (If) | Validates existence & Checked In status | Branches to update or return error |\n| Update Ticket Status (Google Sheets) | Mark Checked In = YES | Sets Checkin TIme to scannedAt |\n| Checked IN / Already Checked IN (RespondToWebhook) | Respond payloads for scanner | JSON responses with status & metadata |\n\n### Workflow Logic\n\n- **Registration:** Writes to Register sheet. A scheduled job picks up PAID rows where Email Sent = NO; for each row it generates one record per ticket, calls the QR API for an image, sends an email per ticket (multi-ticket support), then appends Tickets rows and marks Email Sent = YES by updating the Register sheet with combined ticket IDs.\n- **Check-in:** The scanner webhook accepts barcode JSON, extracts ticket_id, looks up the Tickets sheet, prevents duplicate check-ins by checking \"Checked In\" flag, and updates sheet with check-in timestamp on success.\n\n## Customization Options\n\n### Basic Adjustments\n\n- **Email Template:** Edit Build HTML Email node to change branding, copy, or layout.\n- **Ticket ID Format:** Change code in Generate Ticket Data to alter prefix or hash length.\n- **Event Metadata:** Change event_name, event_date, event_location in code nodes.\n\n### Advanced Enhancements\n\n- **Payment Gateway Integration:** Integrate with payment gateway (e.g., webhook from Stripe) to automatically set Payment Status = PAID — complexity: medium.\n- **Cloud Storage for QR Images:** Use cloud storage (S3) for QR images instead of base64-embedding — complexity: medium-high.\n- **Batch Email Provider:** Use batch email provider (SendGrid/Mailgun) for high-volume events to reduce Gmail quota risks — complexity: medium.\n\n\n## Troubleshooting\n\n| Problem | Cause | Solution |\n|---------|-------|----------|\n| Invalid QR / scanner returns \"Invalid QR code format\" | Scanner payload not sending barcode JSON or malformed JSON | Ensure scanner POST body contains valid JSON string under body.barcode; validate payload in Parse Barcode node |\n| Ticket exists but cannot update | Google Sheets API auth / permission error | Reconnect Google Sheets OAuth2 credential; ensure the service account/user has edit access to the sheet |\n| Emails not sent | Gmail OAuth2 credential missing or Gmail API quota reached | Reauthorize Gmail credential; consider switching to SendGrid/Mailgun for large volumes |\n| Duplicate check-in allowed | Logic checking \"Checked In\" value mismatch (case/format) | Normalize the Checked In field values and use strict comparisons in Ticket Available? node |\n| Slow generation for many tickets | Sequential QR calls and sends | Use parallel execution or a dedicated email service; increase worker resources for n8n instance |\n\n---\n\n## Use Case Examples\n\n### Scenario 1: Community Fun Run (200 attendees)\n\n- **Challenge:** Manual QR generation and emailing takes ~3 hours.\n- **Solution:** After marking registrations as PAID, the scheduled job generates 200 QR tickets and emails them automatically.\n- **Result:** Ticket prep completed in &lt;5 minutes; volunteer time reduced by ~3 hours.\n\n### Scenario 2: Regional Festival (2,000 tickets)\n\n- **Challenge:** High volume requires reliable delivery and check-in speed.\n- **Solution:** Use this workflow but replace Gmail with a transactional email provider (SendGrid) and host n8n on a scalable instance. Monitor Google Sheets and email provider quotas.\n- **Result:** Automated delivery scales; on-site check-in handled via the /v1/scanner endpoint with near-instant validation.\n\n---\n\n## Additional Information\n\n**Created by:** [Khmuhtadin](https://khmuhtadin.com/contact) \n**Category:** Event Automation, Ticketing Backend  \n**Tags:** `google-sheets`, `gmail`, `qr-code`, `webhook`, `ticketing`\n\nNeed custom workflows or help adapting this for your event? **[Contact us](https://khaisa.studio/contact)** \n\n**Note:** Import the JSON into your [n8n instance](https://n8n.partnerlinks.io/khmuhtadin) to get started.\n\nMy Social:\n[Threads](https://www.threads.com/@khmuhtadin) [LinkedIn](https://www.linkedin.com/in/khmuhtadin/) [Medium](https://medium.com/@khaisastudio) **[Workflow Collections](https://khaisa.studio/products/)** [portfolio](https://khmuhtadin.com)",
+  "workflow": {
+    "id": "INTOFdov9bwbgo9w",
+    "meta": {
+      "instanceId": "c2650793f644091dc80fb900fe63448ad1f4b774008de9608064d67294f8307c"
+    },
+    "name": "Ticketing Backend",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "06cc3525-a2a8-4b35-8436-73d03e43dbc7",
+        "name": "Get Tickets",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -240,
+          -96
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ $json.ticket_id }}",
+                "lookupColumn": "Ticket ID"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 2010454173,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=2010454173",
+            "cachedResultName": "Tickets"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "4fe22443-1f46-4c85-8b93-670e2dfff603",
+        "name": "Parse Barcode",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -448,
+          -96
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.all()[0].json.body;\n\n// Parse the barcode JSON string\nlet ticketData;\ntry {\n  ticketData = JSON.parse(data.barcode);\n} catch (error) {\n  return [{\n    json: {\n      success: false,\n      message: \"Invalid QR code format\"\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    ticket_id: ticketData.ticket_id,\n    event: ticketData.event,\n    name: ticketData.name,\n    email: ticketData.email,\n    ticket_number: ticketData.ticket_number,\n    total_tickets: ticketData.total_tickets,\n    scannedAt: data.scannedAt\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2276b656-ea51-4570-8896-d1fe28ebee45",
+        "name": "Ticket Available?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -48,
+          -96
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "5d1d995d-3ee8-4b56-8555-9fe5b919497a",
+                "operator": {
+                  "type": "number",
+                  "operation": "gt"
+                },
+                "leftValue": "={{ $('Get Tickets').all().length }}",
+                "rightValue": 0
+              },
+              {
+                "id": "982727a9-3593-4d1c-9ab3-d1c26d0798fc",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{ $json[\"Checked In\"] }}",
+                "rightValue": "YES"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "d5265744-f1a6-4590-9c45-462297c5b4c7",
+        "name": "Parse Output",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          144,
+          16
+        ],
+        "parameters": {
+          "jsCode": "const getTicketsResult = $('Get Tickets').all();\nconst parsedData = $('Parse Barcode').first().json;\n\nlet errorMessage = \"Ticket tidak valid\";\nlet errorCode = \"INVALID_TICKET\";\n\n// Check if ticket exists but already checked in\nif (getTicketsResult.length > 0) {\n  const ticket = getTicketsResult[0].json;\n  if (ticket[\"Checked In\"] === \"YES\") {\n    errorMessage = `Ticket sudah di-scan pada ${ticket[\"Checkin TIme\"]}`;\n    errorCode = \"ALREADY_CHECKED_IN\";\n  }\n}\n\nreturn [{\n  json: {\n    success: false,\n    error_code: errorCode,\n    message: errorMessage,\n    ticket_id: parsedData.ticket_id\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2638bce7-9b67-491a-9bc1-8ffa2d08d4f8",
+        "name": "Already Checked IN",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          320,
+          16
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "81b4773f-4728-4413-8950-12d79a27d257",
+        "name": "Checked IN",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          320,
+          -176
+        ],
+        "parameters": {
+          "options": {},
+          "respondWith": "json",
+          "responseBody": "={\n  \"success\": true,\n  \"message\": \"Check-in berhasil!\",\n  \"data\": {\n    \"ticket_id\": \"{{ $('Get Tickets').first().json['Ticket ID'] }}\",\n    \"name\": \"{{ $('Get Tickets').first().json.Nama }}\",\n    \"ticket_number\": \"{{ $('Get Tickets').first().json['Ticket Number'] }}\",\n    \"email\": \"{{ $('Get Tickets').first().json.Email }}\",\n    \"checked_in_at\": \"{{ $json[\"Checkin TIme\"] }}\"\n  }\n}"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "8f9403c3-65b9-4a5b-956f-c31c1089c190",
+        "name": "Update Ticket Status",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          144,
+          -176
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Ticket ID": "={{ $json[\"Ticket ID\"] }}",
+              "Checked In": "YES",
+              "Checkin TIme": "={{ new Date($('SCAN TICKET').item.json.body.scannedAt).toLocaleString('en-GB', { hour12: false }).replace(',', '') }}"
+            },
+            "schema": [
+              {
+                "id": "Ticket ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Ticket ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nama",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Nama",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Ticket Number",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Ticket Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Tickets",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Total Tickets",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Checked In",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Checked In",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Checkin TIme",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Checkin TIme",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "Ticket ID"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 2010454173,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=2010454173",
+            "cachedResultName": "Tickets"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "b6b18e4b-f70e-4870-b649-83980feb360e",
+        "name": "SCAN TICKET",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -656,
+          -96
+        ],
+        "webhookId": "492de38d-21ee-4f7d-adfe-dbad80dfa146",
+        "parameters": {
+          "path": "v1/scanner",
+          "options": {},
+          "httpMethod": "POST",
+          "responseMode": "responseNode"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "a77f808a-f8c8-4d68-9007-744aa8018245",
+        "name": "Email exist?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -48,
+          1168
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "5d1d995d-3ee8-4b56-8555-9fe5b919497a",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.row_number !== undefined }}",
+                "rightValue": "undefined"
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "08943fee-59bc-4aac-b9cf-80662be21dca",
+        "name": "Get Participant",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -240,
+          1168
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ $json.Email }}",
+                "lookupColumn": "Email"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=0",
+            "cachedResultName": "Register"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "86af65a2-c014-4714-be6d-16083640acb4",
+        "name": "Validate Input",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -688,
+          1328
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.all()[0].json.body;\n\n// Validation\nconst errors = [];\n\nif (!data.nama || data.nama.trim() === '') {\n  errors.push('Nama wajib diisi');\n}\n\nif (!data.email || !data.email.includes('@')) {\n  errors.push('Email tidak valid');\n}\n\nif (!data.no_hp || data.no_hp.length < 10) {\n  errors.push('Nomor HP tidak valid');\n}\n\nif (!data.jumlah_tiket || data.jumlah_tiket < 1) {\n  errors.push('Jumlah tiket minimal 1');\n}\n\nif (!data.payment_method) {\n  errors.push('Payment method wajib dipilih');\n}\n\n// Return error if validation fails\nif (errors.length > 0) {\n  return [{\n    json: {\n      valid: false,\n      validation_error: true,\n      errors: errors\n    }\n  }];\n}\n\n// Transform data for sheet\nreturn [{\n  json: {\n    valid: true,\n    validation_error: false,\n    Nama: data.nama,\n    \"No Hp\": data.no_hp,\n    Email: data.email,\n    \"Jumlah TIket\": data.jumlah_tiket,\n    \"Harga Tiket\": data.total_price,\n    \"Payment Method \": data.payment_method,\n    \"Payment Status\": \"PENDING\",\n    \"Email Sent\": \"NO\",\n    \"Ticked ID\": \"\"\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0bb8c7fa-59d8-4185-954f-3a0858924bc7",
+        "name": "Validation Error",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          -240,
+          1344
+        ],
+        "parameters": {
+          "options": {},
+          "respondWith": "json",
+          "responseBody": "{\n  \"success\": false,\n  \"error\": \"VALIDATION_ERROR\",\n  \"message\": \"Validasi gagal\",\n  \"errors\": [\"Email tidak valid\"]\n}"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "76dbc60d-7078-4b6e-ad79-cbbcdde7a9e7",
+        "name": "Valid Input?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -480,
+          1328
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "0248f448-237b-46da-86b8-cdc5058ec170",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "false",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.validation_error }}",
+                "rightValue": "false"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "431640c5-e0a7-44e2-9b51-c11d0f6f6b6c",
+        "name": "Already Registered",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          160,
+          992
+        ],
+        "parameters": {
+          "options": {},
+          "respondWith": "json",
+          "responseBody": "{\n  \"success\": false,\n  \"error\": \"DUPLICATE_EMAIL\",\n  \"message\": \"Email sudah terdaftar\",\n  \"existing_data\": {\n    \"nama\": \"khairul\",\n    \"payment_status\": \"PAID\",\n    \"jumlah_tiket\": 2\n  }\n}"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "b9f61154-8a8b-4ea9-ae62-a1b9b316af72",
+        "name": "Tiket Booked",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          368,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "respondWith": "json",
+          "responseBody": "={\n  \"success\": true,\n  \"message\": \"Registrasi berhasil! Silakan lakukan pembayaran.\",\n  \"data\": {\n    \"nama\": \"{{ $json.Nama }}\",\n    \"email\": \"{{ $json.Email }}\",\n    \"jumlah_tiket\": {{ $json['Jumlah TIket'] }},\n    \"total_price\": {{ $json['Harga Tiket'] }},\n    \"payment_method\": \"{{ $json['Payment Method '] }}\",\n    \"payment_status\": \"PENDING\"\n  }\n}"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "63255ef1-df60-41cf-a262-e45e61636139",
+        "name": "Store Data",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          160,
+          1184
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Nama": "={{ $('Validate Input').item.json.Nama }}",
+              "Email": "={{ $('Validate Input').item.json.Email }}",
+              "No Hp": "={{ $('Validate Input').item.json['No Hp'] }}",
+              "Email Sent": "={{ $('Validate Input').item.json['Email Sent'] }}",
+              "Harga Tiket": "={{ $('Validate Input').item.json['Harga Tiket'] }}",
+              "Jumlah TIket": "={{ $('Validate Input').item.json['Jumlah TIket'] }}",
+              "Payment Status": "={{ $('Validate Input').item.json['Payment Status'] }}",
+              "Payment Method ": "={{ $('Validate Input').item.json['Payment Method '] }}"
+            },
+            "schema": [
+              {
+                "id": "Nama",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Nama",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "No Hp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "No Hp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Jumlah TIket",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Jumlah TIket",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Harga Tiket",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Harga Tiket",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Payment Method ",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Payment Method ",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Payment Status",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Payment Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email Sent",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Ticked ID",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Ticked ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=0",
+            "cachedResultName": "Register"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "f93e5fa3-4e4f-4909-9fbe-fb148cc743d3",
+        "name": "REGISTER",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -912,
+          1328
+        ],
+        "webhookId": "1f5ebc0c-2fed-4bcb-9741-e70d188db457",
+        "parameters": {
+          "path": "v1/register",
+          "options": {},
+          "httpMethod": "POST",
+          "responseMode": "responseNode"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "dd84a672-34c0-422d-a178-0a181fd37882",
+        "name": "Get Rows",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -736,
+          416
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=0",
+            "cachedResultName": "Register"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "5d549b2f-14ca-4f42-b96d-8d01051c0351",
+        "name": "Filter Paid Not Sent",
+        "type": "n8n-nodes-base.filter",
+        "position": [
+          -512,
+          416
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "75fc42dd-aeec-4109-970d-7eb026b6b097",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json[\"Payment Status\"] }}",
+                "rightValue": "PAID"
+              },
+              {
+                "id": "70bf28b6-59dc-4acc-8908-5e521d83c4fa",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json[\"Email Sent\"] }}",
+                "rightValue": "NO"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "0adcf4d7-d1e6-4f8a-945a-b7346ffd69fc",
+        "name": "Generate Ticket Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -752,
+          640
+        ],
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst output = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i].json;\n  \n  // Parse jumlah tiket\n  const jumlahTiket = parseInt(item[\"Jumlah TIket\"]) || 1;\n  \n  // Generate ALL ticket IDs first for this person\n  const allTicketsForThisPerson = [];\n  \n  for (let ticketNum = 1; ticketNum <= jumlahTiket; ticketNum++) {\n    const now = new Date();\n    const timestamp = now.toISOString().slice(0,10).replace(/-/g, '');\n    const rowNum = item.row_number || (i + 2);\n    const hash = Math.random().toString(36).substring(2, 10).toUpperCase();\n    \n    const ticketId = `TL-${timestamp}-${String(rowNum).padStart(4, '0')}-${ticketNum}-${hash}`;\n    allTicketsForThisPerson.push(ticketId);\n    \n    const qrData = JSON.stringify({\n      event: \"TABRAK_LARI\",\n      ticket_id: ticketId,\n      name: item.Nama,\n      email: item.Email,\n      ticket_number: ticketNum,\n      total_tickets: jumlahTiket,\n      timestamp: now.toISOString(),\n      hash: hash\n    });\n    \n    output.push({\n      json: {\n        ...item,\n        ticket_id: ticketId,\n        ticket_number: ticketNum,\n        total_tickets: jumlahTiket,\n        qr_data: qrData,\n        qr_data_url_encoded: encodeURIComponent(qrData),\n        event_name: \"TABRAK LARI\",\n        event_date: \"15 November 2025\",\n        event_location: \"GOR Pontianak\"\n      }\n    });\n  }\n}\n\nreturn output;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f9c1609a-b102-452f-972d-12625e9403c6",
+        "name": "Generate QR Code",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -480,
+          640
+        ],
+        "parameters": {
+          "url": "=https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={{ $json.qr_data_url_encoded }}",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "file"
+              }
+            }
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "43c28eec-ecaa-4de2-aab6-c7efa392b232",
+        "name": "Build HTML Email",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -256,
+          560
+        ],
+        "parameters": {
+          "jsCode": "// Build HTML Ticket Email - MULTIPLE TICKETS SUPPORT\nconst items = $input.all();\nconst output = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i].json;\n  \n  // Get binary data\n  let qrBase64 = '';\n  \n  if (items[i].binary && items[i].binary.data) {\n    const binaryData = items[i].binary.data;\n    \n    if (binaryData.data) {\n      qrBase64 = binaryData.data;\n    } else if (Buffer.isBuffer(binaryData)) {\n      qrBase64 = binaryData.toString('base64');\n    }\n  }\n  \n  const htmlTemplate = `\n<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body {\n      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\n      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n      padding: 20px;\n      margin: 0;\n    }\n    .ticket-container {\n      max-width: 600px;\n      margin: 0 auto;\n      background: white;\n      border-radius: 20px;\n      overflow: hidden;\n      box-shadow: 0 20px 60px rgba(0,0,0,0.3);\n    }\n    .ticket-header {\n      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n      color: white;\n      padding: 40px 30px;\n      text-align: center;\n    }\n    .ticket-header h1 {\n      margin: 0;\n      font-size: 32px;\n      font-weight: 700;\n      text-transform: uppercase;\n      letter-spacing: 2px;\n    }\n    .ticket-number-badge {\n      background: rgba(255,255,255,0.2);\n      display: inline-block;\n      padding: 8px 20px;\n      border-radius: 20px;\n      margin-top: 10px;\n      font-size: 14px;\n      font-weight: 600;\n    }\n    .ticket-body {\n      padding: 40px 30px;\n    }\n    .qr-section {\n      text-align: center;\n      margin: 30px 0;\n      padding: 30px;\n      background: #f8f9fa;\n      border-radius: 15px;\n    }\n    .qr-section img {\n      max-width: 280px;\n      border: 8px solid white;\n      border-radius: 10px;\n      box-shadow: 0 5px 15px rgba(0,0,0,0.1);\n    }\n    .ticket-info {\n      background: #f8f9fa;\n      padding: 25px;\n      border-radius: 15px;\n      margin: 20px 0;\n    }\n    .info-row {\n      display: flex;\n      justify-content: space-between;\n      padding: 12px 0;\n      border-bottom: 1px solid #dee2e6;\n    }\n    .info-row:last-child {\n      border-bottom: none;\n    }\n    .info-label {\n      font-weight: 600;\n      color: #495057;\n    }\n    .info-value {\n      color: #212529;\n      font-weight: 500;\n    }\n    .ticket-id {\n      text-align: center;\n      font-size: 20px;\n      font-weight: 700;\n      color: #667eea;\n      margin: 20px 0;\n      padding: 15px;\n      background: #f8f9fa;\n      border-radius: 10px;\n      letter-spacing: 1px;\n      word-break: break-all;\n    }\n    .important-note {\n      background: #fff3cd;\n      border-left: 4px solid #ffc107;\n      padding: 20px;\n      margin: 25px 0;\n      border-radius: 5px;\n    }\n    .important-note h3 {\n      margin-top: 0;\n      color: #856404;\n    }\n    .footer {\n      text-align: center;\n      padding: 30px;\n      color: #6c757d;\n      font-size: 14px;\n    }\n  </style>\n</head>\n<body>\n  <div class=\"ticket-container\">\n    <div class=\"ticket-header\">\n      <h1>${item.event_name}</h1>\n      <p style=\"margin: 10px 0 0 0; font-size: 18px;\">Tiketmu Telah Tersedia!</p>\n      <div class=\"ticket-number-badge\">\n        Tiket ${item.ticket_number} dari ${item.total_tickets}\n      </div>\n    </div>\n    \n    <div class=\"ticket-body\">\n      <h2 style=\"color: #212529; margin-top: 0;\">Hi ${item.Nama || item.Name || 'Guest'}!</h2>\n      <p style=\"color: #495057; font-size: 16px; line-height: 1.6;\">\n        Terima kasih atas pembayaran Anda! Berikut adalah tiket <strong>#${item.ticket_number}</strong> dari total <strong>${item.total_tickets} tiket</strong> yang Anda pesan.\n      </p>\n      \n      <div class=\"ticket-id\">\n        ${item.ticket_id}\n      </div>\n      \n      <div class=\"qr-section\">\n        <h3 style=\"margin-top: 0; color: #495057;\">Scan QR Code Ini di Entrance</h3>\n        <img src=\"data:image/png;base64,${qrBase64}\" alt=\"QR Code Ticket\" />\n      </div>\n      \n      <div class=\"ticket-info\">\n        <h3 style=\"margin-top: 0; color: #495057;\">Detail Tiket</h3>\n        <div class=\"info-row\">\n          <span class=\"info-label\">Nama:</span>\n          <span class=\"info-value\">${item.Nama || item.Name || 'Guest'}</span>\n        </div>\n        <div class=\"info-row\">\n          <span class=\"info-label\">Email:</span>\n          <span class=\"info-value\">${item.Email}</span>\n        </div>\n        <div class=\"info-row\">\n          <span class=\"info-label\">Tiket:</span>\n          <span class=\"info-value\">#${item.ticket_number} dari ${item.total_tickets}</span>\n        </div>\n        <div class=\"info-row\">\n          <span class=\"info-label\">Ticket ID:</span>\n          <span class=\"info-value\">${item.ticket_id}</span>\n        </div>\n      </div>\n      \n      <div class=\"important-note\">\n        <h3>Penting!</h3>\n        <ul style=\"margin: 10px 0; padding-left: 20px;\">\n          <li>Simpan email ini dengan baik</li>\n          <li>Setiap tiket memiliki QR code unik</li>\n          <li>Tunjukkan QR code saat masuk venue</li>\n          <li>Satu tiket hanya berlaku untuk satu kali scan</li>\n          <li>Datang 30 menit sebelum acara dimulai</li>\n        </ul>\n      </div>\n    </div>\n    \n    <div class=\"footer\">\n      <p style=\"margin: 5px 0;\">2025 TABRAK LARI Event. All rights reserved.</p>\n    </div>\n  </div>\n</body>\n</html>\n`;\n\n  output.push({\n    json: {\n      ...item,\n      html_content: htmlTemplate,\n      qr_base64: qrBase64\n    }\n  });\n}\n\nreturn output;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "641a85a1-0f76-4894-bd17-c9715f39eea1",
+        "name": "Send Email (Gmail)",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          0,
+          384
+        ],
+        "webhookId": "28bf1adb-e6ca-4797-ade5-6f7d2746bf1e",
+        "parameters": {
+          "sendTo": "={{ $json.Email }}",
+          "message": "={{ $json.html_content }}",
+          "options": {
+            "appendAttribution": false
+          },
+          "subject": "=Tiketmu Telah Tersedia!"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "bcfc2a0f-474b-4b9a-a652-52715cdf7e29",
+        "name": "Update Sheet (Register)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          272,
+          560
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Email": "={{ $json.Email }}",
+              "Ticked ID": "={{ $json.ticket_ids_combined }}",
+              "Email Sent": "YES"
+            },
+            "schema": [
+              {
+                "id": "Nama",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Nama",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "No Hp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "No Hp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Jumlah TIket",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Jumlah TIket",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Harga Tiket",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Harga Tiket",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Payment Method ",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Payment Method ",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Payment Status",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Payment Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email Sent",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Ticked ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Ticked ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Checked In?",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Checked In?",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "CHECKIN TIME",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "CHECKIN TIME",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "Email"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=0",
+            "cachedResultName": "Register"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "207cd6d4-0812-4547-8b28-c5c3725636bd",
+        "name": "Update Sheet (Tickets)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          16,
+          736
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Nama": "={{ $json.Nama }}",
+              "Email": "={{ $json.Email }}",
+              "Ticket ID": "={{ $json.ticket_id }}",
+              "Ticket Number": "={{ $json.ticket_number }}/{{ $json.total_tickets }}",
+              "Total Tickets": "={{ $json.total_tickets }}"
+            },
+            "schema": [
+              {
+                "id": "Ticket ID",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Ticket ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nama",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Nama",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Ticket Number",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Ticket Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Tickets",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Total Tickets",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Checked In",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Checked In",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Checkin TIme",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Checkin TIme",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 2010454173,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit#gid=2010454173",
+            "cachedResultName": "Tickets"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1rQqe5XWmhWgnsAI6Q8kxoeCTbcNMdHsfP2tHRP7y7Po/edit?usp=drivesdk",
+            "cachedResultName": "TABRAK LARI"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "f99c03de-9578-456f-8443-e5fa2840e88e",
+        "name": "START",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -960,
+          416
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 1
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "75d7c162-962b-4a07-80db-43ed07565987",
+        "name": "Parse Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          16,
+          560
+        ],
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst grouped = {};\n\nfor (let item of items) {\n  const email = item.json.Email;\n  \n  if (!grouped[email]) {\n    grouped[email] = {\n      Email: email,\n      ticket_ids: []\n    };\n  }\n  \n  grouped[email].ticket_ids.push(item.json.ticket_id);\n}\n\nconst output = Object.values(grouped).map(item => ({\n  json: {\n    Email: item.Email,\n    ticket_ids_combined: item.ticket_ids.join(\", \")\n  }\n}));\n\nreturn output;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0b3858e2-2c61-4f1d-b6e6-45a7e3ce3ea6",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1008,
+          -352
+        ],
+        "parameters": {
+          "width": 1552,
+          "height": 608,
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7b512e89-2626-4a2b-b24e-a4688d9e120b",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1008,
+          288
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 1552,
+          "height": 608,
+          "content": "# Ticket Generator & Sender\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cc7ab6b0-47ea-4e08-8ba8-5cbc0e470e2c",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1008,
+          928
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 1552,
+          "height": 608,
+          "content": "\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "34074899-d8b0-4ae0-89be-3ac61046fd03",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          576,
+          288
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 512,
+          "height": 608,
+          "content": "# Event Ticketing System - Complete Flow\n\nThis workflow manages the full lifecycle of event ticketing:\n1. **Registration** - Accepts participant registration via webhook\n2. **Ticket Generation** - Auto-generates QR codes for paid registrations\n3. **Email Delivery** - Sends tickets to participants via Gmail\n4. **Check-in Scanner** - Validates tickets at the event entrance\n\nAll data is stored in Google Sheets with two tabs:\n- Register (participant info)\n- Tickets (individual ticket records)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "33452a6b-f2cf-4acc-bfe1-fb2506e26cd6",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          576,
+          928
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 512,
+          "height": 608,
+          "content": "# Setup Required\n\nYou need these credentials configured:\n\n1. **Google Sheets OAuth2** \n   - Used for reading/writing registration & ticket data\n   - Connect your Google account in n8n credentials\n\n2. **Gmail OAuth2**\n   - Used for sending ticket emails\n   - Must use the same Google account as Sheets\n   - Enable Gmail API in Google Cloud Console\n\n3. **Google Sheet Structure**\n   - Sheet ID: `your sheet id`\n   - Tab 1: \"Register\" - stores participant registrations\n   - Tab 2: \"Tickets\" - stores individual ticket records"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "160db932-0e42-4b39-b39d-2654179c1c78",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -992,
+          -336
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 480,
+          "height": 496,
+          "content": "# How Ticket Scanner Works\n\n**Endpoint**: POST `/v1/scanner`\n\n**Flow**:\n1. Receives scanned QR data\n2. Parses ticket_id from barcode JSON\n3. Looks up ticket in Google Sheets\n4. Validates:\n   - Ticket exists\n   - Not already checked in\n5. Updates \"Checked In\" = YES if valid\n6. Returns success/error response\n\n**Error Cases**:\n- Invalid ticket\n- Already checked in (shows previous check-in time)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "84430c98-7876-4ea9-9908-7f59c7718752",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -992,
+          944
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 512,
+          "height": 352,
+          "content": "# Registration Endpoint\n\n**Endpoint**: POST `/v1/register`\n\n**Expected Input**:\n```json\n{\n  \"nama\": \"string\",\n  \"email\": \"string\", \n  \"no_hp\": \"string\",\n  \"jumlah_tiket\": number,\n  \"total_price\": number,\n  \"payment_method\": \"string\"\n}"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9cd7ba10-a91c-4134-a481-94df3bfde3c3",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          576,
+          -352
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 512,
+          "height": 608,
+          "content": "# Automatic Ticket Generation\n\n**Trigger**: Runs every 1 minute\n\n**What it does**:\n1. Finds paid registrations where Email Sent = NO\n2. Generates unique ticket IDs for each ticket\n3. Creates QR codes via qrserver.com API\n4. Builds HTML email with QR code embedded\n5. Sends one email per ticket (supports multiple tickets)\n6. Updates both Register & Tickets sheets\n7. Marks Email Sent = YES\n\n**Ticket ID Format**: \n`TL-YYYYMMDD-XXXX-N-HASH`\n- Event code, date, row number, ticket number, unique hash"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "7577dfcb-a9b7-4cef-85ca-ecfc79c85cef",
+    "connections": {
+      "START": {
+        "main": [
+          [
+            {
+              "node": "Get Rows",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Rows": {
+        "main": [
+          [
+            {
+              "node": "Filter Paid Not Sent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "REGISTER": {
+        "main": [
+          [
+            {
+              "node": "Validate Input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Data": {
+        "main": [
+          [
+            {
+              "node": "Update Sheet (Register)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Store Data": {
+        "main": [
+          [
+            {
+              "node": "Tiket Booked",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Tickets": {
+        "main": [
+          [
+            {
+              "node": "Ticket Available?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SCAN TICKET": {
+        "main": [
+          [
+            {
+              "node": "Parse Barcode",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Email exist?": {
+        "main": [
+          [
+            {
+              "node": "Already Registered",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Store Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Output": {
+        "main": [
+          [
+            {
+              "node": "Already Checked IN",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Valid Input?": {
+        "main": [
+          [
+            {
+              "node": "Get Participant",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Validation Error",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Barcode": {
+        "main": [
+          [
+            {
+              "node": "Get Tickets",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Input": {
+        "main": [
+          [
+            {
+              "node": "Valid Input?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Participant": {
+        "main": [
+          [
+            {
+              "node": "Email exist?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build HTML Email": {
+        "main": [
+          [
+            {
+              "node": "Send Email (Gmail)",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Parse Data",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Update Sheet (Tickets)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate QR Code": {
+        "main": [
+          [
+            {
+              "node": "Build HTML Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ticket Available?": {
+        "main": [
+          [
+            {
+              "node": "Update Ticket Status",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Parse Output",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter Paid Not Sent": {
+        "main": [
+          [
+            {
+              "node": "Generate Ticket Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Ticket Data": {
+        "main": [
+          [
+            {
+              "node": "Generate QR Code",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Ticket Status": {
+        "main": [
+          [
+            {
+              "node": "Checked IN",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 35,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 3
+      },
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.filter": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 8
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 7
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.respondToWebhook": {
+        "count": 5
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Khairul Muhtadin",
+    "username": "khmuhtadin",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://khmuhtadin.com"
+    ],
+    "avatar": "https://gravatar.com/avatar/eb5ab777f1b9a8ec3306fff57cf9c4d1f68c9460212cd1181f6c7cd7ab98530e?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 535,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.respondToWebhook",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.respondtowebhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Respond to Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Respond to Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 844,
+      "icon": "fa:filter",
+      "name": "n8n-nodes-base.filter",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The Filter node can be used to filter items based on a condition. If the condition is met, the item will be passed on to the next node. If the condition is not met, the item will be omitted. Conditions can be combined together by AND(meet all conditions), or OR(meet at least one condition).",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.filter/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Filter",
+        "color": "#229eff"
+      },
+      "iconData": {
+        "icon": "filter",
+        "type": "icon"
+      },
+      "displayName": "Filter",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 45,
+      "name": "Miscellaneous"
+    }
+  ],
+  "image": [
+    {
+      "id": 2765,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/Screenshot_2025_10_05_at_15_01_48_57c2af98ca.png"
+    }
+  ]
+}

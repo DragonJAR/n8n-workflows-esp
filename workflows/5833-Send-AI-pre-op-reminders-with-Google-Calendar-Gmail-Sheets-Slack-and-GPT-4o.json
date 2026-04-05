@@ -1,0 +1,1811 @@
+{
+  "id": 13516,
+  "name": "Send AI pre-op reminders with Google Calendar, Gmail, Sheets, Slack and GPT-4o",
+  "views": 215,
+  "recentViews": 2,
+  "totalViews": 215,
+  "createdAt": "2026-02-19T13:28:48.246Z",
+  "description": "## 📘 Description\nThis workflow automates end-to-end pre-surgery checklist reminders and confirmation tracking for healthcare operations teams. It ensures patients receive timely preparation instructions, can confirm completion with a single click, and allows staff to monitor confirmation status in real time—without manual coordination.\nEvery day at 9:00 AM, the workflow fetches surgery events from Google Calendar, extracts patient details from event descriptions, and generates a unique confirmation link for each patient. An AI assistant then creates a personalized, patient-friendly pre-op checklist email (subject + styled HTML body) that includes surgery details and a confirmation button.\nWhen a patient clicks the confirmation link, a webhook captures the confirmation, updates Google Sheets as the source of truth, and records the timestamp. A separate periodic scheduler scans the sheet for patients who have not confirmed within the expected window. If confirmation is missing, the assigned nurse or owner is alerted in Slack with full patient and surgery context for immediate follow-up.\nThis creates a closed-loop system: reminder → confirmation capture → tracking → escalation.\n\n## ⚙️ What This Workflow Does (Step-by-Step)\n▶️ Daily 9:00 AM Trigger\n Starts the pre-op reminder cycle automatically each morning.\n📅 Fetch Today’s Surgery Events (Google Calendar)\n Pulls calendar events and filters only surgery-related entries.\n🧾 Extract Patient Details from Event Description\n Parses patient name, email, phone, ID, procedure, and surgery time.\n🔗 Generate Unique Confirmation Link\n Creates a secure confirmUrl per patient with tracking parameters.\n✉️ AI Email Generation (Subject + HTML Body)\n Uses Azure OpenAI (gpt-4o) to generate a calm, professional checklist email with:\nSurgery details\nBasic preparation checklist\nGreen confirmation button linked to confirmUrl\n📤 Send Pre-Op Reminder via Gmail\n Delivers the styled HTML email directly to the patient.\n✅ Confirmation Webhook (GET /confirm)\n Captures patient clicks, parses query parameters, and marks the checklist as confirmed.\n🧾 Upsert Confirmation Status (Google Sheets)\n Stores and updates patient confirmation records as the operational source of truth.\n⏳ Periodic Confirmation Check\n Runs on a schedule to scan all patient rows for missing confirmations.\n🚨 Slack Alert for Missing Confirmations\n Notifies the nurse or owner with full patient context when confirmation is not received in time.\n\n## 🧩 Prerequisites\n • Google Calendar OAuth2\n • Gmail OAuth2\n • Azure OpenAI (gpt-4o) credentials\n • Google Sheets OAuth2\n • Slack API credentials\n • Publicly accessible webhook URL for confirmation tracking\n\n## 💡 Key Benefits\n ✔ Automated pre-op reminders at a fixed daily time\n ✔ Personalized AI-generated patient emails\n ✔ One-click confirmation tracking\n ✔ Google Sheets audit trail for operations\n ✔ Proactive Slack alerts for missing confirmations\n ✔ Reduced manual follow-ups and missed preparations\n\n## 👥 Perfect For\n-  Hospitals and surgical centers\n-  Clinic operations teams\n-  Care coordinators\n-  Day-surgery facilities\n-  Healthcare admin automation systems\n",
+  "workflow": {
+    "id": "3ScO4fFTR4QAPxv7",
+    "meta": {
+      "instanceId": "8443f10082278c46aa5cf3acf8ff0f70061a2c58bce76efac814b16290845177",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "AI-Powered Patient Pre-Op Reminder & Nurse Alert System",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "9cb44951-2696-41c7-9b9f-ba9f88eec30d",
+        "name": "Schedule Trigger: Daily 9:00 AM",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1616,
+          80
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 9 * * *"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "5e89bd0d-fcda-4e4f-b041-e3d9e4c32b68",
+        "name": "Google Calendar: Fetch Today’s Events",
+        "type": "n8n-nodes-base.googleCalendar",
+        "position": [
+          -1376,
+          80
+        ],
+        "parameters": {
+          "options": {},
+          "calendar": {
+            "__rl": true,
+            "mode": "list",
+            "value": "user@example.com",
+            "cachedResultName": "user@example.com"
+          },
+          "operation": "getAll"
+        },
+        "credentials": {
+          "googleCalendarOAuth2Api": {
+            "id": "credential-id",
+            "name": "Google Calendar account -anuj"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "6dbbade9-5c8a-4d68-99a7-85e575b54d65",
+        "name": "Extract Surgery Events + Patient Fields",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1136,
+          80
+        ],
+        "parameters": {
+          "jsCode": "const results = [];\n\nfor (const item of $input.all()) {\n  const event = item.json;\n\n  // Only pick surgery events\n  if (!event.summary || !event.summary.toLowerCase().includes('surgery')) {\n    continue;\n  }\n\n  // Description is HTML-like, clean it\n  const rawDesc = event.description || '';\n\n  const cleanText = rawDesc\n    .replace(/<[^>]*>/g, '')  // remove HTML tags\n    .replace(/\\s+/g, ' ')     // normalize spaces\n    .trim();\n\n  // Extract fields using regex\n  const getValue = (key) => {\n    const match = cleanText.match(new RegExp(`${key}:\\\\s*([^\\\\s]+[^:]*)`, 'i'));\n    return match ? match[1].trim() : null;\n  };\n\n  const patient_name = getValue('patient_name');\n  const patient_email = getValue('patient_email');\n  const patient_phone = getValue('patient_phone');\n  const patient_id = getValue('patient_id');\n  const procedure = getValue('procedure');\n\n  results.push({\n    json: {\n      event_id: event.id,\n      surgery_time: event.start?.dateTime,\n      patient_name,\n      patient_email,\n      patient_phone,\n      patient_id,\n      procedure,\n      calendar_link: event.htmlLink\n    }\n  });\n}\n\nreturn results;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7155eea4-a86f-42ee-a4b9-0826745db1ae",
+        "name": "Build Unique Confirmation Link (confirmUrl)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -912,
+          80
+        ],
+        "parameters": {
+          "jsCode": "const allItems = $input.all();\nlet output = [];\n\nallItems.forEach((item, index) => {\n  const patient = item.json;\n\n  const patientId = patient.patient_id;\n  const uniqueId = `confirm_${patientId}_${Date.now()}_${index}`;\n\n  output.push({\n    json: {\n      ...patient,\n      uniqueId,\n      confirmUrl: `https://n8n.tdwebsites.in/webhook-test/confirm?patient_id=${patientId}&uniqueId=${uniqueId}`,\n      createdAt: new Date().toISOString()\n    }\n  });\n});\n\nreturn output;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0d98c297-dd1b-4713-93a6-43df54ceaa04",
+        "name": "Clean Patient Fields (Name/Email/Phone/ID)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -704,
+          80
+        ],
+        "parameters": {
+          "jsCode": "const allItems = $input.all();\n\nconst output = allItems.map(item => {\n  const data = item.json;\n\n  return {\n    json: {\n      ...data,\n      // Clean fields if they already exist\n      patient_name: data.patient_name?.replace(' patient_email', ''),\n      patient_email: data.patient_email?.replace(' patient_phone', ''),\n      patient_phone: data.patient_phone?.replace(' patient_id', ''),\n      patient_id: data.patient_id?.replace(' procedure', ''),\n    }\n  };\n});\n\nreturn output;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "3fd06e20-f901-4a98-a3d6-16401a7fb7df",
+        "name": "AI: Generate Pre-Op Checklist Email (Subject + HTML Body)",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          -480,
+          80
+        ],
+        "parameters": {
+          "text": "=Generate a pre-op checklist reminder email for this patient:\n\n{{ JSON.stringify($json, null, 2) }}\n\nEmail requirements:\n- Subject: \"Pre-Surgery Checklist – Action Required\"\n- Body (HTML):\n  - Greet the patient by name\n  - Mention the surgery time and procedure\n  - Show this checklist:\n    • No food after midnight  \n    • Bring ID and medical reports  \n    • Arrive 30 minutes early  \n  - Include a green confirmation button with label: \"Confirm Checklist Completed\"\n  - The button must link to confirmUrl\n  - Add footer text: \"If you do not confirm within 4 hours, a nurse will follow up.\"\n",
+          "options": {
+            "systemMessage": "=You are a healthcare operations assistant.\n\nYour task is to generate a professional, patient-friendly pre-surgery checklist email.\n\nYou will receive a JSON object with the following fields:\n- event_id\n- surgery_time\n- patient_name\n- patient_email\n- patient_phone\n- patient_id\n- procedure\n- calendar_link\n- confirmUrl\n\nRules:\n- Keep the tone polite, calm, and reassuring.\n- Do NOT invent any details.\n- Do NOT include any medical advice beyond basic reminders.\n- Use only the provided fields.\n- The email must be suitable for sending to a patient.\n- Return output in valid JSON with exactly these keys:\n  {\n    \"Subject\": \"string\",\n    \"Body\": \"<html>...</html>\"\n  }\n- The Body must be valid HTML with inline styles suitable for email clients.\n"
+          },
+          "promptType": "define",
+          "hasOutputParser": true
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "5bc9ecda-dd47-4165-8500-35ea83960ba9",
+        "name": "LLM: Azure OpenAI Chat Model (gpt-4o)",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAzureOpenAi",
+        "position": [
+          -496,
+          320
+        ],
+        "parameters": {
+          "model": "gpt-4o",
+          "options": {}
+        },
+        "credentials": {
+          "azureOpenAiApi": {
+            "id": "credential-id",
+            "name": "Azure Open AI account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e8df273d-ea03-4adb-bbbf-9484676512a7",
+        "name": "Parse AI Output (Subject/Body JSON)",
+        "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "position": [
+          -288,
+          304
+        ],
+        "parameters": {
+          "jsonSchemaExample": "{\n\t\"Subject\": \" \",\n\t\"Body\": \" \"\n}"
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "320ba35d-f4f4-4cf3-8e2b-68b60683e784",
+        "name": "Gmail: Send Pre-Op Checklist Reminder",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          -64,
+          80
+        ],
+        "webhookId": "0b8ad369-1a2d-45b2-b382-3f8d103569b8",
+        "parameters": {
+          "sendTo": "=",
+          "message": "={{ $json.output.Body }}",
+          "options": {
+            "appendAttribution": false
+          },
+          "subject": "={{ $json.output.Subject }}"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "Gmail credentials"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "0eb7713d-6b31-4a1f-9c84-4188eacdd2e4",
+        "name": "Webhook: Patient Checklist Confirmation (GET /confirm)",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -1648,
+          688
+        ],
+        "webhookId": "confirm-webhook-placeholder",
+        "parameters": {
+          "path": "confirm",
+          "options": {}
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "54a170ab-b038-40d0-9203-0ef8d2f49fbc",
+        "name": "Parse Query Params + Mark Confirmed (patient_id, uniqueId, confirmedAt)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1360,
+          688
+        ],
+        "parameters": {
+          "jsCode": "const items = $input.all();\n\n// Simple in-memory store (for demo purposes)\nconst confirmations = [];\n\nitems.forEach(item => {\n  const query = item.json.query || {};\n\n  const patientIdRaw = query.patient_id || null;\n  const uniqueIdRaw = query.uniqueId || null;\n\n  // Clean messy values (remove extra words if present)\n  const patient_id = patientIdRaw ? patientIdRaw.replace(' procedure', '').trim() : null;\n  const uniqueId = uniqueIdRaw ? uniqueIdRaw.replace(' procedure', '').trim() : null;\n\n  confirmations.push({\n    patient_id,\n    uniqueId,\n    confirmed: true,\n    confirmedAt: new Date().toISOString()\n  });\n});\n\n// Return as items so next nodes can use it\nreturn confirmations.map(c => ({\n  json: c\n}));\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "1c286f09-82f3-49dd-bd9d-aa0c063218a0",
+        "name": "Google Sheets: Upsert Patient Confirmation Status",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -1088,
+          688
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "confirmed": "={{ $json.confirmed }}",
+              "patient_id": "={{ $json.patient_id }}",
+              "confirmed_at": "={{ $json.confirmed }}"
+            },
+            "schema": [
+              {
+                "id": "patient_id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "patient_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "uniqueId",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "uniqueId",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "patient_name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "patient_name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "patient_email",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "patient_email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "patient_phone",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "patient_phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "procedure",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "procedure",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "surgery_time",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "surgery_time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "confirmed",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "confirmed",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "confirmed_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "confirmed_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "calendar_link",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "calendar_link",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "patient_id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 208642893,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/17rcNd_ZpUQLm0uWEVbD-NY6GyFUkrD4BglvawlyBygM/edit#gid=208642893",
+            "cachedResultName": "patient data"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "17rcNd_ZpUQLm0uWEVbD-NY6GyFUkrD4BglvawlyBygM",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/17rcNd_ZpUQLm0uWEVbD-NY6GyFUkrD4BglvawlyBygM/edit?usp=drivesdk",
+            "cachedResultName": "sample_leads_50"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "automations@techdome.ai"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "87000ced-b5f8-4f9f-8b4a-007d72866349",
+        "name": "Schedule Trigger: Periodic Confirmation Check",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1680,
+          1184
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "83830ae1-7ac5-47df-a4ef-70873e30e67b",
+        "name": "Google Sheets: Fetch Patient Confirmation Rows",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -1424,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 208642893,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/17rcNd_ZpUQLm0uWEVbD-NY6GyFUkrD4BglvawlyBygM/edit#gid=208642893",
+            "cachedResultName": "patient data"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "17rcNd_ZpUQLm0uWEVbD-NY6GyFUkrD4BglvawlyBygM",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/17rcNd_ZpUQLm0uWEVbD-NY6GyFUkrD4BglvawlyBygM/edit?usp=drivesdk",
+            "cachedResultName": "sample_leads_50"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "automations@techdome.ai"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "e5f71b2f-e692-4b2f-a16a-c9a78f278e8c",
+        "name": "IF: Confirmed = true (route unmatched = not confirmed)",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -1216,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "a12a691a-10bb-4bef-a829-b28f7a1f29c8",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.confirmed }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "c1bbfc25-3cc5-45a9-9f96-fb98f8426c01",
+        "name": "Slack: Alert Nurse/Owner — Checklist Not Confirmed",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          -864,
+          1200
+        ],
+        "webhookId": "7966a1b3-8a66-440c-b36e-edf9019ee900",
+        "parameters": {
+          "text": "=🚨 *Pre-Op Checklist Not Confirmed*\n\n👤 *Patient:* {{ $json.patient_name }}  \n🆔 *Patient ID:* {{ $json.patient_id }}  \n🩺 *Procedure:* {{ $json.procedure }}  \n⏰ *Surgery Time:* {{ $json.surgery_time }}  \n\n❌ The patient has not confirmed the pre-op checklist within the required time window.\n\n📞 *Contact:* {{ $json.patient_phone }}  \n📧 *Email:* {{ $json.patient_email }}  \n\n🔗 *Calendar Event:*  \n{{ $json.calendar_link }}\n\n➡️ Please follow up with the patient as soon as possible.\n",
+          "user": {
+            "__rl": true,
+            "mode": "list",
+            "value": "U09HMPVD466",
+            "cachedResultName": "newscctv22"
+          },
+          "select": "user",
+          "otherOptions": {}
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "credential-id",
+            "name": "Slack account vivek"
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "c88fad6a-9a0a-45ec-9112-63cee20797dd",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2976,
+          -368
+        ],
+        "parameters": {
+          "width": 688,
+          "height": 720,
+          "content": "## 🏥 AI-Powered Patient Pre-Op Reminder & Nurse Alert System\n### What this workflow does\nThis workflow automates pre-surgery checklist reminders for patients and tracks their confirmation status end-to-end. Every day at 9:00 AM, it fetches today’s surgery events from Google Calendar, filters surgery-related events, and extracts patient details from the event description. For each patient, it generates a unique confirmation link and sends a personalized pre-op checklist email using AI.\n\nThe email includes basic preparation steps (fasting, bringing documents, early arrival) and a confirmation button. When a patient clicks the confirmation link, the workflow records the confirmation in Google Sheets. This creates a lightweight audit trail for staff and ensures patient readiness is visible to the care team.\n\nA separate periodic check reviews all patient rows in Google Sheets and identifies patients who have not confirmed within the expected time window. If a patient has not confirmed, the workflow alerts the assigned nurse or owner on Slack with full context so they can follow up manually. This reduces missed confirmations, improves patient preparedness, and helps teams catch risks early.\n\n### Setup checklist\n• Connect Google Calendar OAuth  \n• Connect Azure OpenAI credentials  \n• Connect Gmail OAuth2  \n• Connect Google Sheets  \n• Connect Slack API  \n\n### Customization ideas\n• Change reminder time or cadence  \n• Add SMS reminders for non-confirmed patients  \n• Add nurse assignment logic per procedure  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e0950490-833d-4c58-a9ab-13bd9e78685b",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1824,
+          -128
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 608,
+          "height": 432,
+          "content": "## 📅 Daily Surgery Intake & Patient Extraction\n\nFetches today’s calendar events and filters\nonly surgery-related entries.\n\n• Pulls events from Google Calendar  \n• Extracts patient details from description  \n• Normalizes data for downstream steps  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "39940b45-36e7-41c0-90d4-5d3addf4dd05",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1184,
+          -112
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 624,
+          "height": 416,
+          "content": "## 🔗 Build Unique Patient Confirmation Links\n\nCreates a unique, trackable confirmation\nURL per patient.\n\n• Generates secure confirmUrl  \n• Adds timestamps + IDs  \n• Enables click tracking per patient  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7ac09893-52fe-4da7-bd98-752cc8de8166",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -544,
+          -112
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 640,
+          "content": "## ✉️ AI Pre-Op Checklist Email Generation\n\nCreates a patient-friendly checklist email\nusing real surgery details.\n\n• Personalized subject + HTML body  \n• Includes confirmation button  \n• Safe, non-clinical language  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b40c06b8-116e-4af7-930e-3add83ed9be3",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -144,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 320,
+          "height": 496,
+          "content": "## 📤 Send Checklist Reminder (Gmail)\n\nSends the pre-op checklist email\nto the patient.\n\n• Uses Gmail for delivery  \n• Supports styled HTML emails  \n• Human-readable patient message  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b3e4a1c6-9ba4-42f2-b2da-39c4de528cd8",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1696,
+          448
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 432,
+          "content": "## ✅ Patient Confirmation Capture (Webhook)\n\nReceives confirmation when the patient\nclicks the email button.\n\n• Parses patient_id + uniqueId  \n• Marks checklist as confirmed  \n• Feeds data into tracking sheet  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "11e3b3c5-7c6a-4270-b081-fef373480815",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1168,
+          384
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 368,
+          "height": 496,
+          "content": "## 🧾 Store Confirmation Status (Google Sheets)\n\nStores and updates patient confirmation\nrecords for audit and ops visibility.\n\n• Upserts confirmation status  \n• Tracks confirmed_at timestamp  \n• Acts as source of truth  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "69246534-8cf5-4299-bc68-0be5d0d850a0",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1728,
+          976
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 704,
+          "height": 400,
+          "content": "## ⏳ Periodic Confirmation Check\n\nPeriodically scans patients who have\nnot confirmed on time.\n\n• Reads patient rows from Sheets  \n• Filters confirmed vs not confirmed  \n• Flags risky cases for follow-up  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "096c15ab-89f7-470d-8ba1-60bde7af780f",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -976,
+          976
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 320,
+          "height": 400,
+          "content": "## 🚨 Alert Care Team for Missing Confirmations\n\nNotifies nurse or owner when a patient\nhas not confirmed the checklist.\n\n• Sends full patient context to Slack  \n• Highlights surgery time + procedure  \n• Enables fast manual follow-up  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f9e8d987-0e48-45c7-aeb8-158449c0dc5d",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -576,
+          1072
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 352,
+          "height": 304,
+          "content": "## 🔐 Credentials & Safety Notes\n\n• Google Calendar OAuth  \n• Gmail OAuth2  \n• Azure OpenAI API  \n• Google Sheets OAuth  \n• Slack API  \n\nDo not include medical advice beyond basic reminders.\nAlways keep human follow-up in the loop for non-confirmed patients.\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "0b99eb34-b77c-487e-ae98-bdbc3adace73",
+    "connections": {
+      "Schedule Trigger: Daily 9:00 AM": {
+        "main": [
+          [
+            {
+              "node": "Google Calendar: Fetch Today’s Events",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse AI Output (Subject/Body JSON)": {
+        "ai_outputParser": [
+          [
+            {
+              "node": "AI: Generate Pre-Op Checklist Email (Subject + HTML Body)",
+              "type": "ai_outputParser",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Gmail: Send Pre-Op Checklist Reminder": {
+        "main": [
+          []
+        ]
+      },
+      "LLM: Azure OpenAI Chat Model (gpt-4o)": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI: Generate Pre-Op Checklist Email (Subject + HTML Body)",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Surgery Events + Patient Fields": {
+        "main": [
+          [
+            {
+              "node": "Build Unique Confirmation Link (confirmUrl)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Calendar: Fetch Today’s Events": {
+        "main": [
+          [
+            {
+              "node": "Extract Surgery Events + Patient Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clean Patient Fields (Name/Email/Phone/ID)": {
+        "main": [
+          [
+            {
+              "node": "AI: Generate Pre-Op Checklist Email (Subject + HTML Body)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Unique Confirmation Link (confirmUrl)": {
+        "main": [
+          [
+            {
+              "node": "Clean Patient Fields (Name/Email/Phone/ID)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger: Periodic Confirmation Check": {
+        "main": [
+          [
+            {
+              "node": "Google Sheets: Fetch Patient Confirmation Rows",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Sheets: Fetch Patient Confirmation Rows": {
+        "main": [
+          [
+            {
+              "node": "IF: Confirmed = true (route unmatched = not confirmed)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Sheets: Upsert Patient Confirmation Status": {
+        "main": [
+          []
+        ]
+      },
+      "IF: Confirmed = true (route unmatched = not confirmed)": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Slack: Alert Nurse/Owner — Checklist Not Confirmed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Webhook: Patient Checklist Confirmation (GET /confirm)": {
+        "main": [
+          [
+            {
+              "node": "Parse Query Params + Mark Confirmed (patient_id, uniqueId, confirmedAt)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI: Generate Pre-Op Checklist Email (Subject + HTML Body)": {
+        "main": [
+          [
+            {
+              "node": "Gmail: Send Pre-Op Checklist Reminder",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Query Params + Mark Confirmed (patient_id, uniqueId, confirmedAt)": {
+        "main": [
+          [
+            {
+              "node": "Google Sheets: Upsert Patient Confirmation Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 26,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 10
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleCalendar": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.lmChatAzureOpenAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.outputParserStructured": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Rahul Joshi",
+    "username": "rahul08",
+    "bio": "Rahul Joshi is a seasoned technology leader specializing in the n8n automation tool and AI-driven workflow automation. With deep expertise in building open-source workflow automation and self-hosted automation platforms, he helps organizations eliminate manual processes through intelligent n8n ai agent automation solutions.\n\n",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/callrahul/"
+    ],
+    "avatar": "https://gravatar.com/avatar/b6cf57822463143589b36ada06fbf6cb1509223a740fae3160b28f1ce41ccc12?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 317,
+      "icon": "file:googleCalendar.svg",
+      "name": "n8n-nodes-base.googleCalendar",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-host-virtual-coffee-breaks-with-n8n/",
+                "icon": "☕️",
+                "label": "How to host virtual coffee breaks with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automation for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/tracking-time-spent-in-meetings-with-google-calendar-twilio-and-n8n/",
+                "icon": "🗓",
+                "label": "Tracking Time Spent in Meetings With Google Calendar, Twilio, and n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlecalendar/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Calendar"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgODIiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZD0iTTYxLjA1MiAxOC45NDdIMTguOTQ3djQyLjEwNWg0Mi4xMDV6Ii8+PHBhdGggZmlsbD0iI2VhNDMzNSIgZD0iTTYxLjA1MyA4MCA4MCA2MS4wNTNINjEuMDUzeiIvPjxwYXRoIGZpbGw9IiNmYmJjMDQiIGQ9Ik04MCAxOC45NDdINjEuMDUzdjQyLjEwNUg4MHoiLz48cGF0aCBmaWxsPSIjMzRhODUzIiBkPSJNNjEuMDUyIDYxLjA1M0gxOC45NDdWODBoNDIuMTA1eiIvPjxwYXRoIGZpbGw9IiMxODgwMzgiIGQ9Ik0wIDYxLjA1M3YxMi42MzJBNi4zMTQgNi4zMTQgMCAwIDAgNi4zMTYgODBoMTIuNjMyVjYxLjA1M3oiLz48cGF0aCBmaWxsPSIjMTk2N2QyIiBkPSJNODAgMTguOTQ3VjYuMzE2QTYuMzE0IDYuMzE0IDAgMCAwIDczLjY4NSAwSDYxLjA1M3YxOC45NDd6Ii8+PHBhdGggZmlsbD0iIzQyODVmNCIgZD0iTTYxLjA1MyAwSDYuMzE2QTYuMzE0IDYuMzE0IDAgMCAwIDAgNi4zMTZ2NTQuNzM3aDE4Ljk0N1YxOC45NDdoNDIuMTA1VjB6TTI3LjU4NCA1MS42MTFjLTEuNTc0LTEuMDYzLTIuNjYzLTIuNjE2LTMuMjU4LTQuNjY4bDMuNjUzLTEuNTA1cS40OTggMS44OTQgMS43MzcgMi45MzdjMS4yMzkgMS4wNDMgMS44MjEgMS4wMzcgMi45ODkgMS4wMzdxMS43OTIgMCAzLjA3OS0xLjA4OWMxLjI4Ny0xLjA4OSAxLjI5LTEuNjUzIDEuMjktMi43NzRhMy40NCAzLjQ0IDAgMCAwLTEuMzU4LTIuODExYy0uOTA1LS43MjctMi4wNDItMS4wODktMy40LTEuMDg5aC0yLjExMXYtMy42MTZIMzIuMXExLjc1MiAwIDIuOTUzLS45NDdjMS4yMDEtLjk0NyAxLjItMS40OTUgMS4yLTIuNTk1cTAtMS40NjctMS4wNzQtMi4zNDJjLTEuMDc0LS44NzUtMS42MjEtLjg3OS0yLjcyMS0uODc5cS0xLjYxLS4wMDItMi41NTguODU4Yy0uOTQ4Ljg2LTEuMTA2IDEuMzAxLTEuMzc5IDIuMTExbC0zLjYxNi0xLjUwNWMuNDc5LTEuMzU4IDEuMzU4LTIuNTU4IDIuNjQ3LTMuNTk1czIuOTM3LTEuNTU4IDQuOTM3LTEuNTU4cTIuMjItLjAwMiAzLjk4OS44NThjMS43NjkuODYgMi4xMDUgMS4zNjggMi43NzQgMi4zNzlzMSAyLjE1MyAxIDMuNDE2cTAgMS45MzItLjkzMiAzLjI3NGMtLjkzMiAxLjM0Mi0xLjM4NCAxLjU3OS0yLjI4OSAyLjA1OHYuMjE2YTYuOTUgNi45NSAwIDAgMSAyLjkzNyAyLjI4OXExLjE0NiAxLjUzOCAxLjE0NyAzLjY4NGMuMDAxIDIuMTQ2LS4zNjMgMi43MTEtMS4wODkgMy44MzJzLTEuNzMyIDIuMDA1LTMuMDA1IDIuNjQ3Yy0xLjI3OS42NDItMi43MTYuOTY4LTQuMzExLjk2OC0xLjg0Ny4wMDUtMy41NTMtLjUyNi01LjEyNi0xLjU4OXptMjIuNDM3LTE4LjEyNi00LjAxIDIuOS0yLjAwNS0zLjA0MiA3LjE5NS01LjE4OWgyLjc1OHYyNC40NzloLTMuOTM3VjMzLjQ4NHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Calendar",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1179,
+      "icon": "fa:code",
+      "name": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "codex": {
+        "data": {
+          "alias": [
+            "json",
+            "zod"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.outputparserstructured/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Output Parsers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Structured Output Parser"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Structured Output Parser",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1253,
+      "icon": "file:azure.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatAzureOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatazureopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Azure OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMjQyIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJhIiB4MT0iNTguOTcyJSIgeDI9IjM3LjE5MSUiIHkxPSI3LjQxMSUiIHkyPSIxMDMuNzYyJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzExNEE4QiIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzA2NjlCQyIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iNTkuNzE5JSIgeDI9IjUyLjY5MSUiIHkxPSI1Mi4zMTMlIiB5Mj0iNTQuODY0JSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1vcGFjaXR5PSIuMyIvPjxzdG9wIG9mZnNldD0iNy4xJSIgc3RvcC1vcGFjaXR5PSIuMiIvPjxzdG9wIG9mZnNldD0iMzIuMSUiIHN0b3Atb3BhY2l0eT0iLjEiLz48c3RvcCBvZmZzZXQ9IjYyLjMlIiBzdG9wLW9wYWNpdHk9Ii4wNSIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1vcGFjaXR5PSIwIi8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9ImMiIHgxPSIzNy4yNzklIiB4Mj0iNjIuNDczJSIgeTE9IjQuNiUiIHkyPSI5OS45NzklIj48c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjM0NDQkY0Ii8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjMjg5MkRGIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHBhdGggZmlsbD0idXJsKCNhKSIgZD0iTTg1LjM0My4wMDNoNzUuNzUzTDgyLjQ1NyAyMzNhMTIuMDggMTIuMDggMCAwIDEtMTEuNDQyIDguMjE2SDEyLjA2QTEyLjA2IDEyLjA2IDAgMCAxIC42MzMgMjI1LjMwM0w3My44OTggOC4yMTlBMTIuMDggMTIuMDggMCAwIDEgODUuMzQzIDB6Ii8+PHBhdGggZmlsbD0iIzAwNzhENCIgZD0iTTE5NS40MjMgMTU2LjI4Mkg3NS4yOTdhNS41NiA1LjU2IDAgMCAwLTMuNzk2IDkuNjI3bDc3LjE5IDcyLjA0N2ExMi4xNCAxMi4xNCAwIDAgMCA4LjI4IDMuMjZoNjguMDJ6Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZD0iTTg1LjM0My4wMDNhMTEuOTggMTEuOTggMCAwIDAtMTEuNDcxIDguMzc2TC43MjMgMjI1LjEwNWExMi4wNDUgMTIuMDQ1IDAgMCAwIDExLjM3IDE2LjExMmg2MC40NzVhMTIuOTMgMTIuOTMgMCAwIDAgOS45MjEtOC40MzdsMTQuNTg4LTQyLjk5MSA1Mi4xMDUgNDguNmExMi4zMyAxMi4zMyAwIDAgMCA3Ljc1NyAyLjgyOGg2Ny43NjZsLTI5LjcyMS04NC45MzUtODYuNjQzLjAyTDE2MS4zNy4wMDN6Ii8+PHBhdGggZmlsbD0idXJsKCNjKSIgZD0iTTE4Mi4wOTggOC4yMDdBMTIuMDYgMTIuMDYgMCAwIDAgMTcwLjY3LjAwM0g4Ni4yNDVjNS4xNzUgMCA5Ljc3MyAzLjMwMSAxMS40MjggOC4yMDRMMTcwLjk0IDIyNS4zYTEyLjA2MiAxMi4wNjIgMCAwIDEtMTEuNDI4IDE1LjkyaDg0LjQyOWExMi4wNjIgMTIuMDYyIDAgMCAwIDExLjQyNS0xNS45MnoiLz48L3N2Zz4="
+      },
+      "displayName": "Azure OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 41,
+      "name": "Ticket Management"
+    },
+    {
+      "id": 47,
+      "name": "AI Chatbot"
+    }
+  ],
+  "image": []
+}

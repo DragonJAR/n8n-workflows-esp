@@ -1,0 +1,1194 @@
+{
+  "id": 7886,
+  "name": "Monitor TP-Link Omada network disconnections with Gmail & Pushover",
+  "views": 327,
+  "recentViews": 0,
+  "totalViews": 327,
+  "createdAt": "2025-08-26T08:32:44.519Z",
+  "description": "# Monitor device disconnections from Omada emails to Google Sheets with Pushover alerts\n\n## Who’s it for\nThis workflow is designed for IT admins, network engineers, or small business owners who need to automatically monitor device connectivity from Omada Controller email alerts. If you want a lightweight, low-cost solution for tracking device uptime without complex monitoring software, this template is for you.\n\n## How it works\nThe workflow listens for Omada Controller email alerts using Gmail, parses each email, and logs device connection status (connected/disconnected) into Google Sheets. Every 5 minutes, it checks for devices that have been disconnected for more than 30 minutes. If a device has not reconnected, the workflow sends a push notification via Pushover. Old logs are cleared automatically every 2 days to keep the sheet clean.\n\n---\n\n## Workflow Overview\nThe workflow is broken into three main parts:\n\n### 1. Email Processing (Receives Alert -&gt; Append Row in Sheet)  \nTriggered whenever a new email is received. It uses a Code node to parse the raw text of the email, extracting details like device name, MAC address, and connection status. This data is formatted and appended as a new row to Google Sheets, creating a comprehensive log of all connection events.  \n\n\n**Important:** In the Gmail trigger node, make sure to set the search field or filter so that it only matches the subject line used by Omada Controller alert emails. This ensures the workflow only processes the intended alerts and not unrelated emails.\n\n### 2. Disconnected Device Alerting (Check Every 5 minutes -&gt; Alert User)  \nRuns every 5 minutes. It reads the device log from Google Sheets, identifies the most recent status for each device, and filters for devices currently disconnected. If a device has been disconnected for more than 30 minutes, a high-priority push notification is sent to **Pushover account**. Once sent, the workflow updates the corresponding row in the Google Sheet to prevent duplicate alerts.\n\n### 3. Data Maintenance (Clear Rows Every 2 days -&gt; Clear sheet)  \nRuns every two days to clean up the Google Sheet by deleting the oldest rows, keeping the log from growing too large.\n\n---\n\n## Services and Dependencies\nTo run this workflow, you’ll need the following services connected to n8n:\n\n- **Google Sheets**: Logs all connection events and tracks device status  \n- **Gmail**: Acts as the trigger, listening for Omada Controller alerts  \n- **Pushover**: Sends real-time, high-priority push notifications to mobile devices  \n\n---\n\n## Setup Instructions\n\n### 1. Create a Google Sheet Log\n- Create a new Google Sheet in your Google Drive  \n- Name it something like `Omada Device Log`  \n- Add these headers in the first row:  \n\n**exact spelling and order is crucial**\n`rowId`, `timestamp`, `timestampISO`, `category`, `severity`, `mac`, `name`, `type`, `status`, `checkAfter`, `alertSent`, `timeStampFormated`\n\n### 2. Configure Credentials\n- **Google Sheets**: Create a new OAuth2 credential in n8n  \n- **Gmail**: Create a new OAuth2 credential (must receive Omada alerts)  \n- **Pushover**: Create a new API credential and get user keys for each recipient  \n\n### 3. Import the Workflow\n- Copy the JSON workflow file  \n- In n8n: click **New → Import from JSON**  \n- Paste the JSON code  \n\n### 4. Update the Nodes\n- **Receives Alert**: Link it to your Gmail credential  \n- **Append Row in Sheet, Get Row(s) in Sheet, Update Alert, Clear sheet**: Replace `YOUR_GOOGLE_SHEET_ID` with your Google Sheet’s ID (found in the sheet URL between `/d/` and `/edit`)  \n- **Alert User**: Replace `YOUR_PUSHOVER_USER_KEY` with your Pushover user keys  \n\n---\n\n## Node Breakdown\n- **Receives Alert** (Gmail Trigger): Listens for new emails  \n- **Process Email and Extract** (Code): Parses email and extracts structured data (timestamps, device info, status)  \n- **Append Row in Sheet** (Google Sheets): Adds a new row to your log  \n- **Check Every 5 minutes** (Schedule Trigger): Runs regularly to check device status  \n- **Get Row(s) in Sheet** (Google Sheets): Reads log to get latest status per device  \n- **Check Device and Notify** (Code): Groups rows by MAC, filters disconnected devices past 30 minutes  \n- **Alert User** (Pushover): Sends formatted push notification with device details  \n- **Update Alert** (Google Sheets): Marks the row as alerted to prevent duplicates  \n- **Clear Rows Every 2 days** (Schedule Trigger): Runs maintenance  \n- **Clear sheet** (Google Sheets): Deletes old rows, preserves header  \n\n\n",
+  "workflow": {
+    "meta": {
+      "instanceId": "d01584c137acc6debff205dab2295feffaded6fa97a8e6a16d6a41090f7caf2c",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "376b4f9c-7bf1-40a1-88a3-11bbdd1824b8",
+        "name": "Process Email and Extract",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          464,
+          176
+        ],
+        "parameters": {
+          "jsCode": "// ... (Code from \"Check Device and Notify\" node)\n\n// Group rows by MAC\nconst latestByMac = {};\n\nfor (const item of items) { // 'items' here represents all rows fetched from your Google Sheet\n  const mac = item.json.mac;\n  const time = new Date(item.json.timestampISO); // Converts the timestamp ISO string to a Date object\n\n  if (!mac || isNaN(time)) continue; // Skips if MAC is missing or time is invalid\n\n  // This is the crucial part for finding the LATEST status\n  if (!latestByMac[mac] || new Date(latestByMac[mac].json.timestampISO) < time) {\n    latestByMac[mac] = item; // If this MAC is new, or the current 'item' is newer than what's stored, update it\n  }\n}\n\n// Filter the latest per MAC that are still disconnected and have passed their 30-minute threshold\nconst overdueAlerts = Object.values(latestByMac).filter(item => {\n  const status = item.json.status; // Get the status of the LATEST entry for this MAC\n  const timestampISO = new Date(item.json.timestampISO); // Original event time of the latest entry\n  const checkAfter = new Date(item.json.checkAfter); // 30 mins after original event time of the latest entry\n  const alertSent = item.json.alertSent;\n\n  // This check assumes 'checkAfter' means 30 minutes from timestampISO has passed,\n  // and we want to trigger if that condition is met internally, irrespective of 'now'.\n  const isOverdueFinal = !isNaN(checkAfter.getTime());\n\n  const notAlerted = !(alertSent === true || alertSent === \"true\");\n\nreturn (status === 'disconnected' || status === 'isolated') && isOverdueFinal && notAlerted;\n});\n\nreturn overdueAlerts;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6808c535-be1a-4bce-8a55-17e4878b2c3b",
+        "name": "Append Row in Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          896,
+          176
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "mac": "={{ $json.mac }}",
+              "name": "={{ $json.name }}",
+              "type": "={{ $json.type }}",
+              "rowId": "={{ $json.rowId }}",
+              "status": "={{ $json.status }}",
+              "category": "={{ $json.category }}",
+              "severity": "={{ $json.severity }}",
+              "alertSent": "={{ $json.alertSent }}",
+              "timestamp": "={{ $json.timestamp }}",
+              "checkAfter": "={{ $json.checkAfter }}",
+              "timestampISO": "={{ $json.timestampISO }}",
+              "timeStampFormated": "={{ $json.timestampFormatted }}"
+            },
+            "schema": [
+              {
+                "id": "rowId",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "rowId",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestamp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timestamp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestampISO",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timestampISO",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "category",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "category",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "severity",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "severity",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "mac",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "mac",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "type",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "checkAfter",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "checkAfter",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "alertSent",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "alertSent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timeStampFormated",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "timeStampFormated",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_SHEET_GID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit#gid=YOUR_SHEET_GID_HERE",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit?usp=drivesdk",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "bc91b08b-924a-4c0f-8e8b-d1d69d218a33",
+        "name": "Check Every 5 minutes",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          64,
+          800
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "f35f5433-0aa4-41ba-9665-a749daae3a5a",
+        "name": "Get Row(s) in Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          288,
+          800
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_SHEET_GID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit#gid=YOUR_SHEET_GID_HERE",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit?usp=drivesdk",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.6,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "6db058b2-c4d5-4875-b536-ac14285cacf3",
+        "name": "Check Device and Notify",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          512,
+          800
+        ],
+        "parameters": {
+          "jsCode": "const latestByMac = {};\n\nfor (const item of items) {\n  const mac = item.json.mac;\n  const time = new Date(item.json.timestampISO);\n\n  if (!mac || isNaN(time)) continue;\n\n  if (!latestByMac[mac] || new Date(latestByMac[mac].json.timestampISO) < time) {\n    latestByMac[mac] = item;\n  }\n}\n\n// Adjust to Philippine Time (UTC+8)\nconst now = new Date();\nconst nowLocal = new Date(now.getTime() + (8 * 60 * 60 * 1000));\n\nconst overdueAlerts = Object.values(latestByMac).filter(item => {\n  const status = String(item.json.status || \"\").toLowerCase();\n  const checkAfter = new Date(item.json.checkAfter);\n  const alertSent = String(item.json.alertSent).toLowerCase();\n\n  const isOverdue = !isNaN(checkAfter.getTime()) && nowLocal >= checkAfter;\n  const notAlerted = alertSent !== \"true\" && alertSent !== \"yes\" && alertSent !== \"1\";\n\n  console.log(\"DEBUG\", {\n    mac: item.json.mac,\n    status,\n    nowLocal: nowLocal.toISOString(),\n    checkAfter: item.json.checkAfter,\n    isOverdue,\n    notAlerted,\n    alertSentRaw: item.json.alertSent\n  });\n\n  return (status === \"disconnected\" || status === \"isolated\") && isOverdue && notAlerted;\n});\n\nreturn overdueAlerts.length > 0 ? overdueAlerts : [{ json: { debug: \"No overdue devices found\", nowLocal: nowLocal.toISOString() } }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "17b9806a-7ed4-4f49-bbdf-941277fe74ae",
+        "name": "Update Alert",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          944,
+          784
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "rowId": "={{ $json.rowId }}",
+              "alertSent": "=true"
+            },
+            "schema": [
+              {
+                "id": "rowId",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "rowId",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestamp",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "timestamp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestampISO",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timestampISO",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "category",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "category",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "severity",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "severity",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "mac",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "mac",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "type",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "checkAfter",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "checkAfter",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "alertSent",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "alertSent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timeStampFormated",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "timeStampFormated",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "rowId"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_SHEET_GID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit#gid=YOUR_SHEET_GID_HERE",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit?usp=drivesdk",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "64082460-3cfb-4af2-82c5-dea73f6fe80a",
+        "name": "Receives Alert",
+        "type": "n8n-nodes-base.gmailTrigger",
+        "position": [
+          16,
+          176
+        ],
+        "parameters": {
+          "simple": false,
+          "filters": {
+            "q": ""
+          },
+          "options": {},
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "1a29a2dd-f37c-45e7-b0b3-9f21f70c7738",
+        "name": "Clear sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          144,
+          1328
+        ],
+        "parameters": {
+          "clear": "specificRows",
+          "operation": "clear",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_SHEET_GID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit#gid=YOUR_SHEET_GID_HERE",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID_HERE",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID_HERE/edit?usp=drivesdk",
+            "cachedResultName": "YOUR_SHEET_NAME_HERE"
+          },
+          "startIndex": 2,
+          "rowsToDelete": 500
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "a1d48f39-9906-4c5d-99d6-10e953afb397",
+        "name": "Clear Rows Every 2 days",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -80,
+          1328
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "daysInterval": 2,
+                "triggerAtHour": 2
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "c66fc6f3-9923-45d5-89e7-0631c22d1bf1",
+        "name": "Alert User",
+        "type": "n8n-nodes-base.pushover",
+        "position": [
+          944,
+          992
+        ],
+        "parameters": {
+          "message": "={{ $json.name }} is {{ $json.status }}\n\n{{ $json.timeStampFormated }}",
+          "userKey": "YOUR_PUSHOVER_USER_KEY_HERE",
+          "priority": 0,
+          "additionalFields": {}
+        },
+        "credentials": {
+          "pushoverApi": {
+            "id": "credential-id",
+            "name": "pushoverApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "77784bb9-3cae-4150-8346-e423b720a71d",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -560,
+          16
+        ],
+        "parameters": {
+          "width": 464,
+          "height": 448,
+          "content": "## This workflow monitors device connection status from Omada Controller alerts.\n\nHow it works:\n- Gmail Trigger receives Omada alert emails\n- Code node parses the alert into structured fields\n- Data is logged into Google Sheets\n- Every 5 minutes, workflow checks if any device has been disconnected for 30+ minutes\n- Sends a Pushover notification for overdue disconnections\n- Clears old rows from the sheet every 2 days\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b2e2974a-5cf2-40df-9a76-64d3f3ff3534",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Receives Alert**: \n\nGmail trigger for Omada Controller emails  "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7a743261-e183-4302-9a0d-90c97433c3c5",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          400,
+          0
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Process Email and Extract**: \n\nExtracts timestamp, device name, MAC, severity, status  "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "75723c9f-062e-438b-974e-9d3154b5d140",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          816,
+          0
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Append Row in Sheet**: \n\nLogs data to Google Sheets  "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b1e05077-659a-4774-a7b5-82586944fd07",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          96,
+          576
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 304,
+          "height": 144,
+          "content": "**Check Every 5 minutes**: \n\nScheduled polling to detect overdue disconnections  "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "29b5289b-d53c-44fe-85df-db475a119ebf",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          464,
+          576
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Check Device and Notify**: \n\nFilters devices disconnected >30 minutes  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7f0bf309-1e30-43ff-8d18-2ed136e5b82f",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          880,
+          1168
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Alert User**: \n\nSends push notification via Pushover. You can change this to any notifying app"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6c01c483-f76b-47f1-ac07-5ab2ef149541",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          880,
+          576
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Update Alert**: \n\nMarks row as alerted in Google Sheets  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "639d6524-794d-49ea-bfef-2556d4e00d1e",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -32,
+          1136
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 144,
+          "content": "**Clear Rows Every 2 days**: \n\nCleans up old entries to keep data fresh  \n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Receives Alert": {
+        "main": [
+          [
+            {
+              "node": "Process Email and Extract",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Row(s) in Sheet": {
+        "main": [
+          [
+            {
+              "node": "Check Device and Notify",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Every 5 minutes": {
+        "main": [
+          [
+            {
+              "node": "Get Row(s) in Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Device and Notify": {
+        "main": [
+          [
+            {
+              "node": "Update Alert",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Alert User",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clear Rows Every 2 days": {
+        "main": [
+          [
+            {
+              "node": "Clear sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Email and Extract": {
+        "main": [
+          [
+            {
+              "node": "Append Row in Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 19,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.pushover": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 9
+      },
+      "n8n-nodes-base.gmailTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 4
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 2
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Krade1027",
+    "username": "krade1027",
+    "bio": "",
+    "verified": false,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/ec307ae0fe644d307a3a3a4528460aa9d917e1f721ae95b2537f6ee212b87e04?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 383,
+      "icon": "file:pushover.svg",
+      "name": "n8n-nodes-base.pushover",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.pushover/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/pushover/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Pushover"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPjxjaXJjbGUgY3g9IjUxMiIgY3k9IjUxMiIgcj0iNTEyIiBzdHlsZT0iZmlsbDojMjQ5ZGYxIi8+PHBhdGggZD0ibTQ5NS42IDMxOS40IDEwNC0xMy43LTEwMS4zIDIyOC42YzE3LjgtMS40IDM1LjItNy40IDUyLjMtMTguMXMzMi45LTI0LjIgNDcuMi00MC40YzE0LjQtMTYuMiAyNi44LTM0LjIgMzcuMy01NC4xIDEwLjUtMTkuOCAxOC0zOS40IDIyLjYtNTguNSAyLjctMTEuOSA0LTIzLjMgMy44LTM0LjJzLTMuMS0yMC41LTguNi0yOC43LTEzLjgtMTQuOC0yNS0xOS44LTI2LjMtNy41LTQ1LjUtNy41Yy0yMi40IDAtNDQuNCAzLjYtNjYgMTAuOS0yMS43IDcuMy00MS43IDE3LjktNjAuMiAzMS44cy0zNC41IDMxLjItNDguMiA1MnEtMjAuNTUgMzEuMi0yOS40IDcwLjhjLTIuMyA4LjctMy42IDE1LjYtNC4xIDIwLjlzLS42IDkuNi0uMyAxM2MuMiAzLjQuNyA2LjEgMS40IDcuOXMxLjMgMy42IDEuNyA1LjVjLTIzLjMgMC00MC4zLTQuNy01MS0xNHMtMTMuMy0yNS43LTcuOS00OC45YzUuNS0yNC4yIDE3LjktNDcuMiAzNy4zLTY5LjFzNDIuNC00MS4yIDY5LjEtNTcuOCA1NS45LTI5LjkgODcuNi0zOS43cTQ3LjU1LTE0LjcgOTIuNy0xNC43YzI2LjUgMCA0OC43IDMuOCA2Ni43IDExLjNzMzIuMSAxNy41IDQyLjEgMjkuOCAxNi4zIDI2LjcgMTguOCA0My4xcTMuNzUgMjQuNi0yLjQgNTEuM2MtNSAyMS40LTE0LjUgNDMtMjguNCA2NC43cy0zMS40IDQxLjMtNTIuMyA1OC44Yy0yMSAxNy42LTQ1IDMxLjgtNzIuMiA0Mi44LTI3LjEgMTAuOS01NiAxNi40LTg2LjYgMTYuNGgtMy40bC04Ni45IDE5NUgzMDJ6IiBzdHlsZT0iZmlsbDojZmZmIi8+PC9zdmc+"
+      },
+      "displayName": "Pushover",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 824,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmailTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.gmailtrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Gmail Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}

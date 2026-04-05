@@ -1,0 +1,1311 @@
+{
+  "id": 13838,
+  "name": "Detect content decay from Google Search Console and alert via Slack and email",
+  "views": 57,
+  "recentViews": 1,
+  "totalViews": 57,
+  "createdAt": "2026-03-03T12:40:41.954Z",
+  "description": "\n## Who is this for?\n\nSEO managers, content marketers, bloggers, and growth teams who want to automatically catch declining content performance before it's too late — without manually checking Google Search Console every week.\n\n## What this workflow does\n\nThis workflow runs weekly to compare your recent Google Search Console performance against a historical baseline. It identifies pages experiencing traffic decay at three severity levels, sends detailed reports via Slack and email, logs all data to a tracking sheet, and auto-generates prioritized fix tasks for your most critical pages.\n\n## How it works\n\n1. **Weekly trigger** fires every Monday at 8 AM.\n2. **Fetches two GSC date ranges in parallel** — the last 7 days (recent) and the previous 28 days (baseline, normalized to weekly averages).\n3. **Compares per-page metrics** including clicks, impressions, average position, and CTR.\n4. **Classifies each page** into one of five signals:\n   - **CRITICAL_DECAY** — clicks dropped 50%+ or position fell 5+ spots with 30%+ click loss\n   - **DECAYING** — clicks dropped 30%+ or position fell 3+ spots\n   - **EARLY_DECAY** — clicks dropped 15%+ or position fell 1.5+ spots\n   - **STABLE** — no significant change\n   - **GROWING** — clicks increased 20%+\n5. **Logs all results** to a `Decay Log` Google Sheet tab for historical trending.\n6. **Builds a weekly report** with summary counts, estimated clicks lost, and per-page breakdowns.\n7. **Sends the report** to Slack and email simultaneously.\n8. **Auto-generates fix tasks** for critical pages with specific recommendations (backlink audit, content refresh, CTR optimization, or technical investigation) and logs them to a `Fix Tasks` sheet tab.\n\n## Setup steps\n\n1. **Set environment variables** in your n8n instance:\n   - `GSC_SITE_URL` — your verified site URL (e.g., `https://yoursite.com`)\n   - `DECAY_SHEET_URL` — URL of your Google Sheet for logging\n2. **Create a Google Sheet** with two tabs:\n   - `Decay Log` with headers: `date`, `page_path`, `signal`, `clicks_now`, `clicks_before`, `click_change_pct`, `position_now`, `position_before`, `position_change`, `impressions_now`, `impression_change_pct`, `ctr_now`\n   - `Fix Tasks` with headers: `created`, `priority`, `page_path`, `page_url`, `signal`, `click_change_pct`, `position_change`, `recommended_action`\n3. **Connect Google Search Console OAuth2** credentials (your site must be verified in GSC).\n4. **Connect Google Sheets OAuth2** credentials.\n5. **Connect Slack OAuth2** credentials and configure your alert channel.\n6. **Configure email (SMTP)** credentials and update the recipient email address in the \"Email Weekly Report\" node.\n7. **Activate** the workflow.\n\n## Requirements\n\n- n8n instance (self-hosted or cloud)\n- Google Search Console property with verified ownership\n- Google Cloud project with Search Console API and Sheets API enabled\n- Slack workspace with a bot configured\n- SMTP email credentials (or swap for Gmail node)\n\n## How to customize\n\n- **Decay thresholds** — Adjust the percentage and position-change cutoffs in the \"Compare Periods and Detect Decay\" code node to match your sensitivity needs.\n- **Schedule** — Change from weekly to daily or bi-weekly in the trigger node.\n- **Baseline period** — Modify the 28-day comparison window to 14 or 90 days.\n- **Row limit** — Increase the `rowLimit` in GSC API calls beyond 500 if you have a large site.\n- **Fix task logic** — Enhance the remediation recommendations with AI-powered content analysis or integrate with project management tools (Notion, Asana, Trello).\n- **Notifications** — Add Telegram, Discord, or Microsoft Teams alongside or instead of Slack.",
+  "workflow": {
+    "id": "YDzSX1MoX82eMz4k",
+    "meta": {
+      "instanceId": "8f8ee4eb853c20789e317beb113798e3d078c0c7ef754b4b9fad98c2eee7e79d"
+    },
+    "name": "Detect content decay and alert via Slack and email",
+    "tags": [
+      {
+        "id": "mHQntpbppFUpZPGm",
+        "name": "template",
+        "createdAt": "2026-02-17T08:30:26.885Z",
+        "updatedAt": "2026-02-17T08:30:26.885Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "1fd97044-715a-4542-a99e-140e1d73ce73",
+        "name": "Weekly Monday 8AM Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          320,
+          320
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "weeks",
+                "triggerAtDay": [
+                  1
+                ],
+                "triggerAtHour": 8
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "34069535-dd52-4536-bbc8-f9abc5d7b9cc",
+        "name": "Calculate Date Ranges",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          528,
+          320
+        ],
+        "parameters": {
+          "jsCode": "// Calculate date ranges\nconst now = new Date();\n\n// Recent period: last 7 days\nconst recentEnd = new Date(now);\nrecentEnd.setDate(recentEnd.getDate() - 3); // GSC data has 3-day delay\nconst recentStart = new Date(recentEnd);\nrecentStart.setDate(recentStart.getDate() - 7);\n\n// Previous period: 28 days before that\nconst prevEnd = new Date(recentStart);\nprevEnd.setDate(prevEnd.getDate() - 1);\nconst prevStart = new Date(prevEnd);\nprevStart.setDate(prevStart.getDate() - 28);\n\nconst fmt = (d) => d.toISOString().split('T')[0];\n\nreturn [{\n  json: {\n    recent_start: fmt(recentStart),\n    recent_end: fmt(recentEnd),\n    previous_start: fmt(prevStart),\n    previous_end: fmt(prevEnd)\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "fdecf37e-0b0a-4542-9b18-6af9c37e894b",
+        "name": "Fetch GSC Recent 7 Days",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          768,
+          224
+        ],
+        "parameters": {
+          "url": "https://www.googleapis.com/webmasters/v3/sites/{{ encodeURIComponent($env.GSC_SITE_URL) }}/searchAnalytics/query",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "jsonBody": "={\n  \"startDate\": \"{{ $json.recent_start }}\",\n  \"endDate\": \"{{ $json.recent_end }}\",\n  \"dimensions\": [\"page\"],\n  \"rowLimit\": 500,\n  \"startRow\": 0\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googleSearchConsoleOAuth2Api"
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "7a9e78b0-dd0c-4fec-b8f2-6fffd93e56de",
+        "name": "Fetch GSC Previous 28 Days",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          768,
+          416
+        ],
+        "parameters": {
+          "url": "https://www.googleapis.com/webmasters/v3/sites/{{ encodeURIComponent($env.GSC_SITE_URL) }}/searchAnalytics/query",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "jsonBody": "={\n  \"startDate\": \"{{ $json.previous_start }}\",\n  \"endDate\": \"{{ $json.previous_end }}\",\n  \"dimensions\": [\"page\"],\n  \"rowLimit\": 500,\n  \"startRow\": 0\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googleSearchConsoleOAuth2Api"
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "81576c4a-ae86-4edf-b2d6-fe218c9023e8",
+        "name": "Compare Periods and Detect Decay",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1040,
+          320
+        ],
+        "parameters": {
+          "jsCode": "// Compare recent vs previous performance per page\nconst recentData = $('Fetch GSC Recent 7 Days').first().json;\nconst prevData = $('Fetch GSC Previous 28 Days').first().json;\n\nconst recentRows = recentData.rows || [];\nconst prevRows = prevData.rows || [];\n\n// Build lookup from previous period (normalize to weekly average)\nconst prevMap = {};\nfor (const row of prevRows) {\n  const page = row.keys[0];\n  prevMap[page] = {\n    clicks: row.clicks / 4,       // 28 days → weekly avg\n    impressions: row.impressions / 4,\n    ctr: row.ctr,\n    position: row.position\n  };\n}\n\nconst results = [];\n\nfor (const row of recentRows) {\n  const page = row.keys[0];\n  const prev = prevMap[page];\n\n  if (!prev) continue; // New page, skip\n  if (prev.clicks < 2) continue; // Too little traffic to matter\n\n  const clickChange = row.clicks - prev.clicks;\n  const clickChangePct = prev.clicks > 0 ? parseFloat(((clickChange / prev.clicks) * 100).toFixed(1)) : 0;\n  const impressionChange = row.impressions - prev.impressions;\n  const impressionChangePct = prev.impressions > 0 ? parseFloat(((impressionChange / prev.impressions) * 100).toFixed(1)) : 0;\n  const positionChange = parseFloat((row.position - prev.position).toFixed(1)); // positive = worse\n\n  // Determine decay severity\n  let signal = 'STABLE';\n  let severity = 'ok';\n\n  if (clickChangePct <= -50 || (positionChange >= 5 && clickChangePct <= -30)) {\n    signal = 'CRITICAL_DECAY';\n    severity = 'critical';\n  } else if (clickChangePct <= -30 || positionChange >= 3) {\n    signal = 'DECAYING';\n    severity = 'warning';\n  } else if (clickChangePct <= -15 || positionChange >= 1.5) {\n    signal = 'EARLY_DECAY';\n    severity = 'watch';\n  } else if (clickChangePct >= 20) {\n    signal = 'GROWING';\n    severity = 'good';\n  }\n\n  // Clean page path\n  let pagePath = page;\n  try {\n    pagePath = new URL(page).pathname;\n  } catch(e) {}\n\n  results.push({\n    json: {\n      page_url: page,\n      page_path: pagePath,\n      \n      clicks_now: row.clicks,\n      clicks_before: parseFloat(prev.clicks.toFixed(1)),\n      click_change: clickChange,\n      click_change_pct: clickChangePct,\n      \n      impressions_now: row.impressions,\n      impressions_before: parseFloat(prev.impressions.toFixed(1)),\n      impression_change_pct: impressionChangePct,\n      \n      position_now: parseFloat(row.position.toFixed(1)),\n      position_before: parseFloat(prev.position.toFixed(1)),\n      position_change: positionChange,\n      \n      ctr_now: parseFloat((row.ctr * 100).toFixed(2)),\n      ctr_before: parseFloat((prev.ctr * 100).toFixed(2)),\n      \n      signal: signal,\n      severity: severity,\n      \n      date: new Date().toISOString().split('T')[0]\n    }\n  });\n}\n\n// Sort by worst decay first\nresults.sort((a, b) => a.json.click_change_pct - b.json.click_change_pct);\n\nreturn results;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7a51c471-9f95-470c-b668-b5ea0aa46648",
+        "name": "Log All Results to Decay Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1280,
+          416
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "date": "={{ $json.date }}",
+              "signal": "={{ $json.signal }}",
+              "ctr_now": "={{ $json.ctr_now }}",
+              "page_path": "={{ $json.page_path }}",
+              "clicks_now": "={{ $json.clicks_now }}",
+              "position_now": "={{ $json.position_now }}",
+              "clicks_before": "={{ $json.clicks_before }}",
+              "impressions_now": "={{ $json.impressions_now }}",
+              "position_before": "={{ $json.position_before }}",
+              "position_change": "={{ $json.position_change }}",
+              "click_change_pct": "={{ $json.click_change_pct }}",
+              "impression_change_pct": "={{ $json.impression_change_pct }}"
+            },
+            "mappingMode": "defineBelow"
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "Decay Log"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "url",
+            "value": "={{ $env.DECAY_SHEET_URL }}"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "15898af0-2461-4f42-9804-6b02650ab69d",
+        "name": "Filter Only Decaying Pages",
+        "type": "n8n-nodes-base.filter",
+        "position": [
+          1280,
+          224
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "is-critical",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.severity }}",
+                "rightValue": "critical"
+              },
+              {
+                "id": "is-warning",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.severity }}",
+                "rightValue": "warning"
+              },
+              {
+                "id": "is-watch",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.severity }}",
+                "rightValue": "watch"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "51aa6fc9-3b2f-46d1-832a-aba1ef343635",
+        "name": "Build Weekly Decay Report",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1520,
+          224
+        ],
+        "parameters": {
+          "jsCode": "// Build the weekly decay report\nconst allPages = $('Compare Periods and Detect Decay').all().map(i => i.json);\nconst decaying = $input.all().map(i => i.json);\n\nconst critical = decaying.filter(p => p.severity === 'critical');\nconst warning = decaying.filter(p => p.severity === 'warning');\nconst watch = decaying.filter(p => p.severity === 'watch');\nconst stable = allPages.filter(p => p.severity === 'ok');\nconst growing = allPages.filter(p => p.severity === 'good');\n\nconst today = new Date().toISOString().split('T')[0];\n\n// Total clicks lost\nconst totalClicksLost = decaying\n  .filter(p => p.click_change < 0)\n  .reduce((sum, p) => sum + Math.abs(p.click_change), 0);\n\nlet report = `*CONTENT DECAY REPORT — ${today}*\\n`;\nreport += `Pages analyzed: ${allPages.length}\\n\\n`;\n\nreport += `Critical decay: ${critical.length}\\n`;\nreport += `Decaying: ${warning.length}\\n`;\nreport += `Early signs: ${watch.length}\\n`;\nreport += `Stable: ${stable.length}\\n`;\nreport += `Growing: ${growing.length}\\n`;\nreport += `\\n*Est. weekly clicks lost: ${Math.round(totalClicksLost)}*\\n`;\n\nif (critical.length > 0) {\n  report += `\\n\\n*CRITICAL — Act now:*\\n`;\n  for (const p of critical.slice(0, 10)) {\n    report += `• \\`${p.page_path}\\`\\n`;\n    report += `  Clicks: ${p.clicks_before} → ${p.clicks_now} (*${p.click_change_pct}%*)\\n`;\n    report += `  Position: ${p.position_before} → ${p.position_now} (${p.position_change > 0 ? '+' : ''}${p.position_change})\\n`;\n  }\n}\n\nif (warning.length > 0) {\n  report += `\\n*DECAYING — Update soon:*\\n`;\n  for (const p of warning.slice(0, 10)) {\n    report += `• \\`${p.page_path}\\` — clicks ${p.click_change_pct}%, pos ${p.position_change > 0 ? '+' : ''}${p.position_change}\\n`;\n  }\n}\n\nif (watch.length > 0) {\n  report += `\\n*EARLY SIGNS — Keep watching:*\\n`;\n  for (const p of watch.slice(0, 5)) {\n    report += `• \\`${p.page_path}\\` — clicks ${p.click_change_pct}%\\n`;\n  }\n}\n\nif (growing.length > 0) {\n  report += `\\n*TOP GROWING:*\\n`;\n  const topGrow = growing.sort((a, b) => b.click_change_pct - a.click_change_pct).slice(0, 3);\n  for (const p of topGrow) {\n    report += `• \\`${p.page_path}\\` — clicks +${p.click_change_pct}%\\n`;\n  }\n}\n\nreturn [{\n  json: {\n    report: report,\n    total_pages: allPages.length,\n    critical_count: critical.length,\n    warning_count: warning.length,\n    watch_count: watch.length,\n    clicks_lost: Math.round(totalClicksLost),\n    has_critical: critical.length > 0,\n    critical_pages: critical.slice(0, 10),\n    warning_pages: warning.slice(0, 10)\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "48e028a0-fce2-4585-a9b4-ddef05f29639",
+        "name": "Post Report to Slack",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          1760,
+          112
+        ],
+        "webhookId": "3d3e49f9-3bf4-463d-9e58-456befa19c00",
+        "parameters": {
+          "text": "={{ $json.report }}",
+          "otherOptions": {}
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "aff9be9e-2e4f-4df1-ad5f-e32c1669476f",
+        "name": "Email Weekly Report",
+        "type": "n8n-nodes-base.emailSend",
+        "position": [
+          1760,
+          320
+        ],
+        "webhookId": "8628387b-cbc1-4f0d-99e4-994e14ecfa8b",
+        "parameters": {
+          "options": {},
+          "subject": "=Content Decay Report — {{ $json.critical_count }} critical, {{ $json.warning_count }} decaying | {{ $json.clicks_lost }} clicks lost"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "4cf96f14-e1e9-4164-aee7-1002121f0d90",
+        "name": "Check If Any Critical Pages",
+        "type": "n8n-nodes-base.filter",
+        "position": [
+          1760,
+          512
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "has-critical",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true"
+                },
+                "leftValue": "={{ $json.has_critical }}",
+                "rightValue": "={{true}}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "52ef07b8-caa3-43a0-9898-efc5ff320bc1",
+        "name": "Generate Fix Tasks for Critical Pages",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1968,
+          512
+        ],
+        "parameters": {
+          "jsCode": "// Create individual tasks for critical decaying pages\nconst data = $input.first().json;\nconst tasks = [];\n\nfor (const page of data.critical_pages) {\n  let action = '';\n  \n  if (page.position_change >= 5) {\n    action = 'Major ranking drop. Check: lost backlinks, technical errors (404/redirect), or competitor new content. Run a backlink audit.';\n  } else if (page.impression_change_pct <= -40) {\n    action = 'Impressions tanking. Possible: Google algorithm change, keyword cannibalization, or index issues. Check Coverage report in GSC.';\n  } else if (page.ctr_now < page.ctr_before * 0.7) {\n    action = 'CTR dropped significantly. Update title tag and meta description. Check if SERP features (featured snippets, ads) pushed you down.';\n  } else {\n    action = 'Content likely outdated. Refresh with updated stats, new sections, better internal links. Check if search intent has shifted.';\n  }\n\n  tasks.push({\n    json: {\n      page_path: page.page_path,\n      page_url: page.page_url,\n      signal: page.signal,\n      click_change_pct: page.click_change_pct,\n      position_change: page.position_change,\n      recommended_action: action,\n      priority: 'HIGH',\n      created: new Date().toISOString().split('T')[0]\n    }\n  });\n}\n\nreturn tasks;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "76f2b5b6-32c3-4261-8f6b-9183c61e38e1",
+        "name": "Log Fix Tasks to Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2192,
+          512
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "signal": "={{ $json.signal }}",
+              "created": "={{ $json.created }}",
+              "page_url": "={{ $json.page_url }}",
+              "priority": "={{ $json.priority }}",
+              "page_path": "={{ $json.page_path }}",
+              "position_change": "={{ $json.position_change }}",
+              "click_change_pct": "={{ $json.click_change_pct }}",
+              "recommended_action": "={{ $json.recommended_action }}"
+            },
+            "mappingMode": "defineBelow"
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "Fix Tasks"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "url",
+            "value": "={{ $env.DECAY_SHEET_URL }}"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "dd580d9b-91f2-4e75-b5d3-5467860eb2e7",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -704,
+          -224
+        ],
+        "parameters": {
+          "color": "#8D9C44",
+          "width": 660,
+          "height": 976,
+          "content": "## Detect content decay and alert via Slack and email\n\nThis workflow automatically detects declining content performance by comparing your recent Google Search Console data against a historical baseline, then alerts you with actionable fix recommendations.\n\n## How it works\n1. **Runs every Monday at 8 AM** on a weekly schedule\n2. **Pulls last 7 days** of page-level data from Google Search Console (recent performance)\n3. **Pulls previous 28 days** as a baseline (normalized to weekly averages)\n4. **Compares per-page metrics** — clicks, impressions, position, and CTR\n5. **Classifies each page** into decay severity levels:\n   - **CRITICAL_DECAY** — clicks dropped 50%+ or position fell 5+ spots\n   - **DECAYING** — clicks dropped 30%+ or position fell 3+ spots\n   - **EARLY_DECAY** — clicks dropped 15%+ or position fell 1.5+ spots\n   - **STABLE** — no significant change\n   - **GROWING** — clicks up 20%+\n6. **Logs all results** to a Google Sheet for historical trend tracking\n7. **Sends a weekly report** via Slack and email with full breakdown\n8. **Auto-generates fix tasks** for critical pages with specific recommended actions\n\n## Setup steps\n1. Set **n8n environment variable** `GSC_SITE_URL` to your site (e.g., `https://yoursite.com`)\n2. Set **n8n environment variable** `DECAY_SHEET_URL` to your Google Sheet URL\n3. Create a Google Sheet with two tabs:\n   - `Decay Log` — headers: `date`, `page_path`, `signal`, `clicks_now`, `clicks_before`, `click_change_pct`, `position_now`, `position_before`, `position_change`, `impressions_now`, `impression_change_pct`, `ctr_now`\n   - `Fix Tasks` — headers: `created`, `priority`, `page_path`, `page_url`, `signal`, `click_change_pct`, `position_change`, `recommended_action`\n4. Connect **Google Search Console OAuth2** credentials\n5. Connect **Google Sheets OAuth2** credentials\n6. Connect **Slack OAuth2** credentials and set target channel\n7. Configure **SMTP / email** credentials and update recipient address\n\n## Customization\n- Adjust decay thresholds in the \"Compare Periods and Detect Decay\" node\n- Change schedule frequency (daily, bi-weekly, monthly)\n- Add more notification channels (Telegram, Discord, etc.)\n- Extend fix task logic with AI-powered content refresh suggestions"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4ef309df-5f0e-44da-9136-6275543ae50e",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          432,
+          48
+        ],
+        "parameters": {
+          "color": "#413A3A",
+          "width": 328,
+          "height": 164,
+          "content": "## 1. Fetch GSC Data\nCalculates date ranges (recent 7 days vs. previous 28-day baseline) and fetches page-level performance from Google Search Console in parallel."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6881902b-441f-45b6-84d2-030540de839f",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1072,
+          0
+        ],
+        "parameters": {
+          "color": "#413A3A",
+          "width": 332,
+          "height": 164,
+          "content": "## 2. Detect Decay\nCompares recent vs. baseline metrics per page. Classifies each page as CRITICAL_DECAY, DECAYING, EARLY_DECAY, STABLE, or GROWING based on click and position changes."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "89fa3787-df97-47dd-8dda-505d1c1d1416",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1680,
+          -96
+        ],
+        "parameters": {
+          "color": "#413A3A",
+          "width": 276,
+          "height": 180,
+          "content": "## 3. Report and Alert\nBuilds a comprehensive weekly report with decay breakdown. Sends to Slack and email simultaneously. Pages with no decay are logged but not alerted."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "02088b0f-83f2-4b51-afa7-ac7345e04529",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1744,
+          752
+        ],
+        "parameters": {
+          "color": "#413A3A",
+          "width": 332,
+          "height": 180,
+          "content": "## 4. Auto-Generate Fix Tasks\nFor critical pages, generates specific remediation tasks (backlink audit, content refresh, CTR optimization) and logs them to a separate Google Sheet tab."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d1e6cb92-3abe-4f97-a433-4c80070e718b",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          208,
+          512
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 480,
+          "height": 140,
+          "content": "⚠️ **Set environment variables** before activating:\n- `GSC_SITE_URL` → your verified site URL (e.g., `https://yoursite.com`)\n- `DECAY_SHEET_URL` → your Google Sheet URL for logging\n\nSee [n8n docs on environment variables](https://docs.n8n.io/hosting/configuration/environment-variables/)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8ab794a9-6860-45d1-80ff-bf6fba6ee2d0",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1984,
+          304
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 360,
+          "height": 80,
+          "content": "⚠️ **Update the email address** in this node to your own recipient address before activating."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "0b8ecf93-1ddd-42be-9caf-4acffd3eef84",
+    "connections": {
+      "Calculate Date Ranges": {
+        "main": [
+          [
+            {
+              "node": "Fetch GSC Recent 7 Days",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch GSC Previous 28 Days",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch GSC Recent 7 Days": {
+        "main": [
+          [
+            {
+              "node": "Compare Periods and Detect Decay",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Weekly Decay Report": {
+        "main": [
+          [
+            {
+              "node": "Check If Any Critical Pages",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Post Report to Slack",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Email Weekly Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Weekly Monday 8AM Trigger": {
+        "main": [
+          [
+            {
+              "node": "Calculate Date Ranges",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch GSC Previous 28 Days": {
+        "main": [
+          [
+            {
+              "node": "Compare Periods and Detect Decay",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter Only Decaying Pages": {
+        "main": [
+          [
+            {
+              "node": "Build Weekly Decay Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check If Any Critical Pages": {
+        "main": [
+          [
+            {
+              "node": "Generate Fix Tasks for Critical Pages",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Compare Periods and Detect Decay": {
+        "main": [
+          [
+            {
+              "node": "Filter Only Decaying Pages",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Log All Results to Decay Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Fix Tasks for Critical Pages": {
+        "main": [
+          [
+            {
+              "node": "Log Fix Tasks to Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 20,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.filter": {
+        "count": 2
+      },
+      "n8n-nodes-base.emailSend": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Veena Pandian",
+    "username": "veenapandian",
+    "bio": "Veena is a GTM Engineer with 6 years of experience in Revenue Operations, specializing in building scalable outbound systems that turn data into pipeline. As a Clay expert, she designs signal-based prospecting workflows, enrichment automations, and AI-led personalization sequences that drive consistent, qualified meetings for B2B companies. She now brings that same systems-thinking approach to building powerful automations in n8n.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/veenareddyhere/"
+    ],
+    "avatar": "https://gravatar.com/avatar/74ae38b621079dfbdd0ab6bf5da66389ac331caf189c2384195f681daebcb8f6?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 11,
+      "icon": "fa:envelope",
+      "name": "n8n-nodes-base.emailSend",
+      "codex": {
+        "data": {
+          "alias": [
+            "SMTP",
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.sendemail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/sendemail/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Send Email",
+        "color": "#00bb88"
+      },
+      "iconData": {
+        "icon": "envelope",
+        "type": "icon"
+      },
+      "displayName": "Send Email",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 844,
+      "icon": "fa:filter",
+      "name": "n8n-nodes-base.filter",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The Filter node can be used to filter items based on a condition. If the condition is met, the item will be passed on to the next node. If the condition is not met, the item will be omitted. Conditions can be combined together by AND(meet all conditions), or OR(meet at least one condition).",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.filter/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Filter",
+        "color": "#229eff"
+      },
+      "iconData": {
+        "icon": "filter",
+        "type": "icon"
+      },
+      "displayName": "Filter",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

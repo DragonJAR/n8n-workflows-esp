@@ -1,0 +1,642 @@
+{
+  "id": 7021,
+  "name": "Send deduplicated Kubernetes(EKS/GKE/AKS) error logs from Grafana Loki to Slack",
+  "views": 335,
+  "recentViews": 0,
+  "totalViews": 335,
+  "createdAt": "2025-08-05T18:09:46.893Z",
+  "description": "## ✨ Summary \nEfficiently monitor Kubernetes environments by sending only unique error logs from Grafana Loki to Slack. Reduces alert fatigue while keeping your team informed about critical log events.\n\n## 🧑‍💻 Who’s it for\n- DevOps or SRE engineers running EKS/GKE/AKS\n- Anyone using Grafana Loki and Promtail for centralized logging\n- Teams that want Slack alerts but hate alert spam\n\n## 🔍 What it does\nThis n8n workflow queries your Loki logs every 5 minutes, filters only the critical ones (error, timeout, exception, etc.), removes duplicate alerts within the batch, and sends clean alerts to a Slack channel with full metadata (pod, namespace, node, container, log, timestamp).\n\n## 🧠 How it works\n#### 🕒 Schedule Trigger\nEvery 5 minutes (customizable)\n\n#### 🌐 Loki HTTP Query\nPulls logs from the last 10 minutes\nKeyword match: error, failed, oom, etc.\n\n#### 🧹 Log Parsing\nExtracts log fields (pod, container, etc.)\nSkips empty/malformed results\n\n#### 🧠 Deduplication\nRemoves repeated error messages (within query window)\n\n#### 📤 Slack Notification\nSends nicely formatted message to Slack\n\n## ⚙️ Requirements\n#### Tool\t      Notes\nLoki-\t   Exposed internally or externally\nSlack App- With chat:write OAuth \nn8n-\t   Cloud or self-hosted\n\n## 🔧 How to Set It Up\nImport the JSON file into n8n\n\nUpdate:\n\n- Loki API URL (e.g., http://loki-gateway.monitoring.svc.cluster.local)\n- Slack Bearer Token (via credentials)\n- Target Slack channel (e.g., #k8s-alerts)\n- (Optional) Change keywords in the query regex\n- Activate the workflow\n- Ensure n8n pod/container is having access to your kubernetes cluster/pods/namespaces\n\n## 🛠 How to Customize\n- Want more or fewer keywords? Adjust the regex in the Query Loki for Error Logs node.\n- Need to increase deduplication logic? Enhance the Remove Duplicate Alerts node.\n- Want 5-log summaries every 5 min? Fork this and add a Batch + Slack group sender.\n\n## Grafana Loki logs to Slack Output\n\n![image.png](fileId:1946)",
+  "workflow": {
+    "id": "ikJVgTYkNi4QGQSa",
+    "meta": {
+      "instanceId": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "name": "Loki-logs-slack",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "b8d9c924-e6d2-456d-a4cb-b3a86ddd5b63",
+        "name": "📥 Query Loki for Error Logs",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -20,
+          180
+        ],
+        "parameters": {
+          "url": "http://loki-gateway.monitoring.svc.cluster.local:8080/loki/api/v1/query_range",
+          "options": {},
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "query",
+                "value": "{namespace=\"monitoring\"} |= \"error\""
+              },
+              {
+                "name": "start",
+                "value": "={{ (Date.now() - 10 * 60 * 1000) * 1000000 }}"
+              },
+              {
+                "name": "end",
+                "value": "={{ Date.now() * 1000000 }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "119d2d65-1ea5-4f10-bdcc-2b96078e62c3",
+        "name": "🕒 Every 5 Min Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -320,
+          180
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "645bbb13-b417-4752-9bee-12571e9b8127",
+        "name": "🧹 Extract Log Fields",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          260,
+          180
+        ],
+        "parameters": {
+          "jsCode": "const results = $json.data.result || [];\nconst output = [];\n\nfor (const entry of results) {\n  const stream = entry.stream;\n  const logs = entry.values;\n\n  for (const [timestampNs, logLine] of logs) {\n    let extractedLog = null;\n\n    // Try to extract `content:` from inside extracteddata=\"map[...]\"\n    const extractedMatch = logLine.match(/extracteddata=\".*?content:(.*?)(?:\\s\\w+:|]\")/s);\n    if (extractedMatch && extractedMatch[1]) {\n      extractedLog = extractedMatch[1]\n        .replace(/\\\\\"/g, '\"')\n        .replace(/\\\\\\\\/g, '\\\\')\n        .trim();\n    }\n\n    // If not extracted, fall back to raw logLine if it looks usable\n    if (!extractedLog && logLine.includes(\"level=\")) {\n      extractedLog = logLine.trim();\n    }\n\n    // Filter out unwanted log levels\n    if (extractedLog && /level=(debug|info)/i.test(extractedLog)) {\n      continue; // Skip this log\n    }\n\n    output.push({\n      json: {\n        log: extractedLog || null,\n        pod: stream.pod || \"unknown\",\n        node: stream.node || \"unknown\",\n        namespace: stream.namespace || \"unknown\",\n        container: stream.container || \"unknown\",\n        timestamp: new Date(Number(timestampNs) / 1e6).toISOString()\n      }\n    });\n  }\n}\n\nreturn output;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e14bd03a-0fe9-4cc9-9a5b-0a88efd29f98",
+        "name": "🧠 Remove Duplicate Alerts",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          580,
+          180
+        ],
+        "parameters": {
+          "jsCode": "const seen = new Set();\nconst output = [];\n\nfunction normalizeLog(log) {\n  return log\n    .replace(/ts=\\S+/g, '')                   // Remove 'ts=...' timestamps\n    .replace(/\\d+(\\.\\d+)?/g, '#')             // Replace all numbers with #\n    .replace(/'[^']*'/g, '\\'X\\'')             // Mask quoted strings\n    .replace(/\\\"[^\\\"]*\\\"/g, '\"X\"')            // Mask quoted strings\n    .toLowerCase()\n    .trim();\n}\n\nfor (const item of items) {\n  const pod = item.json.pod || 'unknown';\n  const log = item.json.log || '';\n\n  const normalized = normalizeLog(log);\n  const dedupKey = `${pod}::${normalized}`;\n\n  if (!seen.has(dedupKey)) {\n    seen.add(dedupKey);\n    output.push(item);\n  }\n}\n\nreturn output;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9542d315-ca20-4430-8510-342e70940b1e",
+        "name": "📤 Send Alerts to Slack",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          860,
+          180
+        ],
+        "parameters": {
+          "url": "https://slack.com/api/chat.postMessage",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "channel",
+                "value": "#k8s-alerts"
+              },
+              {
+                "name": "text",
+                "value": "=🚨 *Kubernetes Error Detected* *Pod:* {{$json[\"pod\"]}} *Namespace:* {{$json[\"namespace\"]}} *Container:* {{$json[\"container\"]}} *Node:* {{$json[\"node\"]}} *Timestamp:* {{$json[\"timestamp\"]}} *Log:* ```{{$json[\"log\"]}}```"
+              }
+            ]
+          },
+          "genericAuthType": "httpBearerAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "credential-id",
+            "name": "httpBearerAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "a4e2ab3e-c6db-45eb-926b-ea92da23a8cb",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          -280
+        ],
+        "parameters": {
+          "width": 280,
+          "height": 400,
+          "content": "## 🔔 Loki Error Logs to Slack (Deduplicated)\n\nThis workflow monitors Kubernetes logs via Loki and sends only **unique** errors to Slack every 5 minutes.\n\n### What It Does:\n- Queries Loki logs for error patterns\n- Filters & parses relevant logs\n- Removes duplicate alerts\n- Sends clean Slack messages\n\n📌 Customize this by editing the regex in the Loki node or modifying deduplication logic.\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "42637755-742c-43a1-b37b-376830460397",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -400,
+          380
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 320,
+          "content": "### 🕒 Trigger\n\nRuns every 5 minutes.\nYou can adjust this interval as needed.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a5800428-c913-4ea9-b74a-23ff21825bd9",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -100,
+          380
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 320,
+          "content": "### 📥 Loki Log Query\n\nSends an HTTP request to Loki with:\n- Time range: last 10 minutes\n- Regex match: error, failed, timeout, oom, etc.\n- Namespaces can be customized\n\nEdit the regex to customize which logs you want.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dbde5ffe-f631-4732-a2f0-8d6c697e203f",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          220,
+          380
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 320,
+          "content": "### 🧹 Log Parsing\n\nParses log entries from Loki response.\nExtracts:\n- Pod\n- Namespace\n- Container\n- Node\n- Timestamp\n- Log content\n\nSkips null/empty logs automatically.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "83a18658-0b88-4c96-bd5e-0c8b55515758",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          520,
+          380
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 320,
+          "content": "### 🧠 Deduplication\n\nThis removes repeated alerts (same log content) in the current batch.\nUseful to avoid Slack spam during repeated errors.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "247c5a22-8520-42f0-a895-14b732d3896f",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          820,
+          380
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 320,
+          "content": "### 📤 Slack Notification\n\nPosts each alert to a Slack channel using Slack API.\nThe message includes:\n- 🚨 Emoji\n- Pod metadata\n- Log message (wrapped in triple backticks)\n\nEnsure you’ve set your Slack token + channel name.\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "f9fd9ad5-0f02-42dc-9807-e5fa007dec5d",
+    "connections": {
+      "🧹 Extract Log Fields": {
+        "main": [
+          [
+            {
+              "node": "🧠 Remove Duplicate Alerts",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🕒 Every 5 Min Trigger": {
+        "main": [
+          [
+            {
+              "node": "📥 Query Loki for Error Logs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🧠 Remove Duplicate Alerts": {
+        "main": [
+          [
+            {
+              "node": "📤 Send Alerts to Slack",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📥 Query Loki for Error Logs": {
+        "main": [
+          [
+            {
+              "node": "🧹 Extract Log Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 11,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "John Pranay Kumar Reddy",
+    "username": "johnpranay",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/john-pranay-kumar-reddy-yaramala-370294162/"
+    ],
+    "avatar": "https://gravatar.com/avatar/b75f18a390f84d907c707ec538e20cbb168a6003200532339d265a209f988d36?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    }
+  ],
+  "image": [
+    {
+      "id": 1946,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/image_2ab670b517.png"
+    }
+  ]
+}

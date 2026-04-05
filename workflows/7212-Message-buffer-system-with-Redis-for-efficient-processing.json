@@ -1,0 +1,1786 @@
+{
+  "id": 3832,
+  "name": "Message buffer system with Redis for efficient processing",
+  "views": 2271,
+  "recentViews": 0,
+  "totalViews": 2271,
+  "createdAt": "2025-05-02T13:42:05.798Z",
+  "description": "## 🚀 Message-Batching Buffer Workflow (n8n)\n\n**This workflow implements a lightweight message-batching buffer using Redis for temporary storage and a JavaScript consolidation function to merge messages.** It collects incoming user messages per session, waits for a configurable inactivity window or batch size threshold, consolidates buffered messages via custom code, then clears the buffer and returns the combined response—all without external LLM calls.\n\n---\n\n### 🔑 Key Features\n\n* **Redis-backed buffer** queues incoming messages per `context_id`.\n* **Centralized Config Parameters** node to adjust thresholds and timeouts in one place.\n* **Dynamic wait time** based on message length (configurable `minWords`, `waitLong`, `waitShort`).\n* **Batch trigger** fires on inactivity timeout or when `buffer_count` ≥ `batchThreshold`.\n* **Zero-cost consolidation** via built-in JavaScript Function (`consolidate buffer`)—no GPT-4 or external API required.\n\n---\n\n### ⚙️ Setup Instructions\n\n1. **Extract Session & Message**\n\n   * Trigger: `When chat message received` (webhook) or `When clicking ‘Test workflow’` (manual).\n   * Map inputs: set variables `context_id` and `message` into a Set node named **Mock input data** (for testing) or a proper mapping node in production.\n\n2. **Config Parameters**\n\n   * Add a Set node **Config Parameters** with:\n\n     ```\n     minWords: 3         # Word threshold\n     waitLong: 10        # Timeout (s) for long messages\n     waitShort: 20       # Timeout (s) for short messages\n     batchThreshold: 3   # Messages to trigger batch early\n     ```\n   * All downstream nodes reference these JSON values dynamically.\n\n3. **Determine Wait Time**\n\n   * Node: **get wait seconds** (Code)\n   * JS code:\n\n     ```js\n     const msg = $json.message || '';\n     const wordCount = msg.split(/\\s+/).filter(w =&gt; w).length;\n     const { minWords, waitLong, waitShort } = items[0].json;\n     const waitSeconds = wordCount &lt; minWords ? waitShort : waitLong;\n     return [{ json: { context_id: $json.context_id, message: msg, waitSeconds } }];\n     ```\n\n4. **Buffer Message in Redis**\n\n   * **Buffer messages**: `LPUSH buffer_in:{{$json.context_id}}` with payload `{text, timestamp}`.\n   * **Set buffer\\_count increment**: `INCR buffer_count:{{$json.context_id}}` with TTL `{{$json.waitSeconds + 60}}`.\n   * **Set last\\_seen**: record `last_seen:{{$json.context_id}}` timestamp with same TTL.\n\n5. **Check & Set Waiting Flag**\n\n   * **Get waiting\\_reply**: if null, **Set waiting\\_reply** to `true` with TTL `{{$json.waitSeconds}}`; else exit.\n\n6. **Wait for Inactivity**\n\n   * **WaitSeconds** (webhook): pauses for `{{$json.waitSeconds}}` seconds before batch evaluation.\n\n7. **Check Batch Trigger**\n\n   * **Get last\\_seen** and **Get buffer\\_count**.\n   * IF `(now - last_seen) ≥ waitSeconds * 1000` OR `buffer_count ≥ batchThreshold`, proceed; else use **Wait** node to retry.\n\n8. **Consolidate Buffer**\n\n   * **consolidate buffer** (Code):\n\n     ```js\n     const j = items[0].json;\n     const raw = Array.isArray(j.buffer) ? j.buffer : [];\n     const buffer = raw.map(x =&gt; {\n       try { return typeof x === 'string' ? JSON.parse(x) : x;\n       } catch { return null; }\n     }).filter(Boolean);\n     buffer.sort((a, b) =&gt; new Date(a.timestamp) - new Date(b.timestamp));\n     const texts = buffer.map(e =&gt; e.text?.trim()).filter(Boolean);\n     const unique = [...new Set(texts)];\n     const message = unique.join(' ');\n     return [{ json: { context_id: j.context_id, message } }];\n     ```\n\n9. **Cleanup & Respond**\n\n   * **Delete** Redis keys: `buffer_in`, `buffer_count`, `waiting_reply`, `last_seen` (for the `context_id`).\n   * Return consolidated `message` to the user via your chat integration.\n\n---\n\n### 🛠 Customization Guidance\n\n* **Adjust thresholds** by editing the **Config Parameters** node.\n* **Change concatenation** (e.g., line breaks) by modifying the `join` separator in the consolidation code.\n* **Add filters** (e.g., ignore empty or system messages) inside the consolidation Function.\n* **Monitor performance**: for very high volume, consider sharding Redis keys by date or user segments.\n\n---\n\n© 2025 Innovatex • Automation & AI Solutions • [innovatexiot.carrd.co](https://innovatexiot.carrd.co/) • [LinkedIn](https://www.linkedin.com/in/edisson-andres-garcia-herrera-63a91517b/)\n",
+  "workflow": {
+    "meta": {
+      "instanceId": "d1b9b74c805fea7fca1b903ee192d1d4090b516d3c254da86beb2f13b7c2ed2e",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "be902a85-fc31-442c-b308-a2350ec5aabb",
+        "name": "When clicking ‘Test workflow’",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          -960,
+          368
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "d229b686-9de4-4633-9dba-3e1fe71eedf1",
+        "name": "No Operation, do nothing1",
+        "type": "n8n-nodes-base.noOp",
+        "position": [
+          1824,
+          800
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "3d149fc0-caa7-4361-9bf9-33b6252b39eb",
+        "name": "get wait seconds",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -256,
+          448
+        ],
+        "parameters": {
+          "jsCode": "const msg = $json.message || '';\nconst wordCount = msg.split(/\\s+/).filter(w => w).length;\nconst { minWords, waitLong, waitShort } = items[0].json;\nconst waitSeconds = wordCount < minWords ? waitShort : waitLong;\nreturn [{ json: { context_id: $json.context_id, message: msg, waitSeconds } }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "cc670735-d126-465f-b0a3-3a4c5e390fd7",
+        "name": "Set last_seen",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          288,
+          384
+        ],
+        "parameters": {
+          "key": "=last_seen:{{ $json.context_id}}",
+          "ttl": "={{ $json.waitSeconds + 60 }}",
+          "value": "={{$now.toMillis()}}",
+          "expire": true,
+          "keyType": "string",
+          "operation": "set"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "20d97d1d-70d4-4c3c-aa12-b1aa31795240",
+        "name": "Get waiting_reply",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          192,
+          784
+        ],
+        "parameters": {
+          "key": "=waiting_reply:{{$json.context_id}}",
+          "options": {},
+          "operation": "get",
+          "propertyName": "waiting_reply"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7a2fc681-692f-4f72-9fab-f3ada4bda54b",
+        "name": "Mod input",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          352,
+          800
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "7ff99444-753d-4ef7-865c-7115761526b8",
+                "name": "waiting_reply",
+                "type": "string",
+                "value": "={{ $json.waiting_reply }}"
+              },
+              {
+                "id": "58ad6981-c35a-4dd6-b1cd-7c446b85e738",
+                "name": "context_id",
+                "type": "string",
+                "value": "={{ $('Config Parameters').item.json.context_id }}"
+              },
+              {
+                "id": "bd0535a2-be03-436b-8a2e-222c3e26fd04",
+                "name": "message",
+                "type": "string",
+                "value": "={{ $('Config Parameters').item.json.message }}"
+              },
+              {
+                "id": "2f583f32-f231-4407-b773-c08b38d464f0",
+                "name": "waitSeconds",
+                "type": "number",
+                "value": "={{ $('get wait seconds').item.json.waitSeconds }}"
+              }
+            ]
+          },
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "84213bef-32be-4cd9-8387-cd76aff5cb38",
+        "name": "waiting_reply?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          544,
+          800
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "8136ea21-d798-41fd-81ed-5c0e7fda73c5",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.waiting_reply != null}}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "a8472217-aa83-4247-9d7d-3a471e24478a",
+        "name": "When chat message received",
+        "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+        "position": [
+          -944,
+          560
+        ],
+        "webhookId": "85115343-bb86-4bb8-b7a8-c4efded80b3f",
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "ba4c81ba-92e2-4bef-a9e2-6f8d4c0aa722",
+        "name": "Set waiting_reply",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          848,
+          720
+        ],
+        "parameters": {
+          "key": "=waiting_reply:{{ $json.context_id }}",
+          "ttl": "={{ $json.waitSeconds }}",
+          "value": "true",
+          "expire": true,
+          "operation": "set"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0ce783b6-b76b-4a5d-96ae-11708b7532ba",
+        "name": "Get buffer",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          1824,
+          608
+        ],
+        "parameters": {
+          "key": "=buffer_in:{{ $('get wait seconds').item.json.context_id }}",
+          "options": {},
+          "operation": "get",
+          "propertyName": "buffer"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "21864061-1d1f-4528-a03f-1237e9c69a31",
+        "name": "Delete buffer_in",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          2560,
+          704
+        ],
+        "parameters": {
+          "key": "=buffer_in:{{ $('get wait seconds').item.json.context_id }}",
+          "operation": "delete"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8828aa7b-6153-4677-84a8-3ef2f884792c",
+        "name": "Delete waiting_reply",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          2560,
+          864
+        ],
+        "parameters": {
+          "key": "=waiting_reply:{{ $('get wait seconds').item.json.context_id }}",
+          "operation": "delete"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fc369067-7213-4d8c-b515-c34c4db997e4",
+        "name": "WaitSeconds",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          1024,
+          720
+        ],
+        "webhookId": "c218d471-2f0f-4bd7-87d1-5431ac602211",
+        "parameters": {
+          "amount": "={{ $json.waitSeconds }} "
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "2daa2ab9-756a-4fdb-8573-b4570c58d6e5",
+        "name": "Buffer messages",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          -48,
+          448
+        ],
+        "parameters": {
+          "list": "=buffer_in:{{$json.context_id}}",
+          "operation": "push",
+          "messageData": "={{ JSON.stringify({\n\"message\": $json.message,\n\"timestamp\": $now\n}) }}\n"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4d5bc5f0-11ce-4f7f-b44b-0514a5ab5671",
+        "name": "Set buffer_count increment",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          288,
+          560
+        ],
+        "parameters": {
+          "key": "=buffer_count:{{$json.context_id}}",
+          "expire": "={{$json.waitSeconds + 60}}",
+          "operation": "incr"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "dcaee1a8-ea32-4a9d-b32f-f0418644027c",
+        "name": "Get last_seen",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          1232,
+          720
+        ],
+        "parameters": {
+          "key": "=last_seen:{{$json.context_id}}",
+          "options": {},
+          "operation": "get",
+          "propertyName": "last_seen"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "908c4a4c-1c60-4e90-827a-064a0b4d6bfd",
+        "name": "Get buffer_count",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          1408,
+          720
+        ],
+        "parameters": {
+          "key": "=buffer_count:{{ $('Mod input').item.json.context_id }}",
+          "options": {},
+          "operation": "get",
+          "propertyName": "count"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1ceb472b-3944-4d74-994b-867ade006e4e",
+        "name": "Map ouput",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2752,
+          512
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "e8d80ab4-74a2-4c30-8500-8dddc5802eec",
+                "name": "message",
+                "type": "string",
+                "value": "={{ $json.message }}"
+              },
+              {
+                "id": "7e7fcee4-14b3-4393-b516-b07a53c018b3",
+                "name": "context_id",
+                "type": "string",
+                "value": "={{$('get wait seconds').item.json.context_id }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "0be7e5eb-1972-4a95-b5bf-4e564fc4ef7c",
+        "name": "Check Inactivity + Count",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1584,
+          720
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "0f294c51-0629-4ae1-a009-68c2f5fd30b5",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{$json.count != null && Number($json.count) >= 3}}",
+                "rightValue": ""
+              },
+              {
+                "id": "df819099-1f6e-4bee-a017-32b729c836a3",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{($now.toMillis() - $('Get last_seen').item.json.last_seen) >= $('Mod input').item.json.waitSeconds * 1000}}",
+                "rightValue": ""
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "0c3bd62b-8cf6-4b34-8010-ebe819db9667",
+        "name": "Delete waiting_reply1",
+        "type": "n8n-nodes-base.redis",
+        "position": [
+          2560,
+          1024
+        ],
+        "parameters": {
+          "key": "=buffer_count:{{ $('get wait seconds').item.json.context_id }}",
+          "operation": "delete"
+        },
+        "credentials": {
+          "redis": {
+            "id": "credential-id",
+            "name": "redis Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bbf45966-833b-4f5f-ae11-0578614eb156",
+        "name": "No Operation, do nothing2",
+        "type": "n8n-nodes-base.noOp",
+        "position": [
+          720,
+          544
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "5683eebf-ba51-4a6b-a803-de6acf1b1ea8",
+        "name": "Wait",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          2080,
+          880
+        ],
+        "webhookId": "b8e2e214-f82b-49c2-96e2-91e093137857",
+        "parameters": {
+          "amount": "={{ Math.max(0, Math.ceil(( $('Mod input').item.json.waitSeconds * 1000 - ($now.toMillis() - $('Get last_seen').item.json.last_seen)) / 1000)) }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "c0478f60-944e-4c85-bb9c-9abe0d4238c0",
+        "name": "When Executed by Another Workflow",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "position": [
+          -688,
+          640
+        ],
+        "parameters": {
+          "workflowInputs": {
+            "values": [
+              {
+                "name": "context_id"
+              },
+              {
+                "name": "message"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "91a650b7-ddd4-4dbf-a300-523f72f0bdb5",
+        "name": "Mock input data",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -736,
+          448
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "0543fdb7-4a22-4530-bdb7-ae7064732fae",
+                "name": "context_id",
+                "type": "string",
+                "value": "={{ $json.sessionId }}"
+              },
+              {
+                "id": "bead5646-a689-4deb-8f4b-b22aa97b51ca",
+                "name": "message",
+                "type": "string",
+                "value": "={{ $json.chatInput || 'Chat 2'}}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "cb450e32-7e19-469c-9a5c-3d9da5bf1dfa",
+        "name": "No Operation, do nothing3",
+        "type": "n8n-nodes-base.noOp",
+        "position": [
+          2944,
+          864
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "b463e405-3355-48a2-a043-42941d7025c3",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2512,
+          688
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 700,
+          "height": 780,
+          "content": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n### 🧹 Buffer Cleanup\n\nAfter consolidation and reply:\n\n* **DELETE** keys:\n\n  * `buffer_in:{{context_id}}`\n  * `buffer_count:{{context_id}}`\n  * `waiting_reply:{{context_id}}`\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1b5397f8-aa7e-4b2b-afb9-5da97d99e049",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -80,
+          64
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 920,
+          "height": 940,
+          "content": "### 📥 Input Buffer\n\n1. **Save incoming message**\n\n   * Push the new message into Redis list `buffer_in:{{context_id}}`.\n2. **Update metadata**\n\n   * Set `last_seen:{{context_id}}` to the current timestamp (with a TTL of `waitSeconds + 60`).\n   * INCR the counter key `buffer_count:{{context_id}}` (also expiring after `waitSeconds + 60`).\n3. **Check “waiting” flag**\n\n   * GET `waiting_reply:{{context_id}}`.\n   * If it’s null (no batch in flight), SET it to `true` with TTL `waitSeconds` to block concurrent triggers."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "edc07500-ccad-4e72-adc1-1a63a3a06609",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1184,
+          352
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1200,
+          "height": 820,
+          "content": "### ⏳ Inactivity & Threshold Check\n\n1. **Fetch state**\n\n   * GET `last_seen:{{context_id}}` (when the last message arrived)\n   * GET `buffer_count:{{context_id}}` (how many messages are queued)\n2. **Evaluate trigger**\n\n   * **Inactivity:** `(now – last_seen) ≥ waitSeconds * 1000`\n   * **Or threshold:** `buffer_count ≥ 1` (or your desired batch size)\n3. **Branch**\n\n   * **True:** proceed to “Get buffer” and consolidate.\n   * **False:** exit (noOp) and let the waiting‐node/flag mechanism retry later."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a11187e3-ee43-44bc-8c86-7159ab1ffc87",
+        "name": "Config Parameters",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -496,
+          448
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "2f134fe2-203c-4a3b-b3e9-c01bfcbd9405",
+                "name": "minWords",
+                "type": "string",
+                "value": "3"
+              },
+              {
+                "id": "37ec874e-ccf4-4a74-9c7b-0e6f7a6aa73c",
+                "name": "waitLong",
+                "type": "string",
+                "value": "10"
+              },
+              {
+                "id": "2fd93358-5474-401a-99f3-8bd61a23a7ff",
+                "name": "waitShort",
+                "type": "string",
+                "value": "20"
+              },
+              {
+                "id": "b869f5fb-baa0-4b04-9da5-c73f250f5597",
+                "name": "batchThreshold",
+                "type": "string",
+                "value": "3"
+              }
+            ]
+          },
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "eb1b854e-b514-4e35-b9c3-e5668c31a25d",
+        "name": "consolidate buffer",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2160,
+          704
+        ],
+        "parameters": {
+          "jsCode": "// Run Once For All Items\nconst j = items[0].json;\nconst raw = Array.isArray(j.buffer) ? j.buffer : [];\n\n// 1) Parsear cada entrada lo más flexible posible\nconst buffer = raw\n  .map(x => {\n    let obj;\n    // Si viene como string JSON, lo parseo\n    if (typeof x === 'string') {\n      try {\n        obj = JSON.parse(x);\n      } catch {\n        return null;\n      }\n    } else if (typeof x === 'object') {\n      obj = x;\n    } else {\n      return null;\n    }\n\n    // 2) Extraer texto de message, sea string o anidado { text }\n    let textVal;\n    if (typeof obj.message === 'string') {\n      textVal = obj.message;\n    } else if (obj.message && typeof obj.message.text === 'string') {\n      textVal = obj.message.text;\n    } else {\n      return null;\n    }\n\n    // 3) Validar timestamp\n    if (!obj.timestamp) return null;\n\n    return {\n      text: textVal.trim(),\n      timestamp: obj.timestamp,\n    };\n  })\n  .filter(Boolean);\n\n// 4) Orden cronológico\nbuffer.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));\n\n// 5) Dedupe y concatenar\nconst unique = [...new Set(buffer.map(m => m.text))];\nconst consolidated = unique.join(' ');\n\n// 6) Devolver\nreturn [{\n  json: {\n    context_id: j.context_id,\n    message: consolidated,\n  }\n}];\n"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "pinData": {
+      "When Executed by Another Workflow": [
+        {
+          "message": "{\"text\":\"Telmisartan de 80mg\"}",
+          "context_id": "573213334262@s.whatsapp.net"
+        }
+      ]
+    },
+    "connections": {
+      "Wait": {
+        "main": [
+          [
+            {
+              "node": "Check Inactivity + Count",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Map ouput": {
+        "main": [
+          []
+        ]
+      },
+      "Mod input": {
+        "main": [
+          [
+            {
+              "node": "waiting_reply?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get buffer": {
+        "main": [
+          [
+            {
+              "node": "consolidate buffer",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WaitSeconds": {
+        "main": [
+          [
+            {
+              "node": "Get last_seen",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get last_seen": {
+        "main": [
+          [
+            {
+              "node": "Get buffer_count",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set last_seen": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing2",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "waiting_reply?": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing2",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Set waiting_reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Buffer messages": {
+        "main": [
+          [
+            {
+              "node": "Set buffer_count increment",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Set last_seen",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Get waiting_reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Mock input data": {
+        "main": [
+          [
+            {
+              "node": "Config Parameters",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Delete buffer_in": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get buffer_count": {
+        "main": [
+          [
+            {
+              "node": "Check Inactivity + Count",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "get wait seconds": {
+        "main": [
+          [
+            {
+              "node": "Buffer messages",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Config Parameters": {
+        "main": [
+          [
+            {
+              "node": "get wait seconds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get waiting_reply": {
+        "main": [
+          [
+            {
+              "node": "Mod input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set waiting_reply": {
+        "main": [
+          [
+            {
+              "node": "WaitSeconds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "consolidate buffer": {
+        "main": [
+          [
+            {
+              "node": "Map ouput",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Delete buffer_in",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Delete waiting_reply",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Delete waiting_reply1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Delete waiting_reply": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Delete waiting_reply1": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Inactivity + Count": {
+        "main": [
+          [
+            {
+              "node": "Get buffer",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "No Operation, do nothing1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "No Operation, do nothing1": {
+        "main": [
+          [
+            {
+              "node": "Wait",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set buffer_count increment": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing2",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When chat message received": {
+        "main": [
+          [
+            {
+              "node": "Mock input data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When Executed by Another Workflow": {
+        "main": [
+          [
+            {
+              "node": "Config Parameters",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When clicking ‘Test workflow’": {
+        "main": [
+          [
+            {
+              "node": "Mock input data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 30,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.set": {
+        "count": 4
+      },
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.noOp": {
+        "count": 3
+      },
+      "n8n-nodes-base.wait": {
+        "count": 2
+      },
+      "n8n-nodes-base.redis": {
+        "count": 11
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 3
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chatTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.executeWorkflowTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Edisson Garcia",
+    "username": "eagarciah707",
+    "bio": "",
+    "verified": false,
+    "links": [
+      "https://www.linkedin.com/in/edisson-andres-garcia-herrera-63a91517b"
+    ],
+    "avatar": "https://gravatar.com/avatar/b35dd8fc6b1180ac1e4a57827c3da0332c082ea91b1f23e3a2af382a99e8504c?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "icon": "fa:arrow-right",
+      "name": "n8n-nodes-base.noOp",
+      "codex": {
+        "data": {
+          "alias": [
+            "nothing"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.noop/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "No Operation, do nothing",
+        "color": "#b0b0b0"
+      },
+      "iconData": {
+        "icon": "arrow-right",
+        "type": "icon"
+      },
+      "displayName": "No Operation, do nothing",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "icon": "file:redis.svg",
+      "name": "n8n-nodes-base.redis",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.redis/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/redis/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Redis"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiNBNDFFMTEiIGQ9Ik01Ny42NTYgNDMuOTljLTMuMjAxIDEuNjgzLTE5Ljc4NyA4LjU2MS0yMy4zMTggMTAuNDE3cy01LjQ5NCAxLjgzOC04LjI4My40OTRjLTIuNzktMS4zNDMtMjAuNDQ5LTguNTM1LTIzLjYyOS0xMC4wNjdDLjgzNCA0NC4wNjYuMDAyIDQzLjQyMi4wMDIgNDIuODExdi02LjExN3MyMi45OC01LjA0NSAyNi42OS02LjM4OCA0Ljk5NS0xLjM5IDguMTU0LS4yMjVjMy4xNiAxLjE2NSAyMi4wMzUgNC42MDMgMjUuMTU0IDUuNzU2djYuMDMyYzAgLjYwNS0uNzIgMS4yODMtMi4zNSAyLjEyNHoiLz48cGF0aCBmaWxsPSIjRDgyQzIwIiBkPSJNNTcuNjU2IDM3Ljg3MmMtMy4yMDEgMS42ODUtMTkuNzg3IDguNTYtMjMuMzE4IDEwLjQxN3MtNS40OTQgMS44MzgtOC4yODMuNDk0Yy0yLjc5LTEuMzQzLTIwLjQ0OS04LjUzNC0yMy42My0xMC4wNjhzLTMuMjQzLTIuNTg4LS4xMjItMy44MmwyNC4zODgtOS41MmMzLjcxLTEuMzQgNC45OTQtMS4zOSA4LjE1My0uMjI1czE5LjY0MyA3Ljc4IDIyLjc0NyA4Ljk1MWMzLjEwMyAxLjE3IDMuMjQgMi4wODYuMDM3IDMuNzg2eiIvPjxwYXRoIGZpbGw9IiNBNDFFMTEiIGQ9Ik01Ny42NTYgMzQuMDE1Yy0zLjIwMSAxLjY4My0xOS43ODcgOC41NjEtMjMuMzE4IDEwLjQxN3MtNS40OTQgMS44MzgtOC4yODMuNDk1Yy0yLjc5LTEuMzQ0LTIwLjQ0OS04LjUzNi0yMy42MjktMTAuMDY3Qy44MzQgMzQuMDkyLjAwMiAzMy40NDcuMDAyIDMyLjgzNlYyNi43MnMyMi45OC01LjA0NSAyNi42OS02LjM4N2MzLjcxMS0xLjM0MyA0Ljk5NS0xLjM5IDguMTU0LS4yMjUgMy4xNiAxLjE2NSAyMi4wMzUgNC42MDIgMjUuMTU0IDUuNzU2djYuMDMyYzAgLjYwNS0uNzIgMS4yODMtMi4zNSAyLjEyM3oiLz48cGF0aCBmaWxsPSIjRDgyQzIwIiBkPSJNNTcuNjU2IDI3Ljg5OGMtMy4yMDEgMS42ODUtMTkuNzg3IDguNTYxLTIzLjMxOCAxMC40MTdzLTUuNDk0IDEuODM4LTguMjgzLjQ5NWMtMi43OS0xLjM0NC0yMC40NDktOC41MzQtMjMuNjMtMTAuMDY3LTMuMTgtMS41MzQtMy4yNDMtMi41ODgtLjEyMi0zLjgybDI0LjM4OC05LjUyYzMuNzEtMS4zNDMgNC45OTQtMS4zOSA4LjE1My0uMjI1IDMuMTYgMS4xNjYgMTkuNjQ0IDcuNzg1IDIyLjc2NSA4LjkzNXMzLjI0IDIuMDg1LjAzOCAzLjc4NXoiLz48cGF0aCBmaWxsPSIjQTQxRTExIiBkPSJNNTcuNjU2IDIzLjY3MWMtMy4yMDEgMS42ODMtMTkuNzg3IDguNTYxLTIzLjMxOCAxMC40MTlzLTUuNDk0IDEuODM4LTguMjgzLjQ5NWMtMi43OS0xLjM0NC0yMC40NDktOC41MzUtMjMuNjI5LTEwLjA2OS0xLjU5Mi0uNzY1LTIuNDI0LTEuNDExLTIuNDI0LTIuMDJ2LTYuMTFzMjIuOTgtNS4wNDUgMjYuNjktNi4zODggNC45OTUtMS4zOSA4LjE1NC0uMjI1YzMuMTYgMS4xNjUgMjIuMDM1IDQuNTkxIDI1LjE1NCA1Ljc0NXY2LjAzMmMwIC42MDUtLjcyIDEuMjgzLTIuMzUgMi4xMjN6Ii8+PHBhdGggZmlsbD0iI0Q4MkMyMCIgZD0iTTU3LjY1NiAxNy41NTNjLTMuMjAxIDEuNjg1LTE5Ljc4NyA4LjU2MS0yMy4zMTggMTAuNDE3cy01LjQ5NCAxLjgzOC04LjI4My40OTVjLTIuNzktMS4zNDQtMjAuNDQ5LTguNTM0LTIzLjYzLTEwLjA2OHMtMy4yNDMtMi41ODctLjEyMi0zLjgybDI0LjM4OC05LjUyYzMuNzEtMS4zNDMgNC45OTQtMS4zOSA4LjE1My0uMjI2IDMuMTYgMS4xNjUgMTkuNjQzIDcuNzg1IDIyLjc2NSA4LjkzNnMzLjI0IDIuMDg1LjAzOCAzLjc4NXoiLz48cGF0aCBmaWxsPSIjRkZGIiBkPSJtMzEuNDk3IDE1LjAzMi0xLjg4LTMuMTUzLTYuMDAyLS41NDUgNC40OC0xLjYzTDI2Ljc1IDcuMmw0LjE5MiAxLjY1MyAzLjk1NS0xLjMwNS0xLjA3IDIuNTg2IDQuMDMyIDEuNTI0LTUuMTk4LjU0NnptLTEwLjAxNCA2LjI3NSAxMy45MDMtMi4xNTMtNC4yIDYuMjExem0tMTEuMTctNS4xNjdjMC0xLjYxIDMuMzE0LTIuOTA2IDcuNDMxLTIuOTA2IDQuMTE4IDAgNy40MzIgMS4yOTYgNy40MzIgMi45MDZzLTMuMzE0IDIuOTA1LTcuNDMyIDIuOTA1Yy00LjExNyAwLTcuNDMxLTEuMjk1LTcuNDMxLTIuOTA1Ii8+PHBhdGggZmlsbD0iIzdBMEMwMCIgZD0ibTUyLjIzMyAxNS43MTQtOC4yMjQgMy4yNzYtLjAwNy02LjU1NnoiLz48cGF0aCBmaWxsPSIjQUQyMTE1IiBkPSJtNDQuMDEgMTguOTkxLS44OS4zNTMtOC4yMTctMy4yNzYgOS4wOTQtMy42M3oiLz48L2c+PC9zdmc+"
+      },
+      "displayName": "Redis",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 837,
+      "icon": "fa:sign-out-alt",
+      "name": "n8n-nodes-base.executeWorkflowTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When Executed by Another Workflow",
+        "color": "#ff6d5a"
+      },
+      "iconData": {
+        "icon": "sign-out-alt",
+        "type": "icon"
+      },
+      "displayName": "Execute Workflow Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1247,
+      "icon": "fa:comments",
+      "name": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-langchain.chattrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Langchain"
+          ]
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When chat message received"
+      },
+      "iconData": {
+        "icon": "comments",
+        "type": "icon"
+      },
+      "displayName": "Chat Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 40,
+      "name": "Support Chatbot"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

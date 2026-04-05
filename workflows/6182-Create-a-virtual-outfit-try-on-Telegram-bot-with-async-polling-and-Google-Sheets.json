@@ -1,0 +1,2344 @@
+{
+  "id": 14006,
+  "name": "Create a virtual outfit try-on Telegram bot with async polling and Google Sheets",
+  "views": 79,
+  "recentViews": 5,
+  "totalViews": 79,
+  "createdAt": "2026-03-11T15:30:51.238Z",
+  "description": "# 👗 Virtual Try-On Telegram Bot — AI Outfit Try-On via Telegram with Async Job Polling\n\nTry on any outfit virtually - right inside Telegram. A user sends a **person photo**, then a **garment photo** (captioned `garment`), and the bot replies with an AI-generated try-on result image using a dedicated Virtual Try-On API. No app. No frontend. Just a Telegram chat.\n\n\n## 🎯 Who Is This For?\n\n- **Fashion e-commerce brands** wanting to offer a try-before-you-buy experience via a simple chat interface\n- **Telegram bot developers** looking for a real-world async API polling pattern with state management\n- **AI product builders** who want a plug-and-play virtual fitting room for their audience\n- **Boutiques & clothing stores** wanting to let customers preview outfits before ordering\n\n## ⚙️ What This Workflow Does\n\n1. **Receives a Telegram message** and checks if it contains a photo\n2. **Person photo** (sent without caption) → saves `chat_id` + `file_id` to Google Sheets as session state\n3. **Garment photo** (sent with caption `garment`) → looks up the saved person photo, resolves both Telegram file URLs, downloads both images, and submits a try-on job to the API\n4. **Async polling loop** → waits 15 seconds, checks job status, loops until `completed` or `failed`\n5. **Sends the result** back to the user as a photo in Telegram, then cleans up the sheet row\n\n## 🔑 Credentials & APIs Required\n\n| Service | Purpose | Where to Get It |\n|---|---|---|\n| **Telegram Bot Token** | Receive messages & send results | Create a bot via [@BotFather](https://t.me/botfather) on Telegram → `/newbot` |\n| **Virtual Try-On API Key** | Submit and poll try-on jobs | Sign up at your Try-On API provider (e.g. [try-on api](https://tryon-api.com/) or your own deployment) |\n| **Google Sheets OAuth2** | Store per-user session state between messages | Connect via n8n's built-in Google Sheets OAuth2 credential |\n\n&gt; 💡 **Why Google Sheets for state?** Each Telegram message triggers a separate workflow execution - there's no shared memory between runs. Google Sheets acts as a lightweight session store using `chat_id` as the unique key.\n\n## 🛠️ Setup Instructions\n\n### Step 1 - Telegram Bot\n1. Open Telegram and message [@BotFather](https://t.me/botfather)\n2. Run `/newbot`, follow the prompts, copy your **Bot Token**\n3. Paste the token into the **⚙️ Config** node under `botToken`\n\n### Step 2 - Google Sheet\n1. Create a new Google Sheet\n2. Add a tab named exactly **`tryon-state`**\n3. Add two column headers in row 1: **`chat_id`** and **`person_file_id`**\n4. Copy the Sheet ID from the URL (`docs.google.com/spreadsheets/d/**{THIS_PART}**/edit`)\n5. Paste it into the **⚙️ Config** node under `sheetId`\n\n### Step 3 - Try-On API\n1. Obtain your API key from your Virtual Try-On provider\n2. Set `tryonApiKey` in the **⚙️ Config** node\n3. If your API base URL differs, also update `tryonApiBase`\n4. Verify the API accepts `POST /api/v1/tryon` with `multipart/form-data` fields `person_images` and `garment_images`, and returns `{ jobId, statusUrl }` - adjust the **Submit Try-On Job** and **Check Job Status** nodes if your provider's schema differs\n\n### Step 4 - n8n Credentials\n- Assign your **Telegram credential** to all Telegram nodes (Trigger + all send nodes)\n- Assign your **Google Sheets OAuth2 credential** to all Google Sheets nodes\n- **Activate** the workflow - the Telegram Trigger only works when the workflow is active\n\n## 🔄 How the Polling Loop Works\n\nThe Try-On API is asynchronous - submitting a job returns a `jobId`, not the result immediately. The workflow:\n\n1. Submits the job → gets `jobId`\n2. Waits **15 seconds**\n3. Calls the status endpoint: `GET /api/v1/tryon/status/{jobId}`\n4. If `status === \"completed\"` → downloads and sends the result image\n5. If `status === \"failed\"` → sends an error message to the user\n6. Otherwise → loops back to the wait step\n\n**Typical total wait:** 15–60 seconds depending on the API and queue load.\n\n## 🎨 How to Customize\n\n- **Change the garment trigger keyword** → Edit the caption check in **Is Garment Photo?** node from `garment` to anything you like (e.g. `outfit`, `try`, `wear`)\n- **Add a category/garment type input** → Extend the caption parsing to accept values like `top`, `dress`, `jacket` and pass them as an extra field to your Try-On API if supported\n- **Use a different state store** → Swap Google Sheets for Airtable, Supabase, or Redis if you have higher traffic needs; just replace the **Save Person to Sheet** and **Lookup Person from Sheet** nodes\n- **Add a paid/subscription gate** → Before saving the person photo, check a users sheet or database to see if the `chat_id` has remaining credits\n- **Support multiple garments in one session** → Instead of deleting the person row after each try-on, keep it for 24 hours so users can try multiple garments without re-uploading the person photo\n- **Add a result watermark** → Insert an n8n Code node after **HTTP Request** (result download) to overlay your brand logo before sending\n\n## 📋 Workflow Nodes Overview\n\n| Node | Role |\n|---|---|\n| Telegram Trigger | Listens for incoming messages |\n| Extract Message Info | Pulls out `chat_id`, `caption`, `hasPhoto`, `fileId` |\n| ⚙️ Config | Single place for all configurable values — edit this first |\n| Has Photo? | Routes messages that contain a photo |\n| Is Garment Photo? | Checks if caption equals `garment` |\n| Save Person to Sheet | Stores person `file_id` keyed by `chat_id` |\n| Lookup Person from Sheet | Retrieves saved person photo when garment arrives |\n| Has Person Saved? | Guards against out-of-order photos |\n| Collect IDs | Bundles all required IDs for downstream nodes |\n| Get Person/Garment File Path | Resolves Telegram `file_id` → `file_path` via `getFile` API |\n| Download Person/Garment Image | Downloads actual image binary from Telegram CDN |\n| Submit Try-On Job | POSTs both images to the Try-On API |\n| Wait 15 Seconds | Gives the API time before first status check |\n| Check Job Status | Polls job status endpoint |\n| Is Job Complete? / Is Job Failed? | Routes to success or error path |\n| HTTP Request (result download) | Downloads the result image as binary |\n| Send Result Photo | Sends the AI try-on image back to the user |\n| Delete Row from Sheet | Cleans up session state after successful result |\n\n## ⚠️ Notes & Gotchas\n\n- **Telegram file URLs expire** - the workflow resolves and downloads images immediately; never store Telegram download URLs for later use\n- **The bot must be activated** for the Telegram webhook to register - n8n does not receive messages while the workflow is inactive\n- **Google Sheets appendOrUpdate** uses `chat_id` as the matching key, so a user can retake their person photo any time and it will overwrite the old entry\n- **Pinned test data** is included in `Submit Try-On Job` and `Merge State` nodes for local testing — remove or disable these pins before going live\n\n## 🔗 Useful Links\n\n- [Telegram BotFather — Create your bot](https://t.me/botfather)\n- [n8n Telegram node docs](https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.telegram/)\n- [n8n Google Sheets node docs](https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/)\n- [n8n HTTP Request node docs](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/)\n- [n8n Wait node docs](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/)\n- [n8n Community Forum](https://community.n8n.io/)",
+  "workflow": {
+    "id": "bxMDNbmaW6ygo8Rb",
+    "meta": {
+      "instanceId": "8329856bd6925d4f2750e54c41dcb3cdefa9cd6cf7a589adead15ca668174a9f",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Virtual Apparel Try-On Telegram Bot",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "0ede88b5-b324-40f3-b0f2-3d38d02f14d9",
+        "name": "Telegram Trigger",
+        "type": "n8n-nodes-base.telegramTrigger",
+        "position": [
+          -416,
+          2128
+        ],
+        "webhookId": "c75a7de5-602c-4a4d-aedc-54e14f1cdcea",
+        "parameters": {
+          "updates": [
+            "message"
+          ],
+          "additionalFields": {}
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "967cc6cb-ce35-4b6e-9da1-ce97bd9a7c87",
+        "name": "Extract Message Info",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -192,
+          2128
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "e1",
+                "name": "chatId",
+                "type": "string",
+                "value": "={{ $json.message.chat.id }}"
+              },
+              {
+                "id": "e2",
+                "name": "caption",
+                "type": "string",
+                "value": "={{ ($json.message.caption ?? '').toLowerCase().trim() }}"
+              },
+              {
+                "id": "e3",
+                "name": "hasPhoto",
+                "type": "boolean",
+                "value": "={{ $json.message.photo !== undefined }}"
+              },
+              {
+                "id": "e4",
+                "name": "fileId",
+                "type": "string",
+                "value": "={{ $json.message.photo ? $json.message.photo[$json.message.photo.length - 1].file_id : '' }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "ef066042-e44f-4d8b-aab8-813cef499e5c",
+        "name": "⚙️ Config",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          32,
+          2128
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "c1",
+                "name": "botToken",
+                "type": "string",
+                "value": "{TELEGRAM_BOT_TOKEN}"
+              },
+              {
+                "id": "c2",
+                "name": "tryonApiKey",
+                "type": "string",
+                "value": "{TRYON_API_KEY}"
+              },
+              {
+                "id": "c3",
+                "name": "tryonApiBase",
+                "type": "string",
+                "value": "https://tryon-api.com"
+              },
+              {
+                "id": "c4",
+                "name": "sheetId",
+                "type": "string",
+                "value": "{GOOGLE_SHEET_ID}"
+              },
+              {
+                "id": "c5",
+                "name": "chatId",
+                "type": "string",
+                "value": "={{ $('Extract Message Info').item.json.chatId }}"
+              },
+              {
+                "id": "c6",
+                "name": "fileId",
+                "type": "string",
+                "value": "={{ $('Extract Message Info').item.json.fileId }}"
+              },
+              {
+                "id": "c7",
+                "name": "caption",
+                "type": "string",
+                "value": "={{ $('Extract Message Info').item.json.caption }}"
+              },
+              {
+                "id": "c8",
+                "name": "hasPhoto",
+                "type": "boolean",
+                "value": "={{ $('Extract Message Info').item.json.hasPhoto }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "ca083aaa-154d-484f-a721-1094765a7178",
+        "name": "Has Photo?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          256,
+          2128
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "hp1",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.hasPhoto }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "81f8f152-96ab-4d51-a1e3-e5660753d1c6",
+        "name": "Send Welcome Message",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          480,
+          2224
+        ],
+        "webhookId": "5c569812-99a5-4015-97ab-9476778d2327",
+        "parameters": {
+          "text": "👋 Welcome to Virtual Try-On Bot!\n\n1️⃣ Send a *person photo* — full body, no caption\n2️⃣ Then send the *garment photo* with caption `garment`\n\nI'll generate the try-on result! 👗✨",
+          "chatId": "={{ $('⚙️ Config').item.json.chatId }}",
+          "additionalFields": {
+            "parse_mode": "Markdown"
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "2024a886-5e99-4c3e-b09e-2a7b61047388",
+        "name": "Is Garment Photo?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          480,
+          2032
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "ig1",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.caption }}",
+                "rightValue": "garment"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "1f2bcd45-87fc-46fb-9466-4f6c2f002dd8",
+        "name": "Save Person to Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          704,
+          1936
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "chat_id": "={{ $('⚙️ Config').item.json.chatId }}",
+              "person_file_id": "={{ $('⚙️ Config').item.json.fileId }}"
+            },
+            "schema": [
+              {
+                "id": "chat_id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "chat_id",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "person_file_id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "person_file_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "chat_id"
+            ]
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "tryon-state"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('⚙️ Config').item.json.sheetId }}"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "QfLz4B9bUbymIjjO",
+            "name": "Google Sheets OAuth2 API"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "5eac99d6-4dcb-4351-8ad3-6cf8e9eaa099",
+        "name": "Ask for Garment Photo",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          928,
+          1936
+        ],
+        "webhookId": "6cb95220-9735-4eb7-b456-e27a6fd6dc5c",
+        "parameters": {
+          "text": "✅ Person photo saved!\n\nNow send your *garment photo* with caption `garment` 👕",
+          "chatId": "={{ $('⚙️ Config').item.json.chatId }}",
+          "additionalFields": {
+            "parse_mode": "Markdown"
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "6c3211b9-78d2-4f98-8026-0e6c18e06fc5",
+        "name": "Lookup Person from Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          704,
+          2128
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ $json.chatId }}",
+                "lookupColumn": "chat_id"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1wsCSDxhnTnIcyDxAYd16haxLHfRaZnB2ZXIPTGEesZs/edit#gid=0",
+            "cachedResultName": "tryon-state"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('⚙️ Config').item.json.sheetId }}"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "QfLz4B9bUbymIjjO",
+            "name": "Google Sheets OAuth2 API"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "b0a6bad7-019c-4ab2-933f-17a9b74c5f86",
+        "name": "Has Person Saved?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          928,
+          2128
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "hp2",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{ $json.person_file_id }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "66b0aa3c-269d-4fad-a698-15e02080430e",
+        "name": "Ask for Person First",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          1152,
+          2224
+        ],
+        "webhookId": "7f38cb54-1fea-4714-959e-a397a9f029b4",
+        "parameters": {
+          "text": "⚠️ Please send your *person photo* first (full body, no caption needed), then send the garment photo with caption `garment`.",
+          "chatId": "={{ $('⚙️ Config').item.json.chatId }}",
+          "additionalFields": {
+            "parse_mode": "Markdown"
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "fba2ab05-ea3e-45b1-aa94-f721bbc7315f",
+        "name": "Collect IDs",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          1152,
+          2032
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "ci1",
+                "name": "chatId",
+                "type": "string",
+                "value": "={{ $('⚙️ Config').item.json.chatId }}"
+              },
+              {
+                "id": "ci2",
+                "name": "personFileId",
+                "type": "string",
+                "value": "={{ $json.person_file_id }}"
+              },
+              {
+                "id": "ci3",
+                "name": "garmentFileId",
+                "type": "string",
+                "value": "={{ $('⚙️ Config').item.json.fileId }}"
+              },
+              {
+                "id": "ci4",
+                "name": "rowNumber",
+                "type": "number",
+                "value": "={{ $json.row_number }}"
+              },
+              {
+                "id": "ci5",
+                "name": "botToken",
+                "type": "string",
+                "value": "={{ $('⚙️ Config').item.json.botToken }}"
+              },
+              {
+                "id": "ci6",
+                "name": "tryonApiKey",
+                "type": "string",
+                "value": "={{ $('⚙️ Config').item.json.tryonApiKey }}"
+              },
+              {
+                "id": "ci7",
+                "name": "tryonApiBase",
+                "type": "string",
+                "value": "={{ $('⚙️ Config').item.json.tryonApiBase }}"
+              },
+              {
+                "id": "ci8",
+                "name": "sheetId",
+                "type": "string",
+                "value": "={{ $('⚙️ Config').item.json.sheetId }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "c0fff2e6-7cd1-4d00-8b35-3eb1d5a434ae",
+        "name": "Send Processing Message",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          1376,
+          2032
+        ],
+        "webhookId": "2b205a89-a59e-432d-b4aa-13ebe8467221",
+        "parameters": {
+          "text": "🔄 Processing your virtual try-on...\n\nThis usually takes 15–60 seconds. Please wait! ⏳",
+          "chatId": "={{ $json.chatId }}",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "3041396b-99d2-4999-a979-a6aceb3990cf",
+        "name": "Get Person File Path",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1600,
+          2032
+        ],
+        "parameters": {
+          "url": "=https://api.telegram.org/bot{{ $('Collect IDs').item.json.botToken }}/getFile",
+          "options": {},
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "file_id",
+                "value": "={{ $('Collect IDs').item.json.personFileId }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "5f51611e-5e17-46b2-b64b-5f3808f22e47",
+        "name": "Set Person Download URL",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          1824,
+          2032
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "pu1",
+                "name": "personDownloadUrl",
+                "type": "string",
+                "value": "=https://api.telegram.org/file/bot{{ $('Collect IDs').item.json.botToken }}/{{ $json.result.file_path }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "cfb00dcf-fd84-4448-89ff-219339443e46",
+        "name": "Get Garment File Path",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2048,
+          2032
+        ],
+        "parameters": {
+          "url": "=https://api.telegram.org/bot{{ $('Collect IDs').item.json.botToken }}/getFile",
+          "options": {},
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "file_id",
+                "value": "={{ $('Collect IDs').item.json.garmentFileId }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "f4096aba-fb45-47f4-b02b-c1a0ba2d5620",
+        "name": "Set Garment Download URL",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2272,
+          2032
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "gu1",
+                "name": "garmentDownloadUrl",
+                "type": "string",
+                "value": "=https://api.telegram.org/file/bot{{ $('Collect IDs').item.json.botToken }}/{{ $json.result.file_path }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "f8cd2136-e962-4408-84ee-b5b701c4410d",
+        "name": "Download Person Image",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2496,
+          2032
+        ],
+        "parameters": {
+          "url": "={{ $('Set Person Download URL').item.json.personDownloadUrl }}",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "file",
+                "outputPropertyName": "person_image"
+              }
+            }
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "354a10f6-9cdd-453e-ab96-e63b0d2ef7c8",
+        "name": "Download Garment Image",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2720,
+          2032
+        ],
+        "parameters": {
+          "url": "={{ $('Set Garment Download URL').item.json.garmentDownloadUrl }}",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "file",
+                "outputPropertyName": "garment_image"
+              }
+            }
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "eb8542fb-91a8-462c-b191-c2e01fa905e7",
+        "name": "Submit Try-On Job",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2944,
+          2032
+        ],
+        "parameters": {
+          "url": "={{ $('Collect IDs').item.json.tryonApiBase }}/api/v1/tryon",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "contentType": "multipart-form-data",
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "person_images",
+                "parameterType": "formBinaryData",
+                "inputDataFieldName": "person_image"
+              },
+              {
+                "name": "garment_images",
+                "parameterType": "formBinaryData",
+                "inputDataFieldName": "garment_image"
+              },
+              {
+                "name": "fast_mode",
+                "value": "false"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{ $('Collect IDs').item.json.tryonApiKey }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "0d24662f-aa0c-46f6-b3b3-35bc774f7811",
+        "name": "Extract Job ID",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          3168,
+          2032
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "ji1",
+                "name": "jobId",
+                "type": "string",
+                "value": "={{ $json.jobId }}"
+              },
+              {
+                "id": "ji2",
+                "name": "statusUrl",
+                "type": "string",
+                "value": "={{ $json.statusUrl }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "b3afa4b4-4b7d-4df8-8af3-92a973cbc1f8",
+        "name": "Wait 15 Seconds",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          3392,
+          2032
+        ],
+        "webhookId": "wait-tryon-tg-001",
+        "parameters": {
+          "amount": 15
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "f90cce7f-857e-4260-ae86-81efd01f9d7e",
+        "name": "Check Job Status",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          3616,
+          1904
+        ],
+        "parameters": {
+          "url": "={{ $('Collect IDs').item.json.tryonApiBase }}/api/v1/tryon/status/{{ $('Submit Try-On Job').item.json.jobId }}",
+          "options": {},
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{ $('Collect IDs').item.json.tryonApiKey }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "1b0f1b09-a081-424a-98a3-d689cc6fd71a",
+        "name": "Merge State",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          3840,
+          1904
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "ms1",
+                "name": "status",
+                "type": "string",
+                "value": "={{ $json.status }}"
+              },
+              {
+                "id": "ms2",
+                "name": "imageUrl",
+                "type": "string",
+                "value": "={{ $json.imageUrl }}"
+              },
+              {
+                "id": "ms3",
+                "name": "jobId",
+                "type": "string",
+                "value": "={{ $json.jobId }}"
+              },
+              {
+                "id": "ms4",
+                "name": "errorMessage",
+                "type": "string",
+                "value": "={{ $json.error ?? '' }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "6a7c9814-d81a-4106-b75b-8b56f4415409",
+        "name": "Is Job Complete?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          4064,
+          1904
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "jc1",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.status }}",
+                "rightValue": "completed"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "52b6967f-8093-4a97-b8d3-c801a6146ba9",
+        "name": "Is Job Failed?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          4288,
+          2128
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "jf1",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.status }}",
+                "rightValue": "failed"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "bb7c6f29-0712-4300-ab39-5bb342b52f9f",
+        "name": "Send Result Photo",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          4512,
+          1840
+        ],
+        "webhookId": "977e2db7-3667-41ba-bbe7-a686d096f8d6",
+        "parameters": {
+          "chatId": "={{ $('Collect IDs').item.json.chatId }}",
+          "operation": "sendPhoto",
+          "binaryData": true,
+          "additionalFields": {
+            "caption": "✅ Here's your virtual try-on result! 🎉\n\nSend a new person photo to try another outfit! 👗"
+          }
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "2bf9864a-9db8-4f40-8928-6ddb4f395239",
+        "name": "Delete Row from Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          4752,
+          1840
+        ],
+        "parameters": {
+          "operation": "delete",
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "tryon-state"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Collect IDs').item.json.sheetId }}"
+          },
+          "startIndex": "={{ $('Collect IDs').item.json.rowNumber }}"
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "QfLz4B9bUbymIjjO",
+            "name": "Google Sheets OAuth2 API"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "c6a72a21-b298-4e46-8fdf-ae7a9f36844e",
+        "name": "Send Error Message",
+        "type": "n8n-nodes-base.telegram",
+        "position": [
+          4512,
+          2128
+        ],
+        "webhookId": "c8eb46c6-1755-4e62-a520-49d6d2ab1705",
+        "parameters": {
+          "text": "❌ Sorry, the try-on failed. Please try again with clearer photos!\n\n• Person photo: full body visible, good lighting\n• Garment photo: clear view of the item 📸",
+          "chatId": "={{ $('Collect IDs').item.json.chatId }}",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "telegramApi": {
+            "id": "hNRjCoFmvc0WnFGY",
+            "name": "Telegram account"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "d7b6dbe0-b0ed-45b2-b1df-dea70af43b84",
+        "name": "HTTP Request",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          4288,
+          1840
+        ],
+        "parameters": {
+          "url": "={{ $json.imageUrl }}",
+          "options": {}
+        },
+        "typeVersion": 4.4
+      },
+      {
+        "id": "10b68de2-086f-44c4-a7ef-8520f54bb553",
+        "name": "Sticky Note - Config",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -64,
+          1808
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 284,
+          "height": 482,
+          "content": "## ⚙️ Config — Edit This First\n\nSet these 2 values before activating:\n\n* `botToken` - Your Telegram bot token from @BotFather\n* `sheetId` - ID from your Google Sheets URL\n\nAll other nodes reference values from here — you only need to change things in one place."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bff60fff-9cf5-47be-babe-b7acf67ea595",
+        "name": "Sticky Note - State Management1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          368,
+          1616
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 688,
+          "height": 292,
+          "content": "## 📋 State Management via Google Sheets\n\n**The problem:** Each Telegram message triggers a separate workflow execution with no shared memory.\n\n**The fix:** Google Sheets acts as a bridge.\n\n- **Save Person to Sheet** → writes `chat_id` + `person_file_id` when user sends person photo\n- **Lookup Person from Sheet** → reads that row back when garment photo arrives\n- **Has Person Saved?** → if no row found, tells user to send person photo first\n\n> The `chat_id` is the unique key — it never changes for a given user/bot conversation."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8bca4062-f765-4e5b-a36f-7c97d97c4e12",
+        "name": "Sticky Note - Collect IDs1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1152,
+          1760
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 456,
+          "height": 230,
+          "content": "## 📁 Collect IDs\n\nCarries all required data forward into the rest of the workflow:\n- `chatId` — who to reply to\n- `personFileId` — Telegram file ID of person photo\n- `garmentFileId` — Telegram file ID of garment photo\n- `rowNumber` — sheet row to delete after job completes\n- `botToken`, `tryonApiKey`, `tryonApiBase`, `sheetId` — configs\n\n> Needed because after Lookup node, the Config node is no longer in the direct chain."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "971a0a2c-acef-448f-8ed5-8adbe810f6c8",
+        "name": "Sticky Note - File URL Resolution1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2048,
+          1760
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 792,
+          "height": 226,
+          "content": "## 🔗 Telegram File URL Resolution\n\nTelegram does **not** give you a direct download URL in the message. It only gives a `file_id`.\n\nTo get the actual image you must:\n1. Call `getFile?file_id=...` → returns a `file_path`\n2. Build download URL: `api.telegram.org/file/bot{TOKEN}/{file_path}`\n\nThis 4-node sequence does this for **both** person and garment images before passing them to the Try-On API."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "97a0e691-7408-40dd-ad9a-bf058cc45fda",
+        "name": "Sticky Note - Polling Loop1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3536,
+          2048
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 668,
+          "height": 252,
+          "content": "## ⏱️ Polling Loop\n\nThe Try-On API is **asynchronous** — submitting a job returns a `jobId`, not the result immediately.\n\nThis loop:\n1. Waits 15 seconds\n2. Calls the status endpoint with the `jobId`\n3. Checks if status is `completed` → send result\n4. Checks if status is `failed` → send error\n5. Otherwise loops back to Wait\n\n**Typical wait time:** 15–60 seconds total"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c794ec17-2a15-4624-b401-80edc061c511",
+        "name": "Sticky Note - Download Result1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          4240,
+          1600
+        ],
+        "parameters": {
+          "color": 2,
+          "width": 436,
+          "height": 222,
+          "content": "## ⬇️ Download Result Image\n\nThe Try-On API returns an `imageUrl` (a signed URL). Telegram's `sendPhoto` with a URL can fail if the URL expires or requires auth headers.\n\nThis node downloads the image as a binary file first, then **Send Result Photo** sends it as a proper file upload — more reliable."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "33934043-0a35-4283-8917-9e8fd4a06a92",
+        "name": "Sticky Note - Overview",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1536,
+          1792
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 1068,
+          "height": 580,
+          "content": "# 👗 Virtual Try-On Telegram Bot\n\n## What this workflow does\nThis bot lets users virtually try on clothing via Telegram. A user sends a **person photo**, then a **garment photo** (with caption `garment`), and the bot replies with an AI-generated try-on result image.\n\n## How it works\n1. **Message comes in** → checks if it contains a photo\n2. **Person photo** (no caption) → saved to Google Sheets as state\n3. **Garment photo** (caption: `garment`) → looks up saved person photo from Sheets, resolves both Telegram file URLs, downloads both images, submits to Try-On API\n4. **Polling loop** → checks job status every 15s until `completed` or `failed`\n5. **Result** → downloads the result image and sends it back to the user in Telegram\n\n## Setup checklist\n- [ ] Set your **Telegram Bot Token** in ⚙️ Config node\n- [ ] Set your **Google Sheet ID** in ⚙️ Config node\n- [ ] Confirm Google Sheet has tab named `tryon-state` with headers `chat_id` and `person_file_id`\n- [ ] Assign Telegram credential to all Telegram nodes\n- [ ] Assign Google Sheets credential to all Google Sheets nodes\n- [ ] **Activate** the workflow (Telegram Trigger only works when active)"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {
+      "Merge State": [
+        {
+          "json": {
+            "jobId": "0a1e05ef-c8e5-4e8e-8899-5833483c3475",
+            "status": "completed",
+            "imageUrl": "https://view.tryon-api.com/tryon-results/1773230678953-result.png",
+            "errorMessage": ""
+          }
+        }
+      ],
+      "Submit Try-On Job": [
+        {
+          "json": {
+            "jobId": "0a1e05ef-c8e5-4e8e-8899-5833483c3475",
+            "statusUrl": "/api/v1/tryon/status/0a1e05ef-c8e5-4e8e-8899-5833483c3475",
+            "perfSessionId": "tryon-62db68f0"
+          }
+        }
+      ]
+    },
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "9fede48e-ca46-4fc0-88ce-5af539c8e6d9",
+    "connections": {
+      "Has Photo?": {
+        "main": [
+          [
+            {
+              "node": "Is Garment Photo?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Send Welcome Message",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Collect IDs": {
+        "main": [
+          [
+            {
+              "node": "Send Processing Message",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge State": {
+        "main": [
+          [
+            {
+              "node": "Is Job Complete?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request": {
+        "main": [
+          [
+            {
+              "node": "Send Result Photo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⚙️ Config": {
+        "main": [
+          [
+            {
+              "node": "Has Photo?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Job ID": {
+        "main": [
+          [
+            {
+              "node": "Wait 15 Seconds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Job Failed?": {
+        "main": [
+          [
+            {
+              "node": "Send Error Message",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Wait 15 Seconds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Wait 15 Seconds": {
+        "main": [
+          [
+            {
+              "node": "Check Job Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Job Status": {
+        "main": [
+          [
+            {
+              "node": "Merge State",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Job Complete?": {
+        "main": [
+          [
+            {
+              "node": "HTTP Request",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Is Job Failed?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Telegram Trigger": {
+        "main": [
+          [
+            {
+              "node": "Extract Message Info",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has Person Saved?": {
+        "main": [
+          [
+            {
+              "node": "Collect IDs",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Ask for Person First",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Garment Photo?": {
+        "main": [
+          [
+            {
+              "node": "Lookup Person from Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Save Person to Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Result Photo": {
+        "main": [
+          [
+            {
+              "node": "Delete Row from Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Submit Try-On Job": {
+        "main": [
+          [
+            {
+              "node": "Extract Job ID",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Message Info": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Person File Path": {
+        "main": [
+          [
+            {
+              "node": "Set Person Download URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Person to Sheet": {
+        "main": [
+          [
+            {
+              "node": "Ask for Garment Photo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download Person Image": {
+        "main": [
+          [
+            {
+              "node": "Download Garment Image",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Garment File Path": {
+        "main": [
+          [
+            {
+              "node": "Set Garment Download URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download Garment Image": {
+        "main": [
+          [
+            {
+              "node": "Submit Try-On Job",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Processing Message": {
+        "main": [
+          [
+            {
+              "node": "Get Person File Path",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Person Download URL": {
+        "main": [
+          [
+            {
+              "node": "Get Garment File Path",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Lookup Person from Sheet": {
+        "main": [
+          [
+            {
+              "node": "Has Person Saved?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Garment Download URL": {
+        "main": [
+          [
+            {
+              "node": "Download Person Image",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 37,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 5
+      },
+      "n8n-nodes-base.set": {
+        "count": 7
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.telegram": {
+        "count": 6
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 7
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 3
+      },
+      "n8n-nodes-base.telegramTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "AppStoneLab Technologies LLP",
+    "username": "appstonelab",
+    "bio": "Dive into the digital era with a trusted partner. From idea to execution, we transform visions into interactive realities. Let's shape the future, together.",
+    "verified": true,
+    "links": [
+      "https://appstonelab.com"
+    ],
+    "avatar": "https://gravatar.com/avatar/2e16a1d332e0382df4f5e3263c822b0ef2c3b51db77e18f737999755913724f6?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "icon": "file:telegram.svg",
+      "name": "n8n-nodes-base.telegram",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-telegram-bots-with-n8n-a-no-code-platform/",
+                "icon": "💬",
+                "label": "Creating Telegram Bots with n8n, a No-Code Platform"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.telegram/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/telegram/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Telegram"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNjYgNjYiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzM3YWVlMiIgZD0iTTAgMzJjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMyczMyLTE0LjMyNyAzMi0zMlM0OS42NzMgMCAzMiAwIDAgMTQuMzI3IDAgMzIiLz48cGF0aCBmaWxsPSIjYzhkYWVhIiBkPSJtMjEuNjYxIDM0LjMzOCAzLjc5NyAxMC41MDhzLjQ3NS45ODMuOTgzLjk4MyA4LjA2OC03Ljg2NCA4LjA2OC03Ljg2NGw4LjQwNy0xNi4yMzctMjEuMTE5IDkuODk4eiIvPjxwYXRoIGZpbGw9IiNhOWM2ZDgiIGQ9Im0yNi42OTUgMzcuMDM0LS43MjkgNy43NDZzLS4zMDUgMi4zNzMgMi4wNjggMGw0LjY0NC00LjIwMyIvPjxwYXRoIGQ9Im0yMS43MyAzNC43MTItNy44MDktMi41NDVzLS45MzItLjM3OC0uNjMzLTEuMjM3Yy4wNjItLjE3Ny4xODYtLjMyOC41NTktLjU4OCAxLjczMS0xLjIwNiAzMi4wMjgtMTIuMDk2IDMyLjAyOC0xMi4wOTZzLjg1Ni0uMjg4IDEuMzYxLS4wOTdjLjIzMS4wODguMzc4LjE4Ny41MDMuNTQ4LjA0NS4xMzIuMDcxLjQxMS4wNjguNjg5LS4wMDMuMjAxLS4wMjcuMzg2LS4wNDUuNjc4LS4xODQgMi45NzgtNS43MDYgMjUuMTk4LTUuNzA2IDI1LjE5OHMtLjMzIDEuMy0xLjUxNCAxLjM0NWMtLjQzMi4wMTYtLjk1Ni0uMDcxLTEuNTgyLS42MS0yLjMyMy0xLjk5OC0xMC4zNTItNy4zOTQtMTIuMTI2LTguNThhLjM0LjM0IDAgMCAxLS4xNDYtLjIzOWMtLjAyNS0uMTI1LjEwOC0uMjguMTA4LS4yOHMxMy45OC0xMi40MjcgMTQuMzUyLTEzLjczMWMuMDI5LS4xMDEtLjA3OS0uMTUxLS4yMjYtLjEwNy0uOTI5LjM0Mi0xNy4wMjUgMTAuNTA2LTE4LjgwMSAxMS42MjktLjEwNC4wNjYtLjM5NS4wMjMtLjM5NS4wMjMiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Telegram",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "icon": "file:telegram.svg",
+      "name": "n8n-nodes-base.telegramTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-telegram-bots-with-n8n-a-no-code-platform/",
+                "icon": "💬",
+                "label": "Creating Telegram Bots with n8n, a No-Code Platform"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.telegramtrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/telegram/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Telegram Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNjYgNjYiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzM3YWVlMiIgZD0iTTAgMzJjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMyczMyLTE0LjMyNyAzMi0zMlM0OS42NzMgMCAzMiAwIDAgMTQuMzI3IDAgMzIiLz48cGF0aCBmaWxsPSIjYzhkYWVhIiBkPSJtMjEuNjYxIDM0LjMzOCAzLjc5NyAxMC41MDhzLjQ3NS45ODMuOTgzLjk4MyA4LjA2OC03Ljg2NCA4LjA2OC03Ljg2NGw4LjQwNy0xNi4yMzctMjEuMTE5IDkuODk4eiIvPjxwYXRoIGZpbGw9IiNhOWM2ZDgiIGQ9Im0yNi42OTUgMzcuMDM0LS43MjkgNy43NDZzLS4zMDUgMi4zNzMgMi4wNjggMGw0LjY0NC00LjIwMyIvPjxwYXRoIGQ9Im0yMS43MyAzNC43MTItNy44MDktMi41NDVzLS45MzItLjM3OC0uNjMzLTEuMjM3Yy4wNjItLjE3Ny4xODYtLjMyOC41NTktLjU4OCAxLjczMS0xLjIwNiAzMi4wMjgtMTIuMDk2IDMyLjAyOC0xMi4wOTZzLjg1Ni0uMjg4IDEuMzYxLS4wOTdjLjIzMS4wODguMzc4LjE4Ny41MDMuNTQ4LjA0NS4xMzIuMDcxLjQxMS4wNjguNjg5LS4wMDMuMjAxLS4wMjcuMzg2LS4wNDUuNjc4LS4xODQgMi45NzgtNS43MDYgMjUuMTk4LTUuNzA2IDI1LjE5OHMtLjMzIDEuMy0xLjUxNCAxLjM0NWMtLjQzMi4wMTYtLjk1Ni0uMDcxLTEuNTgyLS42MS0yLjMyMy0xLjk5OC0xMC4zNTItNy4zOTQtMTIuMTI2LTguNThhLjM0LjM0IDAgMCAxLS4xNDYtLjIzOWMtLjAyNS0uMTI1LjEwOC0uMjguMTA4LS4yOHMxMy45OC0xMi40MjcgMTQuMzUyLTEzLjczMWMuMDI5LS4xMDEtLjA3OS0uMTUxLS4yMjYtLjEwNy0uOTI5LjM0Mi0xNy4wMjUgMTAuNTA2LTE4LjgwMSAxMS42MjktLjEwNC4wNjYtLjM5NS4wMjMtLjM5NS4wMjMiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Telegram Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 31,
+      "name": "Content Creation"
+    },
+    {
+      "id": 47,
+      "name": "AI Chatbot"
+    }
+  ],
+  "image": []
+}

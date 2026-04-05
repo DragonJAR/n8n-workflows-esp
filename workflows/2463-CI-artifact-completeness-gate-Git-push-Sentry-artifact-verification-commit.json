@@ -1,0 +1,893 @@
+{
+  "id": 11828,
+  "name": "CI artifact completeness gate (Git push, Sentry artifact verification, commit)",
+  "views": 32,
+  "recentViews": 0,
+  "totalViews": 32,
+  "createdAt": "2025-12-15T09:49:14.741Z",
+  "description": "# CI Artifact Completeness Gate (GitHub Push → Sentry Release Files → Artifact Validation → GitHub Commit Status Update)\n\nThis workflow acts as a CI/CD *quality gate* for mobile app crash-symbolication artifacts.\nWhenever a new commit is pushed to GitHub, the workflow automatically checks the corresponding Sentry release and confirms whether required build artifacts (dSYM or ProGuard + mapping.txt) exist. If artifacts are complete, it updates the GitHub commit status to **success**, allowing the PR to be merged. If incomplete, the workflow fails silently (no commit status update), effectively blocking merges.\n\n### ⚡ Quick Implementation Steps\n\n1.  Configure **GitHub Trigger** for your repo.\n2.  Add **Sentry API credentials**.\n3.  Add **GitHub API credentials**.\n4.  Update Sentry project URLs with your **org_slug** and **proj_slug**.\n5.  Ensure your build pipeline uploads artifacts to Sentry **before** the workflow runs.\n6.  Activate workflow.\n\n\n## What It Does\n\nThis workflow ensures your mobile crash-symbolication artifacts are fully present in Sentry for every release.\n\nWhen a new GitHub push occurs, the workflow:\n\n1.  Reads the commit SHA and repo info from the GitHub Push event.\n2.  Fetches the list of all releases from Sentry.\n3.  Locates the correct release and fetches its uploaded artifact files.\n4.  Runs custom validation logic:\n    -   **Success if:**\n        -   a `*.dSYM` file exists **OR**\\\n        -   both `proguard.txt` AND `mapping.txt` are present\\\n    -   **Failure if:**\n        -   neither dSYM nor both mapping artifacts exist.\n5.  If validated successfully, the commit receives a **success** status on GitHub → PR can be merged.\n\nThis provides a strong CI gate ensuring symbolication completeness and preventing un-debuggable releases.\n\n\n## Who's It For\n\n-   Mobile development teams using Sentry for crash reporting.\n-   Engineering teams enforcing strict release-quality gates.\n-   DevOps teams wanting automated artifact validation.\n-   CI/CD pipeline engineers integrating Sentry symbolication checks.\n-   Teams who frequently upload dSYM or ProGuard mapping files.\n\n\n## Requirements to Use This Workflow\n\n-   n8n instance (cloud or self-hosted)\n-   GitHub repository access (API credentials)\n-   Sentry project with:\n    -   org_slug\n    -   project_slug\n    -   Auth Token with release access\n-   Build process that uploads artifacts to Sentry releases\n-   The release version must match the format expected by the workflow\n\n\n## How It Works & How To Set Up\n\n### Step 1: GitHub Push Trigger\n\nThe **GithubPushTrigger** node listens for push events and extracts:\n\n-   Commit SHA\n-   Repository full name\n-   Branch\n-   Metadata\n\nNo configuration required except selecting your GitHub credentials.\n\n\n### Step 2: Configure Sentry Release Fetching\n\nOpen **Check Sentry Artifacts Releases** and update:\n    https://sentry.io/api/0/projects/&lt;org_slug&gt;/&lt;proj_slug&gt;/releases/\n\nMake sure the Sentry credential is correctly selected.\n\n\n### Step 3: Fetch Files for the Specific Release\n\nThe next HTTP Request (**Check Sentry Artifacts Files**) uses a dynamic\nURL:\n    https://sentry.io/api/0/projects/&lt;org_slug&gt;/&lt;proj_slug&gt;/releases/{{ $json.version }}/files/\n\nEnsure your build pipeline sets `version` consistently with what Sentry receives.\n\n\n### Step 4: Artifact Validation Logic\n\nThe **Verify Artifacts** node runs JS logic to check:\n\n#### ✔ Condition 1 --- Valid dSYM\nAny file ending with `.dSYM`\n\n#### ✔ Condition 2 --- Valid Android Mapping\n-   `proguard.txt`\\\n-   `mapping.txt`\n\n#### ✖ Failure --- If neither set exists\n\nThe Code node returns:\n\n``` json\n{ \"status\": \"failure\", \"description\": \"Missing artifacts...\" }\n```\n\nThis stops the workflow and prevents GitHub commit-status update.\n\n\n### Step 5: Extract Commit Info & Prepare Update\n\nThe **Artifacts Validation and Get Repository Data** node compiles:\n\n-   repo full name\n-   commit SHA\n-   validation status\n\nIf validation failed → workflow ends here.\n\n\n### Step 6: Update GitHub Commit Status\n\nThe **Update Status** node hits:\n\n    POST https://api.github.com/repos/&lt;repoFullName&gt;/statuses/&lt;commitSHA&gt;\n\nAnd sends:\n\n``` json\n{\n  \"state\": \"success\",\n  \"description\": \"Artifacts successfully verified.\"\n}\n```\n\nThis appears as a green check on your commit/PR.\n\n\n### Step 7: Activate the Workflow\n\nTurn on the workflow to start enforcing symbolication completeness for all releases.\n\n\n## How To Customize Nodes\n\n### Change Sentry Project\n\nEdit URLs in both Sentry HTTP Request nodes:\n\n-   `org_slug`\n-   `proj_slug`\n\n### Add Additional Artifact Rules\n\nModify JS inside **Verify Artifacts**, e.g., require:\n\n-   native symbols\n-   extra asset files\n-   other platform artifacts\n\n### Customize Commit Status Message\n\nEdit the request body in **Update Status**.\n\n### Support Multiple Platforms / Multiple Releases\n\nBranch logic in:\n\n-   Code nodes\n-   Conditional checks\n\n\n## Add-Ons (Optional Enhancements)\n\n-   Add Slack/Teams notifications when artifacts are missing.\n-   Auto-retry release checks after build completes.\n-   Merge-blocking PR checks for GitHub.\n-   Multi-platform artifact validation (iOS + Android + Unity).\n-   Upload artifacts directly from n8n.\n-   Store validation logs in Airtable or Google Sheets.\n-   Add GitHub Checks API rich reporting.\n\n\n## Use Case Examples\n\n1.  Block merges until symbolication artifacts are uploaded.\n2.  Enforce strict Sentry release completeness for every build.\n3.  Ensure Android mapping files always match the correct release version.\n4.  Automatically verify multiple release types (debug, staging, production).\n5.  Improve crash debugging by preventing un-symbolicated builds from shipping.\n\n\n## Troubleshooting Guide\n\n| Issue                       | Possible Cause                                 | Solution                                                                 |\n|----------------------------|-----------------------------------------------|--------------------------------------------------------------------------|\n| Commit status never updates| Validation failed silently                     | Check logs from **Verify Artifacts**                                      |\n| \"version undefined\" in URL | Sentry release list not matched                | Ensure your build uploads a valid `version`                               |\n| 401 from Sentry API        | Invalid/broken Sentry token                    | Regenerate token and update credentials                                   |\n| Always failing validation  | Artifact names differ (e.g., `.dsym.zip`)      | Update RegEx patterns in Code node                                         |\n| GitHub status API returns 404 | Missing repo permissions                   | Update GitHub credentials (repo status scope)                              |\n| Files array empty          | Build system not uploading artifacts           | Verify build → Sentry upload step                                          |\n\n## Need Help?\n\nIf you need help customizing the artifact rules, integrating multiple platforms or automating Sentry/GitHub workflows, reach out to our [n8n automation developers](https://www.weblineindia.com/hire-n8n-developers/) at WeblineIndia. We can assist with:\n\n-   Mobile CI/CD pipelines\n-   Sentry automation\n-   Multi-artifact validation\n-   GitHub PR quality-gates\n-   Advanced Code-node scripting\n-   And so much more.\n\nHappy automating! 🚀",
+  "workflow": {
+    "id": "ZdMbuyTs5MXQpA1p",
+    "meta": {
+      "instanceId": "14e4c77104722ab186539dfea5182e419aecc83d85963fe13f6de862c875ebfa",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "CI Artifact Completeness Gate",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "9b94178b-9527-46bc-9e84-3673675c0951",
+        "name": "Verify Artifacts",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1040,
+          0
+        ],
+        "parameters": {
+          "jsCode": "\n\n// Let's use the simplest, most common way to get the data when running 'Once for All Items'\n// which is usually $json, or, more safely, $input.\n\nconst inputData = $input.all();\n\n// Step 1: Ensure we have an array of the file objects\nconst sentryFiles = Array.isArray(inputData) ? inputData : [];\n\n// Step 2: Handle empty or invalid input\n// Using standard JavaScript 'Array.isArray'\nif (sentryFiles.length === 0) {\n    return [{\n        json: { status: 'failure', description: 'No files returned from Sentry for analysis.' }\n    }];\n}\n\n// Step 3: Extract file names for easier checking\n// The map function can be executed directly on sentryFiles\n\nconst fileNames = sentryFiles.map(file => file.json.name);\n\n// Step 4: Check for dSYM (Priority Check)\nconst hasDSYM = fileNames.some(name => /\\.dSYM$/i.test(name));\n\n// Step 5: Check for ProGuard/Mapping (Fallback Check)\nconst hasProguard = fileNames.some(name => /proguard\\.txt$/i.test(name));\nconst hasMapping = fileNames.some(name => /mapping\\.txt$/i.test(name));\n\n// Step 6: Determine final status based on logic\nlet status, description;\n\n// Condition 1: dSYM exists (highest priority)\nif (hasDSYM) {\n    status = 'success';\n    description = 'Success: Valid dSYM artifact found.';\n} \n// Condition 2: dSYM does NOT exist, but BOTH ProGuard and Mapping exist\nelse if (hasProguard && hasMapping) {\n    status = 'success';\n    description = 'Success: dSYM not found, but ProGuard and Mapping.txt artifacts are complete.';\n} \n// Condition 3: Failure\nelse {\n    const missing = [];\n    if (!hasProguard) missing.push('proguard.txt');\n    if (!hasMapping) missing.push('mapping.txt');\n    \n    status = 'failure';\n    description = `Failure: Neither dSYM was found, nor was the complete set of ProGuard artifacts. Missing: ${missing.join(' and ')}`;\n}\n\n// Step 7: Return the final result\nreturn [{ json: { status, description } }];\n\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "81aa32b4-3621-4a87-94bd-d7d997ae9879",
+        "name": "GithubPushTrigger",
+        "type": "n8n-nodes-base.githubTrigger",
+        "position": [
+          -288,
+          0
+        ],
+        "webhookId": "18e18df2-708c-4497-966c-48181fdb800b",
+        "parameters": {
+          "owner": {
+            "__rl": true,
+            "mode": "name",
+            "value": "repo_owner"
+          },
+          "events": [
+            "push"
+          ],
+          "options": {
+            "insecureSSL": false
+          },
+          "repository": {
+            "__rl": true,
+            "mode": "list",
+            "value": "repo_name",
+            "cachedResultUrl": "https://github.com/repo_owner/repo_name",
+            "cachedResultName": "repo_name"
+          }
+        },
+        "credentials": {
+          "githubApi": {
+            "id": "credential-id",
+            "name": "githubApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "971f3b61-87b6-483d-974b-829917719e3b",
+        "name": "Check Sentry Artifacts Releases",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -16,
+          0
+        ],
+        "parameters": {
+          "url": "=https://sentry.io/api/0/projects/org_slug/proj_slug/releases/\n",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "predefinedCredentialType",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              }
+            ]
+          },
+          "nodeCredentialType": "sentryIoApi"
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "0ac8589e-fb9d-4c24-a161-10dce31874da",
+        "name": "Check Sentry Artifacts files",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          816,
+          0
+        ],
+        "parameters": {
+          "url": "=https://sentry.io/api/0/projects/org_slug/proj_slug/releases/{{ $json.version }}/files/\n",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "predefinedCredentialType",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              }
+            ]
+          },
+          "nodeCredentialType": "sentryIoApi"
+        },
+        "typeVersion": 4.3,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "cbe6788f-1026-4a02-a841-7b2dabe861a5",
+        "name": "Update Status",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2320,
+          0
+        ],
+        "parameters": {
+          "url": "=https://api.github.com/repos/{{ $json.repoDetail.repoFullName }}/statuses/{{ $json.repoDetail.repoCommitSha }}",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "authentication": "predefinedCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "state",
+                "value": "success"
+              },
+              {
+                "name": "description",
+                "value": "Artifacts successfully verified."
+              }
+            ]
+          },
+          "nodeCredentialType": "githubApi"
+        },
+        "credentials": {
+          "githubApi": {
+            "id": "credential-id",
+            "name": "githubApi Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "d9d95c07-078f-4015-ac47-d983486ee468",
+        "name": "Artifacts Validation and Get Repository Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2016,
+          0
+        ],
+        "parameters": {
+          "jsCode": "\n\n// Let's use the simplest, most common way to get the data when running 'Once for All Items'\n// which is usually $json, or, more safely, $input.\nconst repoCommitSha = $node[\"GithubPushTrigger\"].json[\"body\"][\"after\"];\nconst repoFullName = $node[\"GithubPushTrigger\"].json[\"body\"][\"repository\"][\"full_name\"];\nconst repoDetail = {repoFullName, repoCommitSha};\nconst inputData = $input.all();\n\n// Step 7: Return the final result\nif ($input.first().json.status === 'success') {\nreturn [{ json: { inputData, repoDetail } }];\n} else {\n  return []\n}\n\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "0280557b-b520-4d7f-b887-8c4447660986",
+        "name": "Sticky Note10",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1280,
+          -352
+        ],
+        "parameters": {
+          "width": 544,
+          "height": 928,
+          "content": "# How It Works\n### This workflow functions as a critical CI/CD Quality Gate, automatically verifying that all essential build artifacts are uploaded to Sentry before allowing code to be merged. The process is initiated by a Webhook or a GitHub Push event, which provides the specific release version and commit SHA. The workflow then uses HTTP Requests to query the Sentry API, retrieving a list of all files associated with that release. A Code node runs custom logic to verify completeness, checking for required files like dSYMs, ProGuard, or Mapping files using file name patterns. If verification succeeds, a final HTTP Request updates the commit status on GitHub to success, allowing the associated Pull Request to be merged.\n\n# Setup Steps\n## Add Trigger\nSet up a Webhook or a GitHub Trigger (for push events) to start the workflow.\n\n## Connect Accounts\nAdd credentials for both Sentry.io API and GitHub API.\n\n## Configure Requests\nUpdate the Sentry API URLs in the HTTP Request nodes with your organization and project slugs, ensuring they correctly interpolate the release version from the trigger.\n\n## Update GitHub Status\nConfigure the final HTTP Request node to post the verification status (success/failure) to your repository's commit status endpoint using the commit SHA."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6723f1d4-5de5-4aae-bf80-d71e1a9cb331",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -512,
+          -272
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 912,
+          "height": 576,
+          "content": "## GithubPushTrigger & Check Sentry Artifacts Releases\nThe workflow begins with a GitHub Push Trigger (or Webhook) that starts the process upon a code push, capturing the vital commit_sha and repository details. Immediately, an HTTP Request node authenticates with the Sentry API to execute a GET request to the /releases/ endpoint. This step's purpose is to retrieve metadata for all existing Sentry releases within the project, which is necessary to locate and verify the files for the specific release associated with the triggering commit."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0c252ab9-2b89-4300-a53d-a9447d08dbd4",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          528,
+          -272
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 976,
+          "height": 576,
+          "content": "## Get Sentry Artifacts Files and  Verify\nThe Check Sentry Artifacts files node first executes an HTTP GET request using a dynamic URL (e.g., .../releases/{{ $json.version }}/files/) to retrieve the full array of uploaded artifact objects for the specific release from the Sentry API. This artifact list is then consumed by the Verify Artifacts Code node, which contains the core business logic to validate completeness. This node implements a priority check: the release is deemed a success if a dSYM file is present, OR as a fallback, if both proguard.txt and mapping.txt are found. The final output of this validation step is an object providing the resulting status ('success' or 'failure') and a corresponding descriptive message."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "89ce57c9-0dde-43d2-84fb-e9847cd36b4f",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1680,
+          -272
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1072,
+          "height": 576,
+          "content": "## Validate Artifacts and Updae Status\nThe Check Sentry Artifacts files node retrieves the uploaded artifacts list, which is validated by the Verify Artifacts Code node (checking for a dSYM OR both proguard.txt and mapping.txt).\nThe Artifacts Validation node enforces the CI gate: if the check fails, the workflow stops, preventing the merge. If successful, it passes the Commit SHA to the final Update Status node. This node then sends a successful HTTP POST request to the GitHub Commit Statuses API, which displays a green checkmark on the commit, signaling that the artifact gate has been successfully passed."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {
+      "GithubPushTrigger": [
+        {
+          "json": {
+            "body": {
+              "ref": "refs/heads/main",
+              "after": "b1b80a10f061313c0bf69c6202934a8610f2e3ce",
+              "before": "fd1aa707dc6096efcbe91683b7fd1352c8baaeb8",
+              "forced": false,
+              "pusher": {
+                "name": "repo_owner",
+                "email": "151736888+repo_owner@users.noreply.github.com"
+              },
+              "sender": {
+                "id": 151736888,
+                "url": "https://api.github.com/users/repo_owner",
+                "type": "User",
+                "login": "repo_owner",
+                "node_id": "U_kgDOCQtSOA",
+                "html_url": "https://github.com/repo_owner",
+                "gists_url": "https://api.github.com/users/repo_owner/gists{/gist_id}",
+                "repos_url": "https://api.github.com/users/repo_owner/repos",
+                "avatar_url": "https://avatars.githubusercontent.com/u/151736888?v=4",
+                "events_url": "https://api.github.com/users/repo_owner/events{/privacy}",
+                "site_admin": false,
+                "gravatar_id": "",
+                "starred_url": "https://api.github.com/users/repo_owner/starred{/owner}{/repo}",
+                "followers_url": "https://api.github.com/users/repo_owner/followers",
+                "following_url": "https://api.github.com/users/repo_owner/following{/other_user}",
+                "user_view_type": "public",
+                "organizations_url": "https://api.github.com/users/repo_owner/orgs",
+                "subscriptions_url": "https://api.github.com/users/repo_owner/subscriptions",
+                "received_events_url": "https://api.github.com/users/repo_owner/received_events"
+              },
+              "commits": [
+                {
+                  "id": "b1b80a10f061313c0bf69c6202934a8610f2e3ce",
+                  "url": "https://github.com/repo_owner/repo_name/commit/b1b80a10f061313c0bf69c6202934a8610f2e3ce",
+                  "added": [],
+                  "author": {
+                    "date": "2025-12-10T17:47:05+05:30",
+                    "name": "repo_owner",
+                    "email": "repo_owner@example.com",
+                    "username": "repo_owner"
+                  },
+                  "message": "added change 10 Dec, 1",
+                  "removed": [],
+                  "tree_id": "af6aa1678954fee6e3da85c2a1bcdd509cc4f4de",
+                  "distinct": true,
+                  "modified": [
+                    "n8n_flow_app/.env.staging"
+                  ],
+                  "committer": {
+                    "date": "2025-12-10T17:47:05+05:30",
+                    "name": "repo_owner",
+                    "email": "repo_owner@example.com",
+                    "username": "repo_owner"
+                  },
+                  "timestamp": "2025-12-10T17:47:05+05:30"
+                }
+              ],
+              "compare": "https://github.com/repo_owner/repo_name/compare/fd1aa707dc60...b1b80a10f061",
+              "created": false,
+              "deleted": false,
+              "base_ref": null,
+              "repository": {
+                "id": 1040155358,
+                "url": "https://api.github.com/repos/repo_owner/repo_name",
+                "fork": false,
+                "name": "repo_name",
+                "size": 50,
+                "forks": 0,
+                "owner": {
+                  "id": 151736888,
+                  "url": "https://api.github.com/users/repo_owner",
+                  "name": "repo_owner",
+                  "type": "User",
+                  "email": "151736888+repo_owner@users.noreply.github.com",
+                  "login": "repo_owner",
+                  "node_id": "U_kgDOCQtSOA",
+                  "html_url": "https://github.com/repo_owner",
+                  "gists_url": "https://api.github.com/users/repo_owner/gists{/gist_id}",
+                  "repos_url": "https://api.github.com/users/repo_owner/repos",
+                  "avatar_url": "https://avatars.githubusercontent.com/u/151736888?v=4",
+                  "events_url": "https://api.github.com/users/repo_owner/events{/privacy}",
+                  "site_admin": false,
+                  "gravatar_id": "",
+                  "starred_url": "https://api.github.com/users/repo_owner/starred{/owner}{/repo}",
+                  "followers_url": "https://api.github.com/users/repo_owner/followers",
+                  "following_url": "https://api.github.com/users/repo_owner/following{/other_user}",
+                  "user_view_type": "public",
+                  "organizations_url": "https://api.github.com/users/repo_owner/orgs",
+                  "subscriptions_url": "https://api.github.com/users/repo_owner/subscriptions",
+                  "received_events_url": "https://api.github.com/users/repo_owner/received_events"
+                },
+                "topics": [],
+                "git_url": "git://github.com/repo_owner/repo_name.git",
+                "license": null,
+                "node_id": "R_kgDOPf-C3g",
+                "private": false,
+                "ssh_url": "git@github.com:repo_owner/repo_name.git",
+                "svn_url": "https://github.com/repo_owner/repo_name",
+                "archived": false,
+                "disabled": false,
+                "has_wiki": true,
+                "homepage": null,
+                "html_url": "https://github.com/repo_owner/repo_name",
+                "keys_url": "https://api.github.com/repos/repo_owner/repo_name/keys{/key_id}",
+                "language": "Swift",
+                "tags_url": "https://api.github.com/repos/repo_owner/repo_name/tags",
+                "watchers": 0,
+                "blobs_url": "https://api.github.com/repos/repo_owner/repo_name/git/blobs{/sha}",
+                "clone_url": "https://github.com/repo_owner/repo_name.git",
+                "forks_url": "https://api.github.com/repos/repo_owner/repo_name/forks",
+                "full_name": "repo_owner/repo_name",
+                "has_pages": false,
+                "hooks_url": "https://api.github.com/repos/repo_owner/repo_name/hooks",
+                "pulls_url": "https://api.github.com/repos/repo_owner/repo_name/pulls{/number}",
+                "pushed_at": 1765369428,
+                "teams_url": "https://api.github.com/repos/repo_owner/repo_name/teams",
+                "trees_url": "https://api.github.com/repos/repo_owner/repo_name/git/trees{/sha}",
+                "created_at": 1755527836,
+                "events_url": "https://api.github.com/repos/repo_owner/repo_name/events",
+                "has_issues": true,
+                "issues_url": "https://api.github.com/repos/repo_owner/repo_name/issues{/number}",
+                "labels_url": "https://api.github.com/repos/repo_owner/repo_name/labels{/name}",
+                "merges_url": "https://api.github.com/repos/repo_owner/repo_name/merges",
+                "mirror_url": null,
+                "stargazers": 0,
+                "updated_at": "2025-11-12T14:50:11Z",
+                "visibility": "public",
+                "archive_url": "https://api.github.com/repos/repo_owner/repo_name/{archive_format}{/ref}",
+                "commits_url": "https://api.github.com/repos/repo_owner/repo_name/commits{/sha}",
+                "compare_url": "https://api.github.com/repos/repo_owner/repo_name/compare/{base}...{head}",
+                "description": "n8n work flow ",
+                "forks_count": 0,
+                "is_template": false,
+                "open_issues": 1,
+                "branches_url": "https://api.github.com/repos/repo_owner/repo_name/branches{/branch}",
+                "comments_url": "https://api.github.com/repos/repo_owner/repo_name/comments{/number}",
+                "contents_url": "https://api.github.com/repos/repo_owner/repo_name/contents/{+path}",
+                "git_refs_url": "https://api.github.com/repos/repo_owner/repo_name/git/refs{/sha}",
+                "git_tags_url": "https://api.github.com/repos/repo_owner/repo_name/git/tags{/sha}",
+                "has_projects": true,
+                "releases_url": "https://api.github.com/repos/repo_owner/repo_name/releases{/id}",
+                "statuses_url": "https://api.github.com/repos/repo_owner/repo_name/statuses/{sha}",
+                "allow_forking": true,
+                "assignees_url": "https://api.github.com/repos/repo_owner/repo_name/assignees{/user}",
+                "downloads_url": "https://api.github.com/repos/repo_owner/repo_name/downloads",
+                "has_downloads": true,
+                "languages_url": "https://api.github.com/repos/repo_owner/repo_name/languages",
+                "master_branch": "main",
+                "default_branch": "main",
+                "milestones_url": "https://api.github.com/repos/repo_owner/repo_name/milestones{/number}",
+                "stargazers_url": "https://api.github.com/repos/repo_owner/repo_name/stargazers",
+                "watchers_count": 0,
+                "deployments_url": "https://api.github.com/repos/repo_owner/repo_name/deployments",
+                "git_commits_url": "https://api.github.com/repos/repo_owner/repo_name/git/commits{/sha}",
+                "has_discussions": false,
+                "subscribers_url": "https://api.github.com/repos/repo_owner/repo_name/subscribers",
+                "contributors_url": "https://api.github.com/repos/repo_owner/repo_name/contributors",
+                "issue_events_url": "https://api.github.com/repos/repo_owner/repo_name/issues/events{/number}",
+                "stargazers_count": 0,
+                "subscription_url": "https://api.github.com/repos/repo_owner/repo_name/subscription",
+                "collaborators_url": "https://api.github.com/repos/repo_owner/repo_name/collaborators{/collaborator}",
+                "issue_comment_url": "https://api.github.com/repos/repo_owner/repo_name/issues/comments{/number}",
+                "notifications_url": "https://api.github.com/repos/repo_owner/repo_name/notifications{?since,all,participating}",
+                "open_issues_count": 1,
+                "web_commit_signoff_required": false
+              },
+              "head_commit": {
+                "id": "b1b80a10f061313c0bf69c6202934a8610f2e3ce",
+                "url": "https://github.com/repo_owner/repo_name/commit/b1b80a10f061313c0bf69c6202934a8610f2e3ce",
+                "added": [],
+                "author": {
+                  "date": "2025-12-10T17:47:05+05:30",
+                  "name": "repo_owner",
+                  "email": "repo_owner@example.com",
+                  "username": "repo_owner"
+                },
+                "message": "added change 10 Dec, 1",
+                "removed": [],
+                "tree_id": "af6aa1678954fee6e3da85c2a1bcdd509cc4f4de",
+                "distinct": true,
+                "modified": [
+                  "n8n_flow_app/.env.staging"
+                ],
+                "committer": {
+                  "date": "2025-12-10T17:47:05+05:30",
+                  "name": "repo_owner",
+                  "email": "repo_owner@example.com",
+                  "username": "repo_owner"
+                },
+                "timestamp": "2025-12-10T17:47:05+05:30"
+              }
+            },
+            "query": {},
+            "headers": {
+              "host": "wliteck3.app.n8n.cloud",
+              "accept": "*/*",
+              "cf-ray": "9abcb73732dc5886-IAD",
+              "cdn-loop": "cloudflare; loops=1; subreqs=1",
+              "cf-ew-via": "15",
+              "cf-worker": "n8n.cloud",
+              "x-real-ip": "140.82.115.111",
+              "cf-visitor": "{\"scheme\":\"https\"}",
+              "user-agent": "GitHub-Hookshot/5c4e7bf",
+              "cf-ipcountry": "US",
+              "content-type": "application/json",
+              "x-is-trusted": "yes",
+              "content-length": "7246",
+              "x-github-event": "push",
+              "accept-encoding": "gzip, br",
+              "x-forwarded-for": "140.82.115.111, 104.23.211.141",
+              "cf-connecting-ip": "140.82.115.111",
+              "x-forwarded-host": "wliteck3.app.n8n.cloud",
+              "x-forwarded-port": "443",
+              "x-github-hook-id": "585564438",
+              "x-forwarded-proto": "https",
+              "x-github-delivery": "14b826e0-d5c3-11f0-8a63-3991810c9f79",
+              "x-forwarded-server": "traefik-prod-users-gwc-75-7cf7798779-76v6t",
+              "x-github-hook-installation-target-id": "1040155358",
+              "x-github-hook-installation-target-type": "repository"
+            }
+          }
+        }
+      ]
+    },
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "3d6c6712-905b-4cb6-95aa-81e287c0bfa5",
+    "connections": {
+      "Verify Artifacts": {
+        "main": [
+          [
+            {
+              "node": "Artifacts Validation and Get Repository Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "GithubPushTrigger": {
+        "main": [
+          [
+            {
+              "node": "Check Sentry Artifacts Releases",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Sentry Artifacts files": {
+        "main": [
+          [
+            {
+              "node": "Verify Artifacts",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Sentry Artifacts Releases": {
+        "main": [
+          [
+            {
+              "node": "Check Sentry Artifacts files",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Artifacts Validation and Get Repository Data": {
+        "main": [
+          [
+            {
+              "node": "Update Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 10,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.githubTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "WeblineIndia",
+    "username": "weblineindia",
+    "bio": "A Leading Software Engineering, Consulting & Outsourcing Services Company in USA & India serving Clients Globally since 1999.",
+    "verified": true,
+    "links": [
+      "https://www.weblineindia.com/hire-n8n-developers/"
+    ],
+    "avatar": "https://gravatar.com/avatar/a229d43aefca4588581583c58bb37b4773aebbdf4c1fef86a08bb1d38eae91fa?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 17,
+      "icon": "file:github.svg",
+      "name": "n8n-nodes-base.githubTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.githubtrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/github/"
+              }
+            ]
+          },
+          "categories": [
+            "Development"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Github Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0yMC4wMTY1IDBDOC45NDc5MSAwIDAgOS4wMTM4OCAwIDIwLjE2NTNDMCAyOS4wNzkyIDUuNzMzMjQgMzYuNjI0NiAxMy42ODY4IDM5LjI5NTJDMTQuNjgxMiAzOS40OTYgMTUuMDQ1NCAzOC44NjEzIDE1LjA0NTQgMzguMzI3NEMxNS4wNDU0IDM3Ljg1OTkgMTUuMDEyNiAzNi4yNTc1IDE1LjAxMjYgMzQuNTg3OUM5LjQ0NDUgMzUuNzkgOC4yODQ5OCAzMi4xODQxIDguMjg0OTggMzIuMTg0MUM3LjM5MDE1IDI5Ljg0NyA2LjA2NDI5IDI5LjI0NjMgNi4wNjQyOSAyOS4yNDYzQzQuMjQxODUgMjguMDExIDYuMTk3MDQgMjguMDExIDYuMTk3MDQgMjguMDExQzguMjE4NjEgMjguMTQ0NiA5LjI3OTM4IDMwLjA4MSA5LjI3OTM4IDMwLjA4MUMxMS4wNjg2IDMzLjE1MjIgMTMuOTUxOCAzMi4yODQ0IDE1LjExMTggMzEuNzUwMkMxNS4yNzczIDMwLjQ0ODEgMTUuODA3OSAyOS41NDY3IDE2LjM3MTMgMjkuMDQ2QzExLjkzMDMgMjguNTc4NSA3LjI1NzgxIDI2Ljg0MjUgNy4yNTc4MSAxOS4wOTY3QzcuMjU3ODEgMTYuODkzMiA4LjA1MjY3IDE1LjA5MDUgOS4zMTIxNiAxMy42ODg0QzkuMTEzNDQgMTMuMTg3NyA4LjQxNzMyIDExLjExNzQgOS41MTEyOCA4LjM0NjQ0QzkuNTExMjggOC4zNDY0NCAxMS4yMDE0IDcuODEyMTcgMTUuMDEyMiAxMC40MTY0QzE2LjY0MzggOS45NzQ5NSAxOC4zMjYzIDkuNzUwNCAyMC4wMTY1IDkuNzQ4NTFDMjEuNzA2NyA5Ljc0ODUxIDIzLjQyOTUgOS45ODI0NiAyNS4wMjA1IDEwLjQxNjRDMjguODMxNyA3LjgxMjE3IDMwLjUyMTggOC4zNDY0NCAzMC41MjE4IDguMzQ2NDRDMzEuNjE1OCAxMS4xMTc0IDMwLjkxOTIgMTMuMTg3NyAzMC43MjA1IDEzLjY4ODRDMzIuMDEzMiAxNS4wOTA1IDMyLjc3NTMgMTYuODkzMiAzMi43NzUzIDE5LjA5NjdDMzIuNzc1MyAyNi44NDI1IDI4LjEwMjggMjguNTQ0OSAyMy42Mjg3IDI5LjA0NkMyNC4zNTggMjkuNjgwMiAyNC45ODczIDMwLjg4MiAyNC45ODczIDMyLjc4NTFDMjQuOTg3MyAzNS40ODkzIDI0Ljk1NDUgMzcuNjU5NiAyNC45NTQ1IDM4LjMyN0MyNC45NTQ1IDM4Ljg2MTMgMjUuMzE5MiAzOS40OTYgMjYuMzEzMiAzOS4yOTU2QzM0LjI2NjcgMzYuNjI0MiAzOS45OTk5IDI5LjA3OTIgMzkuOTk5OSAyMC4xNjUzQzQwLjAzMjcgOS4wMTM4OCAzMS4wNTIgMCAyMC4wMTY1IDBaIiBmaWxsPSIjMjQyOTJGIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Github Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    }
+  ],
+  "image": []
+}

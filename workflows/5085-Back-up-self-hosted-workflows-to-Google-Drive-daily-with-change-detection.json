@@ -1,0 +1,1880 @@
+{
+  "id": 12242,
+  "name": "Back up self-hosted workflows to Google Drive daily with change detection",
+  "views": 209,
+  "recentViews": 0,
+  "totalViews": 209,
+  "createdAt": "2025-12-28T21:13:13.739Z",
+  "description": "This workflow creates a **daily, automated backup** of all workflows in a self-hosted n8n instance and stores them in Google Drive. Instead of exporting every workflow on every run, it uses **content hashing** to detect meaningful changes and only updates backups when a workflow has actually been modified.\n\nTo keep Google Drive clean and predictable, the workflow intentionally **deletes the existing backup file before uploading the updated version**. This avoids duplicate files and ensures there is always *one authoritative backup per workflow*.\n\nA **Data Table** is used as an index to track workflow IDs, hash values, and timestamps. This allows the workflow to quickly determine whether a workflow already exists, whether its content has changed, or whether it should be skipped entirely.\n\n### How it works\n- Runs daily using a Cron Trigger.\n- Fetches all workflows from the n8n API.\n- Processes workflows one-by-one for reliability.\n- Generates a SHA-256 hash for each workflow.\n- Compares hashes against a stored Data Table.\n- Deletes existing Google Drive backups when changes are detected.\n- Uploads updated workflows and skips unchanged ones.\n- Store new or updated workflows details in Data Table.\n-  Filters workflows based on the configured backup scope (all | active | tagged ). Backs up all workflows, only active workflows, or only workflows matching a specific tag.\n- Applies the scope filter before hashing and comparison, ensuring only relevant workflows are processed.\n\n### Setup steps\n- **Set the Cron schedule**\nOpen the Cron Trigger node and choose the time you want the backup to run (for example, once daily during off-peak hours).\n\n- **Create a Data Table**\nCreate a new n8n Data Table with the title defined in dataTableTitle. This table stores workflowId, workflowName, hashCode,  and DriveFiveId.\n\n- **Configure the Set node**\nIn the Set Backup Configuration node, provide the following values:\n{\n  \"n8nHost\": \"https://your-n8n-domain\",\n  \"apiKey\": \"your-n8n-api-key\",\n  \"backupFolder\": \"/n8n/workflow-backups\",\n  \"hashAlgorithm\": \"sha256\",\n  \"dataTableTitle\": \"n8n_workflow_backup_index\",\n \"backupScope\" : \"\",  \n  \"requiredTag\" : \"\"\n}\n\n- In the Set Backup Configuration node, choose how workflows should be selected for backup:\n**all** – backs up every workflow (default)\n**active** – backs up only enabled workflows\n**tagged** – backs up only workflows containing a specific tag\nIf using the tagged option, provide the required tag name to match.\n{\n  \"backupScope\": \"tagged\",\n  \"requiredTag\": \"production\"\n}\n\n- **Connect Google Drive credentials**\nAuthorize your Google Drive account and ensure the backup folder exists.\n\n- **Activate the workflow**\nOnce enabled, backups run automatically with no further action required.",
+  "workflow": {
+    "id": "XnmlJHHJglVn19SO",
+    "meta": {
+      "instanceId": "7f36bacbe1be4dc97109ccb4af796665d4dbf7dc55ce0d562dd6ed79d8cb4259",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Daily n8n workflow backup to Google Drive",
+    "tags": [
+      {
+        "id": "pH0FjEImo9WfHqWC",
+        "name": "Template",
+        "createdAt": "2025-12-19T17:46:15.670Z",
+        "updatedAt": "2025-12-19T17:46:15.670Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "c707b367-f88e-448b-b047-ab17e2b3fadd",
+        "name": "Daily Backup Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1120,
+          112
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "triggerAtHour": 1
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "86434789-a4cb-491b-902d-482e61e8fa7e",
+        "name": "Set Configuration",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -944,
+          112
+        ],
+        "parameters": {
+          "mode": "raw",
+          "options": {},
+          "jsonOutput": "{\n  \"n8nHost\": \"\",\n  \"apiKey\": \"\",\n  \"backupFolder\": \"//\",\n  \"hashAlgorithm\": \"\",\n  \"dataTableTitle\": \"\",\n  \"backupScope\" : \"\",  \n  \"requiredTag\" : \"\" \n}\n"
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "427ef1c2-e969-4eda-9e35-329dd6a8ec0f",
+        "name": "Get All n8n Workflows",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -576,
+          128
+        ],
+        "parameters": {
+          "url": "={{ $node['Set Configuration'].json.n8nHost }}api/v1/workflows",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {}
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-N8N-API-KEY",
+                "value": "={{ $node['Set Configuration'].json.apiKey }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "9dc37605-d398-4e4f-91cd-144c74aa67d0",
+        "name": "Prepare Workflow",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          912,
+          -48
+        ],
+        "parameters": {
+          "jsCode": "const wf = { ...$input.first().json };\n\n// remove volatile fields\ndelete wf.createdAt;\ndelete wf.updatedAt;\n\n// stable stringify (important for consistent hash)\nconst content = JSON.stringify(wf);\n\nreturn [\n  {\n    json: {\n      workflowId: wf.id,\n      workflowName: wf.name,\n      workflowJson: wf,\n      content\n    }\n  }\n];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "52e21e29-bec0-4d0c-bcae-e3afa03f72cd",
+        "name": "Workflow Exists?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1600,
+          96
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "af50990b-1784-4e4e-8ead-3b125abbbc17",
+                "operator": {
+                  "type": "object",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $node['Lookup Workflow in Data Table'].json }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "b54e1b3d-9483-44ae-8928-1dcaad66bb24",
+        "name": "Hash Changed?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1808,
+          80
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "d8f5e189-26a9-4cc8-bcd3-544ebf260390",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{ $node['Lookup Workflow in Data Table'].json.hashCode }}",
+                "rightValue": "={{ $node['Generate Workflow Hash'].json.hashCode }}"
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.3,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "e9c2f658-29a1-4f32-85c2-b18b0225039e",
+        "name": "Upload New Workflow Backup",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          2320,
+          112
+        ],
+        "parameters": {
+          "name": "={{ $node['Generate Workflow Hash'].json.workflowId }}_{{ $node['Generate Workflow Hash'].json.workflowName.replaceAll(\" \",\"_\") }}.json",
+          "content": "={{ $node['Generate Workflow Hash'].json.workflowJson.toJsonString() }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "options": {},
+          "folderId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1CCs1nAzFe5wDDytXJKGNyEEXqmOmb9kZ",
+            "cachedResultUrl": "https://drive.google.com/drive/folders/1CCs1nAzFe5wDDytXJKGNyEEXqmOmb9kZ",
+            "cachedResultName": "n8n_workflow_backups"
+          },
+          "operation": "createFromText"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "d9bUy4h7E1HzZY9x",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "7865983d-b69a-4a57-98a5-c5d5c81df19a",
+        "name": "Upsert Workflow Records",
+        "type": "n8n-nodes-base.dataTable",
+        "position": [
+          2544,
+          112
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "hashCode": "={{ $node['Generate Workflow Hash'].json.hashCode }}",
+              "workflowId": "={{ $node['Generate Workflow Hash'].json.workflowId }}",
+              "DriveFileId": "={{ $node['Upload New Workflow Backup'].json.id }}",
+              "workflowName": "={{ $node['Generate Workflow Hash'].json.workflowName }}"
+            },
+            "schema": [
+              {
+                "id": "workflowId",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "workflowId",
+                "defaultMatch": false
+              },
+              {
+                "id": "workflowName",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "workflowName",
+                "defaultMatch": false
+              },
+              {
+                "id": "hashCode",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "hashCode",
+                "defaultMatch": false
+              },
+              {
+                "id": "DriveFileId",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "DriveFileId",
+                "defaultMatch": false
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "workflowId",
+                "keyValue": "={{ $node['Generate Workflow Hash'].json.workflowId }}"
+              }
+            ]
+          },
+          "options": {
+            "dryRun": false
+          },
+          "operation": "upsert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "Q8qb9PoqtQOKYgRn",
+            "cachedResultUrl": "/projects/Jz2ZhOCR6j1Rldr1/datatables/Q8qb9PoqtQOKYgRn",
+            "cachedResultName": "N8N_Workflow_Backup"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ebe9f41d-187d-445f-ac1c-8dcf49404e12",
+        "name": "Split Workflows",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          -400,
+          128
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a15f6274-1e4b-4924-b6c0-b5437485cfb6",
+        "name": "Process Each Workflow",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -240,
+          128
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "fc2b2938-9fd3-4f01-a382-422136254539",
+        "name": "Generate Workflow Hash",
+        "type": "n8n-nodes-base.crypto",
+        "position": [
+          1200,
+          96
+        ],
+        "parameters": {
+          "type": "={{ $node['Set Configuration'].json.hashAlgorithm }}",
+          "value": "={{ $node['Prepare Workflow'].json.content }}",
+          "dataPropertyName": "hashCode"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b8d6fee4-7d4a-468f-bff5-145e7bff0a7a",
+        "name": "Lookup Workflow in Data Table",
+        "type": "n8n-nodes-base.dataTable",
+        "position": [
+          1408,
+          96
+        ],
+        "parameters": {
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "workflowId",
+                "keyValue": "={{ $node['Prepare Workflow'].json.workflowId }}"
+              }
+            ]
+          },
+          "operation": "get",
+          "returnAll": true,
+          "dataTableId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "Q8qb9PoqtQOKYgRn",
+            "cachedResultUrl": "/projects/Jz2ZhOCR6j1Rldr1/datatables/Q8qb9PoqtQOKYgRn",
+            "cachedResultName": "N8N_Workflow_Backup"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "120b28b2-84a1-4427-8ce6-66f493f64ccb",
+        "name": "Delete Existing Workflow Backup",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          2096,
+          112
+        ],
+        "parameters": {
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{$node[\"Lookup Workflow in Data Table\"].json.DriveFileId }}"
+          },
+          "options": {
+            "deletePermanently": false
+          },
+          "operation": "deleteFile"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "d9bUy4h7E1HzZY9x",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "34af4e1f-8346-4ba5-9724-e00362be3eec",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2096,
+          -464
+        ],
+        "parameters": {
+          "width": 880,
+          "height": 1312,
+          "content": "## Workflow Overview - Daily n8n Workflow Backup to Google Drive (with Change Detection)\n\nThis workflow creates a **daily, automated backup** of all workflows in a self-hosted n8n instance and stores them in Google Drive. Instead of exporting every workflow on every run, it uses **content hashing** to detect meaningful changes and only updates backups when a workflow has actually been modified.\n\nTo keep Google Drive clean and predictable, the workflow intentionally **deletes the existing backup file before uploading the updated version**. This avoids duplicate files and ensures there is always *one authoritative backup per workflow*.\n\nA **Data Table** is used as an index to track workflow IDs, hash values, and timestamps. This allows the workflow to quickly determine whether a workflow already exists, whether its content has changed, or whether it should be skipped entirely.\n\n### How it works\n- Runs daily using a Cron Trigger.\n- Fetches all workflows from the n8n API.\n- Processes workflows one-by-one for reliability.\n- Generates a SHA-256 hash for each workflow.\n- Compares hashes against a stored Data Table.\n- Deletes existing Google Drive backups when changes are detected.\n- Uploads updated workflows and skips unchanged ones.\n- Store new or updated workflows details in Data Table.\n- Filters workflows based on the configured backup scope (all | active | tagged ). Backs up all workflows, only active workflows, or only workflows matching a specific tag.\n- Applies the scope filter before hashing and comparison, ensuring only relevant workflows are processed.\n\n### Setup steps\n- **Set the Cron schedule**\nOpen the Cron Trigger node and choose the time you want the backup to run (for example, once daily during off-peak hours).\n\n- **Create a Data Table**\nCreate a new n8n Data Table with the title defined in dataTableTitle. This table stores workflowId, workflowName, hashCode,  and DriveFiveId.\n\n- **Configure the Set node**\nIn the Set Backup Configuration node, provide the following values:\n{\n  \"n8nHost\": \"https://your-n8n-domain\",\n  \"apiKey\": \"your-n8n-api-key\",\n  \"backupFolder\": \"/n8n/workflow-backups\",\n  \"hashAlgorithm\": \"sha256\",\n  \"dataTableTitle\": \"n8n_workflow_backup_index\",\n  \"backupScope\" : \"\",  \n  \"requiredTag\" : \"\"\n}\n\n- In the Set Backup Configuration node, choose how workflows should be selected for backup:\n**all** – backs up every workflow (default)\n**active** – backs up only enabled workflows\n**tagged** – backs up only workflows containing a specific tag\nIf using the tagged option, provide the required tag name to match.\n{\n  \"backupScope\": \"tagged\",\n  \"requiredTag\": \"production\"\n}\n\n\n- **Connect Google Drive credentials**\nAuthorize your Google Drive account and ensure the backup folder exists.\n\n- **Activate the workflow**\nOnce enabled, backups run automatically with no further action required."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "32b72911-65e7-4e1d-b1d3-f8f6b4e08084",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1168,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 512,
+          "height": 464,
+          "content": "## Trigger , Configuration & Validation\nThis section defines when the workflow runs and where all configuration lives.\nThe Cron Trigger controls the daily execution time.\nThe Set Backup Configuration node centralizes all reusable values."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "29ccad62-afd8-4446-917c-1d08313a9c11",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -624,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1696,
+          "height": 464,
+          "content": "## Workflow Discovery & Looping\nThis section connects to the n8n API and retrieves all existing workflows.\nWorkflows are split into individual items and processed one at a time, ensuring stability even for large or complex n8n instances. \nAt this stage, no backups are created or deleted."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ec5f92ec-bbdb-4c3b-8587-693a0cfed690",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1104,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 864,
+          "height": 464,
+          "content": "## Hashing & Change Detection\nEach workflow’s JSON is normalized and converted into a SHA-256 hash.\nThis hash acts as a fingerprint for the workflow.\nIf any node, connection, or parameter changes, the hash changes.\nThe workflow then checks the Data Table to determine whether the workflow already exists and whether its hash has changed."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "640b325c-d669-42c1-9b24-e84c7add800e",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2016,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 704,
+          "height": 464,
+          "content": "## Google Drive Backup & Data Table Updates\n- **New workflow** → upload backup and insert Data Table record.\n- **Changed workflow** → delete existing Google Drive backup, upload the new version, and update the Data Table.\n- **Unchanged workflow** → skip entirely\nThis ensures a clean Google Drive folder with accurate backups."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "546decbe-3392-4b38-af79-34c30f15bf09",
+        "name": "Backup scope all?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          0,
+          144
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "8c439629-ec1e-479a-a592-935c0dbb15ce",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $('Set Configuration').item.json.backupScope }}",
+                "rightValue": "all"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "962efe3c-8dd6-4076-b962-15c23dc9552f",
+        "name": "Backup scope active?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          240,
+          176
+        ],
+        "parameters": {
+          "options": {
+            "ignoreCase": false
+          },
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "60b6a1f4-1e7d-4aee-9a06-f2d42f2d2c57",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $node['Set Configuration'].json.backupScope }}",
+                "rightValue": "active"
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.3,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "d188a826-70cf-4488-befd-081d615d3c2c",
+        "name": "If workflow active?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          752,
+          48
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "cecb44e2-ca48-4f02-9be1-4f208f8f3aa9",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.active }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "ff864dfe-6008-4ced-99e2-6197789131e8",
+        "name": "Backup scope tagged?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          576,
+          160
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "de098349-c7d3-45ae-a6a5-7e5418c74ab4",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $node['Set Configuration'].json.backupScope }}",
+                "rightValue": "tagged"
+              },
+              {
+                "id": "5f126eba-c66c-4af3-9dd4-a90bc5539419",
+                "operator": {
+                  "type": "array",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.tags }}",
+                "rightValue": ""
+              },
+              {
+                "id": "bdc81217-2e10-4bdb-8f80-27fcecf2ad0f",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $node['Set Configuration'].json.requiredTag }}",
+                "rightValue": ""
+              },
+              {
+                "id": "4ac7cd74-4a1e-456b-8a12-b897e773f878",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.tags[0].name }}",
+                "rightValue": "={{ $node['Set Configuration'].json.requiredTag }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "8361b04b-9e28-4073-9657-a2087a49be38",
+        "name": "Config Validation",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -784,
+          112
+        ],
+        "parameters": {
+          "jsCode": "const errors = [];\nconst items = $input.all();\nconst n8nHost = items[0].json.n8nHost;\nconst apiKey = items[0].json.apiKey;\nconst folderPath = items[0].json.backupFolder;\nconst dtName = items[0].json.dataTableTitle;\nconst backupScope = items[0].json.backupScope;\nconst requiredTag = items[0].json.requiredTag;\n\n\nif (n8nHost == '') {\n  errors.push('A valid n8n hostname must be configured.');\n}\nif (apiKey == '') {\n  errors.push('A valid n8n ApiKey must be configured.');\n}\nif (folderPath == '') {\n  errors.push('Google drive directory path must be configured.');\n}\nif (dtName == '') {\n  errors.push('N8n data table name must be configured.');\n}\nif (backupScope == '') {\n  errors.push('The backup scope must be configured.');\n}\nif (backupScope == 'tagged' && requiredTag == '') {\n  errors.push('Please specify the tag name if you have configured the backup scope as “tagged”.');\n}\n\nif (errors.length) {\n  throw new Error(`Validation failed: ${errors.map((e, i) => `${i+1}. ${e}`).join(' | ')}`);\n}\n\nreturn items;"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "active": true,
+    "pinData": {},
+    "settings": {
+      "callerPolicy": "workflowsFromSameOwner",
+      "errorWorkflow": "Rj0geDykTdOiLQQL",
+      "timeSavedMode": "fixed",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "36e532ba-e890-4d48-bd86-7a7d25c78d64",
+    "connections": {
+      "Hash Changed?": {
+        "main": [
+          [
+            {
+              "node": "Delete Existing Workflow Backup",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Process Each Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Workflows": {
+        "main": [
+          [
+            {
+              "node": "Process Each Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Workflow": {
+        "main": [
+          [
+            {
+              "node": "Generate Workflow Hash",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Workflow Exists?": {
+        "main": [
+          [
+            {
+              "node": "Hash Changed?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Upload New Workflow Backup",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backup scope all?": {
+        "main": [
+          [
+            {
+              "node": "Prepare Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Backup scope active?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Config Validation": {
+        "main": [
+          [
+            {
+              "node": "Get All n8n Workflows",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Configuration": {
+        "main": [
+          [
+            {
+              "node": "Config Validation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "If workflow active?": {
+        "main": [
+          [
+            {
+              "node": "Prepare Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Process Each Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backup scope active?": {
+        "main": [
+          [
+            {
+              "node": "If workflow active?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Backup scope tagged?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backup scope tagged?": {
+        "main": [
+          [
+            {
+              "node": "Prepare Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Process Each Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Daily Backup Trigger": {
+        "main": [
+          [
+            {
+              "node": "Set Configuration",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get All n8n Workflows": {
+        "main": [
+          [
+            {
+              "node": "Split Workflows",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Each Workflow": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Backup scope all?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Workflow Hash": {
+        "main": [
+          [
+            {
+              "node": "Lookup Workflow in Data Table",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upsert Workflow Records": {
+        "main": [
+          [
+            {
+              "node": "Process Each Workflow",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload New Workflow Backup": {
+        "main": [
+          [
+            {
+              "node": "Upsert Workflow Records",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Lookup Workflow in Data Table": {
+        "main": [
+          [
+            {
+              "node": "Workflow Exists?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Delete Existing Workflow Backup": {
+        "main": [
+          [
+            {
+              "node": "Upload New Workflow Backup",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 23,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 6
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.crypto": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitOut": {
+        "count": 1
+      },
+      "n8n-nodes-base.dataTable": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 5
+      },
+      "n8n-nodes-base.googleDrive": {
+        "count": 2
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Chandan Singh",
+    "username": "coolchandan62",
+    "bio": "Automation developer with 13+ years of experience building scalable systems across PHP, Python, FastAPI, and AI/ML workflows. I help teams automate operations, streamline data flows, and create reliable workflow-driven products using n8n.\nIf you need custom workflows, integrations, or AI-powered automation, feel free to reach out on coolchandan62@gmail.com",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/coolchandan62/"
+    ],
+    "avatar": "https://gravatar.com/avatar/3d26d108e6c02e64ea43fde74008e68fb777514bc93e53592f109ca72c283a48?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googledrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Drive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 264,
+      "icon": "fa:key",
+      "name": "n8n-nodes-base.crypto",
+      "codex": {
+        "data": {
+          "alias": [
+            "Encrypt",
+            "SHA",
+            "Hash"
+          ],
+          "details": "The Crypto node allows you to hash and Hmac string in a specified format and sign a string using a private key. Use this node when you want to encrypt your data.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.crypto/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Crypto",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "key",
+        "type": "icon"
+      },
+      "displayName": "Crypto",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1239,
+      "icon": "file:splitOut.svg",
+      "name": "n8n-nodes-base.splitOut",
+      "codex": {
+        "data": {
+          "alias": [
+            "Split",
+            "Nested",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitout/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Split Out"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjOUI2REQ1IiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTQ4MCAxNDhjMC02LjYyNy01LjM3My0xMi0xMi0xMkgzMjJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxNDZjNi42MjcgMCAxMi01LjM3MyAxMi0xMnptMCA5NmMwLTYuNjI3LTUuMzczLTEyLTEyLTEySDMyMmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDE0NmM2LjYyNyAwIDEyLTUuMzczIDEyLTEyem0wIDk2YzAtNi42MjctNS4zNzMtMTItMTItMTJIMzIyYy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTQ2YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48cGF0aCBkPSJNNDM4IDc2YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtMTcuNjczIDAtMzIgMTQuMzI3LTMyIDMydjU2YzAgMjYuOTc4LTEwLjI3MiA1MS41NTctMjcuMTE5IDcwLjAzOS01LjA1NSA1LjU0NS01LjA1NSAxNC4zNzcgMCAxOS45MjIgMTYuODQ3IDE4LjQ4MiAyNy4xMTkgNDMuMDYxIDI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMySDQyNmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtNDQuMTgzIDAtODAtMzUuODE3LTgwLTgwdi01NmMwLTMwLjkyOC0yNS4wNzItNTYtNTYtNTZhNS43ODMgNS43ODMgMCAwIDEtNS43ODMtNS43ODN2LTM2LjQzNGE1Ljc4MyA1Ljc4MyAwIDAgMSA1Ljc4My01Ljc4M2MzMC45MjggMCA1Ni0yNS4wNzIgNTYtNTZ2LTU2YzAtNDQuMTgzIDM1LjgxNy04MCA4MC04MEg0MjZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMzYgMjQ0YzAtNi42MjctNS4zNzMtMTItMTItMTJIMTJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxMTJjNi42MjcgMCAxMi01LjM3MyAxMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik01MTIgMEgwdjUxMmg1MTJ6Ii8+PC9jbGlwUGF0aD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Split Out",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1315,
+      "icon": "fa:table",
+      "name": "n8n-nodes-base.dataTable",
+      "codex": {
+        "data": {
+          "alias": [
+            "data",
+            "table",
+            "knowledge",
+            "data table",
+            "table",
+            "sheet",
+            "database",
+            "data base",
+            "mysql",
+            "postgres",
+            "postgresql",
+            "airtable",
+            "supabase",
+            "noco",
+            "notion"
+          ],
+          "details": "Data table",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.datatable/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Development"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\",\"transform\"]",
+      "defaults": {
+        "name": "Data table"
+      },
+      "iconData": {
+        "icon": "table",
+        "type": "icon"
+      },
+      "displayName": "Data table",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    }
+  ],
+  "image": []
+}

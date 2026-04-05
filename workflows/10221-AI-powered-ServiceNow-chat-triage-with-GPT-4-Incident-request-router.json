@@ -1,0 +1,1106 @@
+{
+  "id": 7515,
+  "name": "AI-powered ServiceNow chat triage with GPT-4 — Incident & request router",
+  "views": 797,
+  "recentViews": 0,
+  "totalViews": 797,
+  "createdAt": "2025-08-17T12:37:11.523Z",
+  "description": "\n# Short description\n\nAutomatically triage incoming chat messages into **Incidents**, **Service Requests**, or **Other** using an LLM-powered classifier; create Incidents in ServiceNow, submit Service Catalog requests (HTTP), and route everything else to an AI Agent with web search + memory. Includes an optional summarization step for ticket context.\n\n# Full description\n\nThis n8n template wires a chat trigger to an LLM-based **Text Classifier** and then routes messages to the appropriate downstream action:\n\n1. **Trigger**: `When chat message received` — incoming messages from your chat channel.\n2. **Text Classifier**: small LLM prompt/classifier that returns one of three labels: `Incident`, `Request`, or `Everything Else`.\n3. **Create Incident** (ServiceNow connector): when labeled **Incident**, the workflow creates a Servicenow Incident record (short fields: short\\_description, description, priority, caller).\n4. **Submit General Request** (HTTP Request): when labeled **Request**, the workflow calls your Service Catalog API (POST) to place a catalog item / submit a request.\n5. **AI Agent**: when labeled **Everything Else**, route to an AI Agent node that:\n\n   * uses an OpenAI chat model for contextual replies,\n   * can consult **SerpAPI** (web search) as a tool,\n   * saves relevant context to **Simple Memory** for future conversations.\n6. **Summarization Chain**: optional chain to summarize long chat threads into concise ticket descriptions before creating incidents/requests.\n\nThis template is ideal for support desks that want automated triage with human-quality context and searchable memory.\n\n# Key highlights (what to call out)\n\n* **Three-way LLM triage**: ensures messages are routed automatically to the correct backend action (Incident vs Service Request vs AI handling).\n* **ServiceNow native connector**: uses the ServiceNow node to create Incidents (safer than raw HTTP for incidents).\n* **Service Catalog via HTTP**: flexible — supports organizations using RESTful catalog endpoints.\n* **Summarization before ticket creation**: produces concise, high-quality `short_description` and `description` fields.\n* **AI Agent + Memory + Web Search**: handles non-ticket queries with web-augmented answers and stores context for follow-ups.\n* **Failover & logging**: include a catch node (optional) that logs failures and notifies admins.\n\n# Required credentials & inputs (must configure)\n\n* **ServiceNow**: Instance URL + API user (must have rights to create incidents).\n* **Service Catalog HTTP endpoint**: URL + API key / auth header (for POST).\n* **OpenAI API key** (or other LLM provider): for Text Classifier, Summarization Chain, and AI Agent.\n* **SerpAPI key** (optional): for web search tools inside the AI Agent.\n* **Memory store**: Simple Memory node (or external DB) for conversation history.\n\n# Nodes included (quick map)\n\n* Trigger: `When chat message received`\n* Processor: `Text Classifier` (OpenAI/LLM)\n* Branch A: `ServiceNow (Create Incident)`\n* Branch B: `HTTP Request` (Service Catalog POST)\n* Branch C: `AI Agent` (OpenAI + SerpAPI + Simple Memory)\n* Shared: `Summarization Chain` (used before A or B where enabled)\n* Optional: `Error / Audit logging` node, `Slack/email` notifications\n\n# Recommended n8n settings & tips\n\n* **Use structured outputs** from classifier (`{ label: \"Incident\", confidence: 0.92 }`) so you can implement confidence thresholds.\n* **If confidence &lt; 0.7**, route to a human review queue instead of auto-creating a ticket.\n* **Sanitize user PII** before storing in memory or sending to external APIs.\n* **Rate-limit** OpenAI/SerpAPI calls to avoid unexpected bills.\n* **Test the Service Catalog POST body** in Postman first — include sample `variables` JSON.\n\n# Short sample variables JSON (Service Catalog POST)\n\n```json\n{\n  \"sysparm_quantity\": 1,\n  \"variables\": {\n    \n    \"description\": \"User reports VPN timeout on Windows machine; error code 1234\"\n  }\n}\n```\n\n",
+  "workflow": {
+    "id": "wgebr18bzsF4QNVr",
+    "meta": {
+      "instanceId": "6004a16b59a95da573dfac2b89c29cb3d5d09e00386053659b2f24878624b8d6",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "ServiceNow L1 Support Agent",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "ad145ddf-9106-441d-94cd-ed87bbc85658",
+        "name": "When chat message received",
+        "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+        "position": [
+          -352,
+          16
+        ],
+        "webhookId": "8b4142f0-e9e7-44da-90f1-dd94227275bd",
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "c0366cfa-74e0-405c-9941-a844262d84d0",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          -240,
+          272
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "2b11cc62-9c8f-4248-86c3-6c8ebfe84361",
+        "name": "Text Classifier",
+        "type": "@n8n/n8n-nodes-langchain.textClassifier",
+        "position": [
+          -80,
+          48
+        ],
+        "parameters": {
+          "options": {
+            "enableAutoFixing": true,
+            "systemPromptTemplate": "Please classify the text provided by the user into one of the following categories: {categories}, and use the provided formatting instructions below. Don't explain, and only output the json."
+          },
+          "inputText": "={{ $json.chatInput }}",
+          "categories": {
+            "categories": [
+              {
+                "category": "Incident",
+                "description": "Incident- If something is broken or not working or it's a complaint etc. Then it is an incident "
+              },
+              {
+                "category": "Request",
+                "description": "Request- If something is a access request or provisioning ask, product etc orders then it is request"
+              },
+              {
+                "category": "Everything Else",
+                "description": "Everything which is not part of either of those categories must come here like Knowledge Search"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "4fee1f25-ad74-4cc4-81ad-ffec25bdee26",
+        "name": "AI Agent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          480,
+          272
+        ],
+        "parameters": {
+          "options": {
+            "systemMessage": "You are a helpful assistant. Who creates requests based on the user query using the tool. Always create the request using the http tool attached to you"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "823405a4-92b9-46ac-a241-b3a428a1c940",
+        "name": "OpenAI Chat Model1",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          352,
+          496
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "d0d74ce3-d5cc-47ab-85c8-d06e95d553dd",
+        "name": "Simple Memory",
+        "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+        "position": [
+          544,
+          496
+        ],
+        "parameters": {},
+        "typeVersion": 1.3
+      },
+      {
+        "id": "aa1dfb61-1da5-46f5-9357-78477ddd7fce",
+        "name": "Summarization Chain",
+        "type": "@n8n/n8n-nodes-langchain.chainSummarization",
+        "position": [
+          1104,
+          64
+        ],
+        "parameters": {
+          "options": {
+            "summarizationMethodAndPrompts": {
+              "values": {
+                "prompt": "=Write a user friendly summary of the following:\n\n\nAgent Action\"{text}\" \nUser Query\"{{ $('When chat message received').item.json.chatInput }}\"\n\n\nCONCISE SUMMARY: ",
+                "summarizationMethod": "stuff"
+              }
+            }
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "f0843c75-fe30-4bed-8427-d975e5e7dd5c",
+        "name": "OpenAI Chat Model3",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          1184,
+          320
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "9e170bf4-ca79-466b-a57b-80bf0f56d007",
+        "name": "HTTP Request1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          560,
+          32
+        ],
+        "parameters": {
+          "url": "https://dev353652.service-now.com/api/sn_sc/servicecatalog/items/a4cc1293939362504311f6fa3d03d698/order_now",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"sysparm_quantity\": 1,\n  \"variables\": {\n    \"description\": \"{{ $('When chat message received').item.json.chatInput }}\"\n  }\n}\n",
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          },
+          "nodeCredentialType": "serviceNowBasicApi"
+        },
+        "credentials": {
+          "serviceNowBasicApi": {
+            "id": "credential-id",
+            "name": "serviceNowBasicApi Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "afb9f332-0972-4854-a3fb-180992307f49",
+        "name": "Create an incident",
+        "type": "n8n-nodes-base.serviceNow",
+        "position": [
+          560,
+          -144
+        ],
+        "parameters": {
+          "resource": "incident",
+          "operation": "create",
+          "authentication": "basicAuth",
+          "additionalFields": {},
+          "short_description": "={{ $('When chat message received').item.json.chatInput }}"
+        },
+        "credentials": {
+          "serviceNowBasicApi": {
+            "id": "credential-id",
+            "name": "serviceNowBasicApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7fa36225-2adb-4534-9652-b55afbcb14f4",
+        "name": "SerpAPI",
+        "type": "@n8n/n8n-nodes-langchain.toolSerpApi",
+        "position": [
+          736,
+          496
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "serpApi": {
+            "id": "credential-id",
+            "name": "serpApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b7b3f641-523a-4360-9e56-1f7e4b614128",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -96,
+          -192
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 288,
+          "height": 208,
+          "content": "## Text Classifier\n\nThis will categorize all the user queries in 3 categorize\n1- Incident\n2-Request\n3- Everything Else\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "020ea78c-ae47-4937-9867-ceb6a9503aa5",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          832,
+          -288
+        ],
+        "parameters": {
+          "content": "## Create Incident\nUsing ServiceNow Connector to create an Incident"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "acdb5a12-9f4a-4dfd-8f82-b4ad8ccbe4ef",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          832,
+          320
+        ],
+        "parameters": {
+          "content": "## Lastly\nTo handle all other cases. I am using a AI Agent with Web Search API"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a7f8c6f9-d624-46fc-8f04-f4dd7164adb7",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          832,
+          -48
+        ],
+        "parameters": {
+          "height": 272,
+          "content": "## Submit a General Request\nFor Demo Purpose I am only Submitting a General Request. Using Service Catalog API https://www.servicenow.com/docs/bundle/zurich-api-reference/page/integrate/inbound-rest/concept/c_ServiceCatalogAPI.html#title_servicecat-POST-cart-sub_order"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": true,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "78eec813-6c33-4ab8-a496-1e5d47eb4311",
+    "connections": {
+      "SerpAPI": {
+        "ai_tool": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Agent": {
+        "main": [
+          [
+            {
+              "node": "Summarization Chain",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request1": {
+        "main": [
+          [
+            {
+              "node": "Summarization Chain",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Simple Memory": {
+        "ai_memory": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_memory",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Text Classifier": {
+        "main": [
+          [
+            {
+              "node": "Create an incident",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "HTTP Request1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "AI Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Text Classifier",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create an incident": {
+        "main": [
+          [
+            {
+              "node": "Summarization Chain",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model1": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model3": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Summarization Chain",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When chat message received": {
+        "main": [
+          [
+            {
+              "node": "Text Classifier",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 15,
+    "nodeTypes": {
+      "n8n-nodes-base.serviceNow": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chatTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.toolSerpApi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.textClassifier": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chainSummarization": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.memoryBufferWindow": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Tushar Mishra",
+    "username": "yajna",
+    "bio": "Problem Solver | ServiceNow Architect | AI/ML Specialist | Product Builder\n\t1.\t10+ years in tech consulting and product development across AI, enterprise platforms, and cloud ecosystems.\n\t2.\tISB AMP in Business Analytics; strong foundation in strategy + data.\n\t3.\tFounder – ReAcademy.ai: Flashcard-based learning SaaS using AI & LLMs to transform PDFs into gamified micro-learning.\n\t",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/tusshar-mishra/"
+    ],
+    "avatar": "https://gravatar.com/avatar/00395dda823f415d73b2ff7577e48aface9bcdf3c431e6059df8e2bd9f0504e7?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 503,
+      "icon": "file:servicenow.svg",
+      "name": "n8n-nodes-base.serviceNow",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.servicenow/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/servicenow/"
+              }
+            ]
+          },
+          "categories": [
+            "Productivity",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "ServiceNow"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNjYgNTkiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48cGF0aCBmaWxsPSIjODFiNWExIiBzdHJva2U9Im5vbmUiIGQ9Ik0zMi4xOTYgMEEzMi4yNyAzMi4yNyAwIDAgMCAyLjMxMiAyMC4yNzUgMzIuMjcgMzIuMjcgMCAwIDAgOS45NSA1NS41NzFhNi4zNDYgNi4zNDYgMCAwIDAgOC4yNjQuNDMgMjMuMDMgMjMuMDMgMCAwIDEgMjcuNDQ1IDAgNi4zNjQgNi4zNjQgMCAwIDAgOC4zODktLjQzQTMyLjI3IDMyLjI3IDAgMCAwIDMyLjE5NiAwbS0uMTggNDguMjc1YTE1LjYzIDE1LjYzIDAgMCAxLTE2LjEzMy0xNi4wMjYgMTYuMDQzIDE2LjA0MyAwIDEgMSAzMi4wNjkgMGMuMTE1IDQuMjg0LTEuNTM3IDguNDI4LTQuNTY4IDExLjQ1OHMtNy4xNzQgNC42ODItMTEuNDU4IDQuNTY4Ii8+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "ServiceNow",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 4,
+          "name": "Productivity"
+        },
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1121,
+      "icon": "fa:link",
+      "name": "@n8n/n8n-nodes-langchain.chainSummarization",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.chainsummarization/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Summarization Chain",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "link",
+        "type": "icon"
+      },
+      "displayName": "Summarization Chain",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1163,
+      "icon": "fa:database",
+      "name": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.memorybufferwindow/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Memory"
+            ],
+            "Memory": [
+              "For beginners"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Simple Memory"
+      },
+      "iconData": {
+        "icon": "database",
+        "type": "icon"
+      },
+      "displayName": "Simple Memory",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1199,
+      "icon": "file:serpApi.svg",
+      "name": "@n8n/n8n-nodes-langchain.toolSerpApi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.toolserpapi/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Tools"
+            ],
+            "Tools": [
+              "Other Tools"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "SerpAPI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZlcnNpb249IjEuMCIgdmlld0JveD0iMCAwIDQ2ODAgMTM0MCI+PHBhdGggZmlsbD0iIzdEN0Q4NyIgZD0iTTQ0NjMgMTIxdjExMGgyMDdWMTFoLTIwN3pNMzAwLjUgNDcuNmMtMi43LjItMTIuMi44LTIxIDEuNC02OC4yIDQuNi0xMjMuOCAxOC4xLTE2MSAzOS4yQzYwLjYgMTIxIDMxLjggMTc0LjIgMjQgMjYzYy0yLjcgMzEuNS0yLjIgOTguMyAxLjEgMTM1QzM1IDUwOS40IDcyLjggNTU1LjEgMTg1IDU5MS41YzI0IDcuNyA1NS4xIDE1LjggOTguMiAyNS41IDIwIDQuNSA0Ny4xIDEwLjkgNjAuMyAxNC4yIDcxLjggMTggOTUgMzIuNSAxMDIuNSA2My45IDUuMiAyMS45IDUuMiA3NC4zLjEgOTcuOS05IDQwLjktMzYuMSA1NS44LTEwNS44IDU3LjgtOTEuNiAyLjgtMTc3LTkuMy0yNzkuNi0zOS41LTEwLjQtMy0xOS4yLTUuMS0xOS43LTQuNy0uOSAxLjEtMzYuMyAxNjUuNC0zNS43IDE2NiAxLjMgMS4zIDM0LjQgMTQuMyA0OS43IDE5LjUgNTkuOSAyMC41IDEyMy4yIDMzLjMgMTk3LjUgNDAgMTkuMiAxLjcgOTIuMSAyLjMgMTE3IDEgMTMzLjYtNy4yIDIxMC0zNi40IDI1My4xLTk2LjggMzQuMy00OCA0Ni44LTExNy4yIDQyLjUtMjM1LjMtMi4zLTYyLjgtNy41LTkyLjEtMjEuNi0xMjEuNS0yNy41LTU3LjItODktOTAuMS0yMzUuNS0xMjYuMS05Mi44LTIyLjgtMTA0LjktMjYuMS0xMjMuMy0zMy40LTI1LjctMTAuMy0zNy41LTIyLTQyLjctNDIuNS0zLjctMTQuNS01LjItNTUuOS0yLjktNzkgNC0zOS45IDIwLjEtNTYuMyA2MS45LTYzIDMzLjctNS40IDExNC42LTMuNiAxODQuNSA0LjEgMjcgMyA3NC41IDkuNyAxMTAuOSAxNS43IDE2LjMgMi43IDI2IDMuOSAyNi4yIDMuMi42LTEuOSAyMS41LTE3OS44IDIxLjEtMTgwLjEtLjctLjgtNDAuNS04LjUtNjMuNi0xMi4zQzUzMS43IDU4IDQ4OS40IDUzIDQzMy41IDQ4LjljLTE0LjEtMS0xMjIuMS0yLjEtMTMzLTEuM20yNjk5IDE0LjZjLTEgMi45LTI5MS41IDk1Ni44LTI5MS41IDk1Ny4zIDAgLjMgNTAuNS40IDExMi4yLjNsMTEyLjMtLjMgMjUuMi05MWMxMy44LTUwLjEgMjUuNC05MiAyNS44LTkzLjNsLjUtMi4yIDE2MC44LjIgMTYwLjcuMyAyNS41IDkyYzE0LjEgNTAuNiAyNS44IDkyLjYgMjYgOTMuMy40IDEgMjMuNCAxLjIgMTEyLjYgMWwxMTItLjMtMTQ2LjYtNDc5LTE0Ni43LTQ3OS0xNDQuMi0uM2MtMTE0LjgtLjItMTQ0LjMgMC0xNDQuNiAxbTE5OS4zIDM5MGMyOS44IDEwOS42IDU0LjIgMTk5LjYgNTQuMiAyMDAgMCAuNS00OS41LjgtMTEwLjEuOC05MS4zIDAtMTEwLS4yLTEwOS42LTEuMy4zLS44IDI1LjItOTAuOCA1NS4zLTIwMCAzMC4xLTEwOS4zIDU1LjEtMTk4LjcgNTUuNC0xOTguN3MyNSA4OS43IDU0LjggMTk5LjJNMTA2MiAzMDQuNmMtMTcuNC45LTM4LjYgMi43LTQ4LjUgNC0xMjkuOCAxNy41LTIwNS44IDg1LjktMjI2LjUgMjA0LjEtNS4yIDI5LjctNS4zIDMwLjktNS43IDE0Mi44LS41IDExMC4xLS4xIDEyNi43IDMuOCAxNTQuNCA3LjEgNTAuOCAyNSA5NS43IDUxLjQgMTI4LjYgMzcuMyA0Ni42IDk0LjggNzYuOSAxNjguOSA4OC45IDM0LjEgNS42IDU3LjQgNyAxMDIuMSA2LjMgNTMuNC0uOSA5OC41LTUuOSAxNTMuNS0xNy4yIDM5LjItOCA5Ny0yNC42IDk3LTI3LjcgMC0xLjItMjguOS0xNTAuNi0yOS42LTE1Mi45LS40LTEuNS0uOS0xLjUtNS4yLS4zLTQwLjggMTIuNC0xMTAuNSAyMy45LTE2Ni45IDI3LjUtMjQuOCAxLjYtNzcuNC43LTkxLjEtMS41LTQxLTYuNy02MC41LTIwLjQtNzAuMy00OS43LTQuMS0xMi40LTUuOS0yNS4yLTYuNi00OS4ybC0uNi0yMC43SDEzNjZ2LTczLjhjMC03Ni42LS45LTEwOS40LTMuNi0xMzMuNS0xMi4yLTExMC43LTYwLjUtMTc4LjgtMTQ5LjYtMjEwLjgtMjIuNS04LTUzLjYtMTQuNi04Mi44LTE3LjMtMTUuNS0xLjUtNTUuNy0yLjctNjgtMm0zOSAxNjMuNGMyMS43IDIuNyAzNS42IDguNiA0Ny4xIDIwIDE2LjMgMTYuMyAyMS4yIDMzLjMgMjEuMyA3NC41bC4xIDI0aC0xODFsLS4zLTE1Yy0uOC00MS4yIDYuMy02NC43IDI0LjYtODEuNyAxMS4zLTEwLjQgMjUuMy0xNy4xIDQyLjMtMjAuMiAxNC42LTIuNyAzMi0zLjMgNDUuOS0xLjZtMTI5Ni41LTE2Mi45Yy0zOS4zIDIuNy04NSAxNC42LTEzMC43IDM0LTE3LjggNy42LTQ0LjQgMjEtNTguMSAyOS4ybC0xMC44IDYuNS0xLjItMy4xYy0uNy0xLjgtNS42LTE0LjMtMTAuOC0yNy45bC05LjQtMjQuOEgyMDE0djUwNi41YzAgNDY0LjcuMSA1MDYuNSAxLjYgNTA2LjUuOSAwIDQ3LTYuMyAxMDIuNC0xNCA1NS41LTcuNyAxMDEuMy0xNCAxMDEuOS0xNCAuOCAwIDEuMS00Mi40IDEuMS0xNDQuOHYtMTQ0LjlsOC4zIDEuOGMzNS42IDcuOSA4MiAxNCAxMjguNSAxNyAyNC4yIDEuNSA3Mi42LjcgODguNy0xLjUgNjcuOS05LjUgMTE1LjMtMzYuNSAxNDYuOS04My42IDcuNi0xMS4zIDE5LjUtMzUuNyAyNC40LTUwIDcuNi0yMi4yIDEyLjUtNDYuMSAxNS45LTc2LjUgMS4zLTExLjYgMS42LTM0LjkgMi0xMzYgLjUtMTIzLjkgMC0xNTEuNC0zLjItMTc3LjUtMTAtODIuMi00MS42LTEzOS43LTk0LjctMTcyLjYtMjguOC0xNy45LTYyLjgtMjcuNy0xMDUuMy0zMC40LTE2LjUtMS4xLTE5LTEuMS0zNSAuMU0yMzY0IDQ4NWMxOS45IDEuOSAzMi40IDYuOCA0My4xIDE2LjhzMTYuNiAyMiAxOS40IDM5LjVjMi4yIDEzLjcgMi4yIDI0Mi4yIDAgMjU1LTQuOCAyNy4zLTE3LjkgNDQuNS00MC40IDUyLjctMTIgNC40LTIxLjUgNS40LTQ2LjEgNC43LTIyLjUtLjYtNDQuOS0yLjktNzEtNy4xLTE1LjctMi42LTM3LjEtNi44LTQ0LjItOC42bC0zLjgtMS4xVjUzOS4ybDQuMy0zLjdjNi42LTUuNyAyNi4yLTE4LjYgMzcuOC0yNC44IDMwLjItMTYuMiA1Ny43LTI0LjQgODguNC0yNi42IDEuMSAwIDYuNy40IDEyLjUuOW0xNzE0LjUtMTgwLjRjLTU5IDMuNS0xMzQuNCAyOC4zLTE5My43IDYzLjdsLTEwLjcgNi40LTQuOS0xMi42Yy0yLjctNi45LTcuNS0xOS41LTEwLjctMjcuOWwtNS45LTE1LjJIMzY5MHY1MDYuNWMwIDQ2OCAuMSA1MDYuNSAxLjYgNTA2LjUuOSAwIDQ3LjEtNi4zIDEwMi42LTE0czEwMS4zLTE0IDEwMS44LTE0Yy42IDAgMS01My4zIDEtMTQ0Ljh2LTE0NC44bDE4LjMgMy43YzMwLjIgNi4xIDU2LjUgOS43IDk3LjcgMTMuNiAyMy41IDIuMiA4OC45IDIuNSAxMDUgLjUgMzEtMy45IDU5LjUtMTIgODIuOS0yMy45IDE5LjItOS42IDMwLjktMTguMSA0Ni4xLTMzLjMgMjkuMi0yOS4yIDQ3LTY1LjEgNTctMTE1IDcuNC0zNyA4LTUxLjMgOC0xOTEgMC0xMzguOS0uNi0xNTIuOC04LTE5MC0yMC4zLTEwMi04MC42LTE2MC44LTE3Ny0xNzIuNC0xMy0xLjUtMzguMS0yLjYtNDguNS0yTTQwNDEgNDg1YzEyLjYgMS4yIDE5LjggMy4yIDI5LjcgOCAxNS4zIDcuNSAyNS4yIDIwLjggMzAuNiA0MWwyLjIgOC41djI1M2wtMi4yIDguNGMtNi4yIDIzLjEtMjAuMiAzOS00MC4xIDQ1LjUtMTMuMSA0LjMtMTkuNyA0LjktNDQuMiA0LjMtMjIuMi0uNi0zNi4xLTEuOS02My41LTUuOC0xMy43LTItNDUuMy04LTUyLjctMTBsLTMuOC0xVjUzOWw1LjgtNC41YzMyLjctMjYuMSA3OC44LTQ2IDExNC41LTQ5LjQgMTEuNi0xLjIgMTMuMS0xLjIgMjMuNy0uMU0xODc5IDMwNy42Yy00NS4xIDExLjgtMTE1LjcgNDIuNi0xNjIuNSA3MC45LTcuOCA0LjgtMTIuMiA2LjktMTIuNiA2LjItLjMtLjctMy43LTE1LjctNy40LTMzLjVsLTYuOC0zMi4ySDE1MTd2NzAxaDIwN1Y1OTIuMmwxMC44LTdjMzUuNy0yMy4xIDk3LjctNTMuNyAxNTguNC03OC4yIDguNC0zLjQgMTUuNi02LjUgMTYtNi44LjQtLjQtMy4xLTQzLjctNy44LTk2LjItNC42LTUyLjUtOC40LTk2LjMtOC40LTk3LjMgMC0yLjMtMi40LTIuMi0xNCAuOW0yNTg0IDM2MS45VjEwMjBoMjA3VjMxOWgtMjA3eiIvPjwvc3ZnPg=="
+      },
+      "displayName": "SerpApi (Google Search)",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1247,
+      "icon": "fa:comments",
+      "name": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-langchain.chattrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Langchain"
+          ]
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When chat message received"
+      },
+      "iconData": {
+        "icon": "comments",
+        "type": "icon"
+      },
+      "displayName": "Chat Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1265,
+      "icon": "fa:tags",
+      "name": "@n8n/n8n-nodes-langchain.textClassifier",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.text-classifier/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Text Classifier"
+      },
+      "iconData": {
+        "icon": "tags",
+        "type": "icon"
+      },
+      "displayName": "Text Classifier",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 47,
+      "name": "AI Chatbot"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}

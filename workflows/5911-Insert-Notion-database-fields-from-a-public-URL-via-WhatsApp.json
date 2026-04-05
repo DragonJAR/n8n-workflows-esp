@@ -1,0 +1,757 @@
+{
+  "id": 13638,
+  "name": "Insert Notion database fields from a public URL via WhatsApp",
+  "views": 22,
+  "recentViews": 0,
+  "totalViews": 22,
+  "createdAt": "2026-02-23T19:36:40.071Z",
+  "description": "## Insert Notion Database Fields from a Public URL via WhatsApp\n\n### How it works\n1. WhatsApp Trigger receives a message containing a public URL.\n2. The workflow extracts the URL and retrieves the page content (via Apify).\n3. The content is parsed and transformed into structured fields.\n4. A new record is created in Notion, mapping the extracted fields to your database properties.\n\n### Setup steps\n1. Configure your WhatsApp credentials in the WhatsApp Trigger node.\n2. In the Search / URL Extraction step, adjust the input logic if your message format differs.\n3. Configure your Apify credentials (and actor/task) to scrape the target page.\n4. Connect your Notion database and map the extracted values in Properties.\n\n### Customization\nDefault example: Amazon/Goodreads/Casa del Libro book pages.\n\nUpdate the scraping/parsing logic to match your target sources (e.g., books, products, articles, recipes, news, or LinkedIn profiles).\n\nIf you change the data model in Notion, update the Properties mapping accordingly in the final node.",
+  "workflow": {
+    "id": "zBwcs8kk59DvnRwu",
+    "meta": {
+      "instanceId": "acc606a0f67c2c01e0ed0304cd837dce2220da5d88cf6533fdb66f2fec444f3d",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Insert Notion Database Fields from a Public URL via WhatsApp",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "4a7cba95-d787-4b0d-9b46-47d40f90e37d",
+        "name": "Extract Url ",
+        "type": "n8n-nodes-base.code",
+        "onError": "continueRegularOutput",
+        "position": [
+          656,
+          64
+        ],
+        "parameters": {
+          "jsCode": "// Get JSON input\nconst data = $input.first().json;\n\n// Extract organic results\nconst results = data.organic_results || [];\n\nconst output = results.map(result => {\n  return {\n    json: {\n      title: result.title || \"\",\n      link: result.link || \"\",\n      displayed_link: result.displayed_link || \"\"\n    }\n  };\n});\n\nreturn output;\n"
+        },
+        "executeOnce": true,
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "72991adf-2161-4097-a540-d1a700b11186",
+        "name": "HTTP Request",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1040,
+          64
+        ],
+        "parameters": {
+          "url": "={{ $('Search').item.json.organic_results[0].link }}",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            }
+          },
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+              },
+              {
+                "name": "Accept-Language",
+                "value": "es-ES,es;q=0.9,en;q=0.8"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "Header Auth account"
+          }
+        },
+        "typeVersion": 4.4
+      },
+      {
+        "id": "3673cf8d-562a-44b2-bc3f-edbd69f7cd17",
+        "name": "Code",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1184,
+          64
+        ],
+        "parameters": {
+          "jsCode": "// n8n Code node (Run once for each item)\n// Input esperado: HTML string en $json.body o $json.data o $json.html\n// Output: titleExact, subtitle, author, link\n\nconst html = $json.body ?? $json.data ?? $json.html ?? \"\";\nconst fallbackUrl = $json.bestUrl ?? $json.url ?? \"\";\n\nif (!html || typeof html !== \"string\") {\n  return [{ json: { error: \"No HTML string found\", link: fallbackUrl } }];\n}\n\nfunction extractJsonLd(htmlStr) {\n  const matches = [...htmlStr.matchAll(\n    /<script[^>]+type=[\"']application\\/ld\\+json[\"'][^>]*>([\\s\\S]*?)<\\/script>/gi\n  )];\n\n  const parsed = [];\n  for (const m of matches) {\n    const raw = (m[1] || \"\").trim();\n    if (!raw) continue;\n\n    try {\n      const clean = raw.replace(/<!--|-->/g, \"\").trim();\n      const data = JSON.parse(clean);\n      if (Array.isArray(data)) parsed.push(...data);\n      else parsed.push(data);\n    } catch (_) {}\n  }\n  return parsed;\n}\n\nfunction flattenGraph(objs) {\n  const flat = [];\n  for (const o of objs) {\n    if (!o) continue;\n    if (o[\"@graph\"] && Array.isArray(o[\"@graph\"])) flat.push(...o[\"@graph\"]);\n    else flat.push(o);\n  }\n  return flat;\n}\n\nfunction hasType(o, t) {\n  const ty = o?.[\"@type\"];\n  if (!ty) return false;\n  if (Array.isArray(ty)) return ty.map(String).includes(t);\n  return String(ty) === t;\n}\n\nfunction pickBest(flat) {\n  return flat.find(o => hasType(o, \"Book\"))\n    || flat.find(o => hasType(o, \"Product\"))\n    || flat[0]\n    || null;\n}\n\nfunction normalizeAuthor(a) {\n  if (!a) return \"\";\n  if (typeof a === \"string\") return a;\n  if (Array.isArray(a)) {\n    return a.map(x => (typeof x === \"string\" ? x : x?.name)).filter(Boolean).join(\", \");\n  }\n  if (typeof a === \"object\") return a.name || \"\";\n  return \"\";\n}\n\nfunction smartTitleCaseEs(input) {\n  if (!input) return \"\";\n  const s = String(input).trim().replace(/\\s+/g, \" \");\n  if (!s) return \"\";\n\n  // Stopwords (nunca son siglas, aunque vengan en mayúsculas)\n  const lowerWords = new Set([\n    \"a\",\"al\",\"ante\",\"bajo\",\"cabe\",\"con\",\"contra\",\"de\",\"del\",\"desde\",\"durante\",\"en\",\"entre\",\n    \"hacia\",\"hasta\",\"la\",\"las\",\"el\",\"los\",\"y\",\"e\",\"o\",\"u\",\"ni\",\"que\",\"por\",\"para\",\n    \"sin\",\"sobre\",\"tras\",\"un\",\"una\",\"unos\",\"unas\"\n  ]);\n\n  // Detecta si viene \"gritado\" o con demasiadas mayúsculas\n  const letters = s.replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, \"\");\n  const upperLetters = letters.replace(/[^A-ZÁÉÍÓÚÜÑ]/g, \"\");\n  const ratioUpper = letters.length ? upperLetters.length / letters.length : 0;\n\n  // Si no parece grito, no tocar\n  if (ratioUpper < 0.60) return s;\n\n  function isAcronym(token) {\n    const clean = token.replace(/[^A-Za-zÁÉÍÓÚÜÑ]/g, \"\");\n    if (clean.length < 2 || clean.length > 5) return false;\n\n    // Si es una stopword (\"LA\", \"DE\", \"LAS\"...), NO es sigla\n    const asLower = clean.toLowerCase();\n    if (lowerWords.has(asLower)) return false;\n\n    return clean === clean.toUpperCase();\n  }\n\n  function titleCaseWord(word, isFirstWord) {\n    const w = word.toLowerCase();\n    if (!isFirstWord && lowerWords.has(w)) return w;\n    return w.charAt(0).toUpperCase() + w.slice(1);\n  }\n\n  const tokens = s.split(\" \");\n\n  const out = tokens.map((tok, idx) => {\n    if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(tok)) return tok;\n\n    // Siglas reales tipo USA/ONU/TV\n    if (isAcronym(tok)) return tok.toUpperCase();\n\n    // Soporte guiones\n    const parts = tok.split(\"-\");\n    const casedParts = parts.map((p, partIdx) => {\n      if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(p)) return p;\n      if (isAcronym(p)) return p.toUpperCase();\n\n      const isFirstWord = (idx === 0 && partIdx === 0);\n      return titleCaseWord(p, isFirstWord);\n    });\n\n    return casedParts.join(\"-\");\n  });\n\n  return out.join(\" \");\n}\n\nconst jsonlds = extractJsonLd(html);\nconst flat = flattenGraph(jsonlds);\nconst item = pickBest(flat);\n\nlet titleExact = \"\";\nlet subtitle = \"\";\nlet author = \"\";\n\nif (item) {\n  titleExact = item.name || item.headline || \"\";\n  subtitle = item.alternateName || item.subtitle || item.description || \"\";\n  author = normalizeAuthor(item.author);\n}\n\n// Limpieza subtitle\nif (subtitle && subtitle.length > 180) subtitle = subtitle.slice(0, 180).trim();\n\n// Normaliza título\ntitleExact = smartTitleCaseEs(titleExact);\n\n// Fallbacks\nif (!titleExact) titleExact = $json.query || \"\";\nconst link = item?.url || fallbackUrl || \"\";\n\nreturn [{\n  json: {\n    titleExact: titleExact || \"\",\n    subtitle: subtitle || \"\",\n    author: author || \"\",\n    link: link || \"\"\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "14b82099-d4ae-46e5-a222-53415873606c",
+        "name": "Insert in Notion DB",
+        "type": "n8n-nodes-base.notion",
+        "position": [
+          1328,
+          64
+        ],
+        "parameters": {
+          "options": {},
+          "resource": "databasePage",
+          "databaseId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "8c87b7dc-6ebb-4f21-a2ae-ce8fac233c56",
+            "cachedResultUrl": "https://www.notion.so/8c87b7dc6ebb4f21a2aece8fac233c56",
+            "cachedResultName": "Books"
+          },
+          "propertiesUi": {
+            "propertyValues": [
+              {
+                "key": "Título|title",
+                "title": "={{ $json.titleExact }}"
+              },
+              {
+                "key": "Subtítulo|rich_text",
+                "textContent": "={{ $json.subtitle }}"
+              },
+              {
+                "key": "Autor|rich_text",
+                "textContent": "={{ $json.author }}"
+              },
+              {
+                "key": "Link|url",
+                "urlValue": "={{ $json.link }}"
+              },
+              {
+                "key": "Status|select",
+                "selectValue": "to read"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "notionApi": {
+            "id": "credential-id",
+            "name": "Notion account"
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "bbdcdd93-14bb-472d-9184-8a7f710ab238",
+        "name": "WhatsApp Trigger",
+        "type": "n8n-nodes-base.whatsAppTrigger",
+        "position": [
+          320,
+          64
+        ],
+        "webhookId": "6e613d63-6fba-4cea-8135-dac99c0e476e",
+        "parameters": {
+          "options": {},
+          "updates": [
+            "messages"
+          ]
+        },
+        "credentials": {
+          "whatsAppTriggerApi": {
+            "id": "credential-id",
+            "name": "WhatsApp OAuth account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ded3f289-cc26-45f9-b2cc-a04039b7303f",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          480,
+          -16
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 304,
+          "content": "### 1.- Search URL and extract info\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7407a104-1e51-4719-bbed-f58d1544c394",
+        "name": "Scrape URL Apify",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          816,
+          64
+        ],
+        "parameters": {
+          "url": "=https://api.apify.com/v2/acts/6sigmag~fast-website-content-crawler/run-sync-get-dataset-items",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n    \"startUrls\": [\n        \"{{ $json.link }}\"\n    ]\n}",
+          "sendBody": true,
+          "sendQuery": true,
+          "specifyBody": "json",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "token",
+                "value": "apify_api_YOUR_TOKEN_HERE_TOKEN_HERE"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "56840ec3-ab17-48a0-95bd-dba1c2e9a0d1",
+        "name": "Search",
+        "type": "n8n-nodes-serpapi.serpApi",
+        "onError": "continueRegularOutput",
+        "position": [
+          512,
+          64
+        ],
+        "parameters": {
+          "q": "=site:casadellibro.com \"{{ $json.messages[0].text.body }}\" libro",
+          "requestOptions": {},
+          "additionalFields": {}
+        },
+        "credentials": {
+          "serpApi": {
+            "id": "credential-id",
+            "name": "SerpAPI account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7da81536-3baa-4b58-a234-9562da2265b3",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -144,
+          -192
+        ],
+        "parameters": {
+          "width": 400,
+          "height": 752,
+          "content": "## Insert Notion Database Fields from a Public URL via WhatsApp\n\n### How it works\n1. WhatsApp Trigger receives a message containing a public URL.\n2. The workflow extracts the URL and retrieves the page content (via Apify).\n3. The content is parsed and transformed into structured fields.\n4. A new record is created in Notion, mapping the extracted fields to your database properties.\n\n### Setup steps\n1. Configure your WhatsApp credentials in the WhatsApp Trigger node.\n2. In the Search / URL Extraction step, adjust the input logic if your message format differs.\n3. Configure your Apify credentials (and actor/task) to scrape the target page.\n4. Connect your Notion database and map the extracted values in Properties.\n\n### Customization\nDefault example: Amazon/Goodreads/Casa del Libro book pages.\n\nUpdate the scraping/parsing logic to match your target sources (e.g., books, products, articles, recipes, news, or LinkedIn profiles).\n\nIf you change the data model in Notion, update the Properties mapping accordingly in the final node."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e1b7ad3d-6540-41aa-9247-766f05faae33",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1024,
+          -16
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 304,
+          "content": "### 2.- Convert data into fields and insert in DB\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "32faa248-8ce6-46b0-9bec-c724d7e0c7a1",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1552,
+          -112
+        ],
+        "parameters": {
+          "width": 864,
+          "height": 448,
+          "content": "![](https://res.cloudinary.com/dofqaxnpv/image/upload/v1771874412/books_zdxjju.jpg)"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "eeb83e6b-47c3-4e36-8fec-7247a606e1b2",
+    "connections": {
+      "Code": {
+        "main": [
+          [
+            {
+              "node": "Insert in Notion DB",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search": {
+        "main": [
+          [
+            {
+              "node": "Extract Url ",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Url ": {
+        "main": [
+          [
+            {
+              "node": "Scrape URL Apify",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request": {
+        "main": [
+          [
+            {
+              "node": "Code",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Scrape URL Apify": {
+        "main": [
+          [
+            {
+              "node": "HTTP Request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WhatsApp Trigger": {
+        "main": [
+          [
+            {
+              "node": "Search",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 11,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.notion": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-serpapi.serpApi": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.whatsAppTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "txampa_n8n",
+    "username": "txampa-n8n",
+    "bio": "",
+    "verified": false,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/d90cf95e76b81600ed890a7242a99a05f154e8c7c44dd60b7e1ac3170ad79ac1?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 487,
+      "icon": "file:notion.svg",
+      "name": "n8n-nodes-base.notion",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.notion/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/notion/"
+              }
+            ]
+          },
+          "categories": [
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Notion"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik03LjU4Mjc2IDYuOTc2NzlDOC44MjA0NyA3Ljk4MjM4IDkuMjg0NzkgNy45MDU2NiAxMS42MDkxIDcuNzUwNTdMMzMuNTIwNiA2LjQzNDg4QzMzLjk4NTMgNi40MzQ4OCAzMy41OTg5IDUuOTcxMjcgMzMuNDQzOSA1Ljg5NDIzTDI5LjgwNDkgMy4yNjM0OEMyOS4xMDc2IDIuNzIyMTMgMjguMTc4NiAyLjEwMjE3IDI2LjM5ODIgMi4yNTcyNkw1LjE4MTE1IDMuODA0NzZDNC40MDczNiAzLjg4MTQ4IDQuMjUyODIgNC4yNjgzNyA0LjU2MDk2IDQuNTc4NDdMNy41ODI3NiA2Ljk3Njc5Wk04Ljg5ODI5IDEyLjA4MzNWMzUuMTM4MUM4Ljg5ODI5IDM2LjM3NzEgOS41MTc0NiAzNi44NDA3IDEwLjkxMSAzNi43NjRMMzQuOTkxOSAzNS4zNzA2QzM2LjM4NjIgMzUuMjkzOSAzNi41NDE1IDM0LjQ0MTcgMzYuNTQxNSAzMy40MzUyVjEwLjUzNTFDMzYuNTQxNSA5LjUzMDE5IDM2LjE1NDkgOC45ODgyOSAzNS4zMDE0IDkuMDY1NjRMMTAuMTM2NyAxMC41MzUxQzkuMjA3OTkgMTAuNjEzMSA4Ljg5ODIxIDExLjA3NzcgOC44OTgyMSAxMi4wODMzSDguODk4MjlaTTMyLjY3MDggMTMuMzJDMzIuODI1MiAxNC4wMTcgMzIuNjcwOCAxNC43MTMzIDMxLjk3MjUgMTQuNzkxN0wzMC44MTIzIDE1LjAyMjlWMzIuMDQzNEMyOS44MDQ5IDMyLjU4NDggMjguODc1OSAzMi44OTQ0IDI4LjEwMTggMzIuODk0NEMyNi44NjI1IDMyLjg5NDQgMjYuNTUyMSAzMi41MDcyIDI1LjYyMzcgMzEuMzQ3NEwxOC4wMzQzIDE5LjQzMjlWMzAuOTYwNUwyMC40MzU5IDMxLjUwMjRDMjAuNDM1OSAzMS41MDI0IDIwLjQzNTkgMzIuODk0NCAxOC40OTgzIDMyLjg5NDRMMTMuMTU2OCAzMy4yMDQyQzEzLjAwMTYgMzIuODk0NCAxMy4xNTY4IDMyLjEyMTQgMTMuNjk4NiAzMS45NjY1TDE1LjA5MjUgMzEuNTgwMlYxNi4zMzg1TDEzLjE1NzIgMTYuMTgzNEMxMy4wMDE5IDE1LjQ4NjQgMTMuMzg4NSAxNC40ODE0IDE0LjQ3MzMgMTQuNDAzNUwyMC4yMDM1IDE0LjAxNzJMMjguMTAxOCAyNi4wODY4VjE1LjQwOTdMMjYuMDg4MSAxNS4xNzg2QzI1LjkzMzUgMTQuMzI2NSAyNi41NTIxIDEzLjcwNzggMjcuMzI2NSAxMy42MzExTDMyLjY3MDggMTMuMzJaTTMuMzk5NzMgMS43MTU5OEwyNS40Njg4IDAuMDkwNzQ1N0MyOC4xNzkgLTAuMTQxNjg4IDI4Ljg3NjMgMC4wMTQwMjQ1IDMwLjU3OTYgMS4yNTEzNUwzNy42MjQzIDYuMjAyNzZDMzguNzg2NyA3LjA1NDIxIDM5LjE3NDIgNy4yODYwMiAzOS4xNzQyIDguMjE0MTlWMzUuMzcwNkMzOS4xNzQyIDM3LjA3MjYgMzguNTU0MiAzOC4wNzkxIDM2LjM4NjUgMzguMjMzMUwxMC43NTc3IDM5Ljc4MDdDOS4xMzA0OSAzOS44NTgzIDguMzU2MDcgMzkuNjI2NCA3LjUwMzkyIDM4LjU0MjZMMi4zMTYwOCAzMS44MTE3QzEuMzg2NTggMzAuNTcyNiAxIDI5LjY0NTcgMSAyOC41NjEzVjQuNDIyODNDMSAzLjAzMTA1IDEuNjIwMTkgMS44NzAwNSAzLjM5OTczIDEuNzE1OThWMS43MTU5OFoiIGZpbGw9ImJsYWNrIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Notion",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1260,
+      "icon": "file:whatsapp.svg",
+      "name": "n8n-nodes-base.whatsAppTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.whatsapptrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/whatsapp/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "WhatsApp Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0ibTQuODY4IDQzLjMwMyAyLjY5NC05LjgzNWExOC45NCAxOC45NCAwIDAgMS0yLjUzNS05LjQ4OUM1LjAzMiAxMy41MTQgMTMuNTQ4IDUgMjQuMDE0IDVhMTguODcgMTguODcgMCAwIDEgMTMuNDMgNS41NjZBMTguODcgMTguODcgMCAwIDEgNDMgMjMuOTk0Yy0uMDA0IDEwLjQ2NS04LjUyMiAxOC45OC0xOC45ODYgMTguOThoLS4wMDhhMTkgMTkgMCAwIDEtOS4wNzMtMi4zMTF6Ii8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQuODY4IDQzLjgwM2EuNS41IDAgMCAxLS40ODItLjYzMWwyLjYzOS05LjYzNmExOS41IDE5LjUgMCAwIDEtMi40OTctOS41NTZDNC41MzIgMTMuMjM4IDEzLjI3MyA0LjUgMjQuMDE0IDQuNWExOS4zNyAxOS4zNyAwIDAgMSAxMy43ODQgNS43MTNBMTkuMzYgMTkuMzYgMCAwIDEgNDMuNSAyMy45OTRjLS4wMDQgMTAuNzQxLTguNzQ2IDE5LjQ4LTE5LjQ4NiAxOS40OGExOS41NCAxOS41NCAwIDAgMS05LjE0NC0yLjI3N2wtOS44NzUgMi41ODlhLjUuNSAwIDAgMS0uMTI3LjAxNyIvPjxwYXRoIGZpbGw9IiNjZmQ4ZGMiIGQ9Ik0yNC4wMTQgNWExOC44NyAxOC44NyAwIDAgMSAxMy40MyA1LjU2NkExOC44NyAxOC44NyAwIDAgMSA0MyAyMy45OTRjLS4wMDQgMTAuNDY1LTguNTIyIDE4Ljk4LTE4Ljk4NiAxOC45OGgtLjAwOGExOSAxOSAwIDAgMS05LjA3My0yLjMxMWwtMTAuMDY1IDIuNjQgMi42OTQtOS44MzVhMTguOTQgMTguOTQgMCAwIDEtMi41MzUtOS40ODlDNS4wMzIgMTMuNTE0IDEzLjU0OCA1IDI0LjAxNCA1bTAtMUMxMi45OTggNCA0LjAzMiAxMi45NjIgNC4wMjcgMjMuOTc5YTIwIDIwIDAgMCAwIDIuNDYxIDkuNjIyTDMuOTAzIDQzLjA0YS45OTguOTk4IDAgMCAwIDEuMjE5IDEuMjMxbDkuNjg3LTIuNTRhMjAgMjAgMCAwIDAgOS4xOTcgMi4yNDRjMTEuMDI0IDAgMTkuOTktOC45NjMgMTkuOTk1LTE5Ljk4QTE5Ljg2IDE5Ljg2IDAgMCAwIDM4LjE1MyA5Ljg2IDE5Ljg3IDE5Ljg3IDAgMCAwIDI0LjAxNCA0Ii8+PHBhdGggZmlsbD0iIzQwYzM1MSIgZD0iTTM1LjE3NiAxMi44MzJhMTUuNjcgMTUuNjcgMCAwIDAtMTEuMTU3LTQuNjI2Yy04LjcwNCAwLTE1Ljc4MyA3LjA3Ni0xNS43ODcgMTUuNzc0YTE1Ljc0IDE1Ljc0IDAgMCAwIDIuNDEzIDguMzk2bC4zNzYuNTk3LTEuNTk1IDUuODIxIDUuOTczLTEuNTY2LjU3Ny4zNDJhMTUuNzUgMTUuNzUgMCAwIDAgOC4wMzIgMi4xOTloLjAwNmM4LjY5OCAwIDE1Ljc3Ny03LjA3NyAxNS43OC0xNS43NzZhMTUuNjggMTUuNjggMCAwIDAtNC42MTgtMTEuMTYxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE5LjI2OCAxNi4wNDVjLS4zNTUtLjc5LS43MjktLjgwNi0xLjA2OC0uODItLjI3Ny0uMDEyLS41OTMtLjAxMS0uOTA5LS4wMTFzLS44My4xMTktMS4yNjUuNTk0LTEuNjYxIDEuNjIyLTEuNjYxIDMuOTU2IDEuNyA0LjU5IDEuOTM3IDQuOTA2IDMuMjgyIDUuMjU5IDguMTA0IDcuMTYxYzQuMDA3IDEuNTggNC44MjMgMS4yNjYgNS42OTMgMS4xODdzMi44MDctMS4xNDcgMy4yMDItMi4yNTUuMzk1LTIuMDU3LjI3Ny0yLjI1NWMtLjExOS0uMTk4LS40MzUtLjMxNi0uOTA5LS41NTRzLTIuODA3LTEuMzg1LTMuMjQyLTEuNTQzLS43NTEtLjIzNy0xLjA2OC4yMzhjLS4zMTYuNDc0LTEuMjI1IDEuNTQzLTEuNTAyIDEuODU5cy0uNTU0LjM1Ny0xLjAyOC4xMTktMi4wMDItLjczOC0zLjgxNS0yLjM1NGMtMS40MS0xLjI1Ny0yLjM2Mi0yLjgxLTIuNjM5LTMuMjg1LS4yNzctLjQ3NC0uMDMtLjczMS4yMDgtLjk2OC4yMTMtLjIxMy40NzQtLjU1NC43MTItLjgzMS4yMzctLjI3Ny4zMTYtLjQ3NS40NzQtLjc5MXMuMDc5LS41OTQtLjA0LS44MzFjLS4xMTctLjIzOC0xLjAzOS0yLjU4NC0xLjQ2MS0zLjUyMiIvPjwvc3ZnPg=="
+      },
+      "displayName": "WhatsApp Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 35,
+      "name": "Document Extraction"
+    }
+  ],
+  "image": []
+}

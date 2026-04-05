@@ -1,0 +1,995 @@
+{
+  "id": 6831,
+  "name": "Real-time ClickUp time tracking to HubSpot project sync",
+  "views": 250,
+  "recentViews": 0,
+  "totalViews": 250,
+  "createdAt": "2025-08-02T00:42:56.262Z",
+  "description": "### **Real-Time ClickUp Time Tracking to HubSpot Project Sync**\n\nThis workflow automates the synchronization of time tracked on ClickUp tasks directly to a custom project object in HubSpot, ensuring your project metrics are always accurate and up-to-date.\n\n---\n\n### **Use Case & Problem**\n\nThis workflow is designed for teams that use a **custom object in HubSpot** for high-level project overviews (tracking scoped vs. actual hours per sprint) but manage daily tasks and time logging in **ClickUp**. The primary challenge is the constant, manual effort required to transfer tracked hours from ClickUp to HubSpot, a process that is both time-consuming and prone to errors. This automation eliminates that manual work entirely.\n\n---\n\n### **How It Works**\n\n* **Triggers on Time Entry:** The workflow instantly starts whenever a user updates the time tracked on any task in a specified ClickUp space. ⏱️\n* **Fetches Task & Time Details:** It immediately retrieves all relevant data about the task (like its name and custom fields) and the specific time entry that was just updated.\n* **Identifies the Project & Sprint:** The workflow processes the task data to determine which HubSpot project it belongs to and categorizes the work into the correct sprint (e.g., Sprint 1, Sprint 2, Additional Requests).\n* **Updates HubSpot in Real-Time:** It finds the corresponding project record in HubSpot and updates the master `actual_hours_tracked` property. It then intelligently updates the specific field for the corresponding sprint (e.g., `actual_sprint_1_hours`), ensuring your reporting remains granular and accurate.\n\n---\n\n### **Requirements**\n\n✅ **ClickUp Account** with the following custom fields on your tasks:\n* A **Dropdown** custom field named `Sprint` to categorize tasks.\n* A **Short Text** custom field named `HubSpot Deal ID` or similar to link to the HubSpot record.\n\n✅ **HubSpot Account** with:\n* A **Custom Object** used for project tracking.\n* **Custom Properties** on that object to store total and sprint-specific hours (e.g., `actual_hours_tracked`, `actual_sprint_1_hours`, `total_time_remaining`, etc.).\n\n&gt; **Note:** Since this workflow interacts with a **custom HubSpot object**, it uses flexible HTTP Request nodes instead of the standard n8n HubSpot nodes.\n\n---\n\n### **Setup Instructions**\n\n1.  **Configure Credentials:** Add your ClickUp (OAuth2) and HubSpot (Header Auth with a Private App Token) credentials to the respective nodes in the workflow.\n2.  **Set ClickUp Trigger:** In the **`Time Tracked Update Trigger`** node, select your ClickUp team and the specific space you want to monitor for time updates.\n3.  **Update HubSpot Object ID:** Find the ID of your custom project object in HubSpot. In the HubSpot HTTP Request nodes (e.g., `OnProjectFolder`), replace the placeholder ID `objectTypeId` in the URL with your own objectTypeId\n\n---\n\n### **How to Customize**\n\n* Adjust the **`Code: Extract Sprint & Task Data`** node to change how sprint names are mapped or how time is calculated.\n* Update the URLs in the HubSpot HTTP Request nodes if your custom object or property names differ.",
+  "workflow": {
+    "meta": {
+      "instanceId": "a8c64a6cf7dcfa4f9b9bae070111f579dc10d8d5f08bd580db0503f385c3ed87",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "05fe5ea5-681b-4be2-bfcb-95b75280339b",
+        "name": "ClickUp: Get Task Details",
+        "type": "n8n-nodes-base.clickUp",
+        "position": [
+          2000,
+          1400
+        ],
+        "parameters": {
+          "id": "={{ $json.task_id }}",
+          "operation": "get",
+          "authentication": "oAuth2"
+        },
+        "credentials": {
+          "clickUpOAuth2Api": {
+            "id": "credential-id",
+            "name": "clickUpOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c35c2491-51cf-45c2-bec3-45a214ac4ada",
+        "name": "ClickUp: Get Time Entry Details",
+        "type": "n8n-nodes-base.clickUp",
+        "position": [
+          2000,
+          1600
+        ],
+        "parameters": {
+          "team": "9015730766",
+          "resource": "timeEntry",
+          "operation": "get",
+          "timeEntry": "={{ $json.data.interval_id }}",
+          "authentication": "oAuth2"
+        },
+        "credentials": {
+          "clickUpOAuth2Api": {
+            "id": "credential-id",
+            "name": "clickUpOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0e67ca2b-8071-48d4-9a01-8b063e3fe98c",
+        "name": "Merge: Task & Time Data",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          2320,
+          1500
+        ],
+        "parameters": {
+          "mode": "combineBySql"
+        },
+        "typeVersion": 3.1
+      },
+      {
+        "id": "ee0a97cb-d935-4f33-849f-2b3d44a849fe",
+        "name": "Code: Extract Sprint & Task Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2740,
+          1500
+        ],
+        "parameters": {
+          "language": "python",
+          "pythonCode": "from datetime import datetime, timedelta\nfrom collections import defaultdict\nimport re\n\n# --- Helper Functions ---\n\ndef parse_date_safely(date_str):\n    \"\"\"\n    Safely parses a date string (expected in '%Y-%m-%d' or Unix millisecond timestamp)\n    into a datetime object. Returns None if invalid.\n    \"\"\"\n    if date_str is None or str(date_str).strip() == '' or str(date_str).strip() == '0':\n        return None\n    \n    date_str_clean = str(date_str).strip()\n\n    # Try parsing as Unix millisecond timestamp first (like date_created, date_updated, due_date, start_date)\n    if date_str_clean.isdigit() and len(date_str_clean) >= 10: # Minimum 10 digits for seconds, >=13 for milliseconds\n        try:\n            # ClickUp dates like due_date are often milliseconds\n            # If it's a 10-digit number, it might be seconds. Check length heuristic.\n            if len(date_str_clean) == 10: # Likely seconds\n                return datetime.fromtimestamp(int(date_str_clean))\n            elif len(date_str_clean) >= 13: # Likely milliseconds or more precise\n                return datetime.fromtimestamp(int(date_str_clean) / 1000)\n        except (ValueError, TypeError):\n            pass # Fallback to trying YYYY-MM-DD\n            \n    # Try parsing as YYYY-MM-DD\n    try:\n        return datetime.strptime(date_str_clean, '%Y-%m-%d')\n    except ValueError:\n        return None\n    \n    return None # If all attempts fail\n\n\ndef get_sprint_name(custom_fields):\n    \"\"\"\n    Extracts the sprint name from the 'custom_fields' list of a task.\n    Returns default strings if the field is not found or value doesn't match.\n    \"\"\"\n    for field in custom_fields:\n        if field.get('name') == 'Sprint' and field.get('type') == 'drop_down':\n            selected_value = field.get('value')\n            options = field.get('type_config', {}).get('options', [])\n            \n            # Note: selected_value for dropdowns in ClickUp API is typically the orderindex (integer)\n            for option in options:\n                if option.get('orderindex') == selected_value:\n                    return option.get('name', 'Unknown Sprint')\n            return \"Sprint Value Not Found\"\n    return \"No Sprint Field\"\n\ndef get_hubspot_deal_id(custom_fields):\n    \"\"\"\n    Extracts the HubSpot Deal ID from the 'custom_fields' list of a task.\n    Returns None if the field is not found.\n    \"\"\"\n    for field in custom_fields:\n        if field.get('name') == 'HubSpot Deal ID' and field.get('type') == 'short_text':\n            return field.get('value', None)\n    return None\n\ndef clean_sprint_name_for_key(sprint_name):\n    \"\"\"\n    Cleans a sprint name to be suitable for use as a dictionary key.\n    Converts to lowercase, replaces non-alphanumeric with underscores.\n    \"\"\"\n    sprint_name = sprint_name.lower()\n    sprint_name = re.sub(r'[^a-z0-9]+', '_', sprint_name)\n    sprint_name = sprint_name.strip('_')\n    return sprint_name\n\n# --- Global Constants/Mappings ---\nGRACE_PERIOD_DAYS = 7 # Define grace period for 'AT RISK' status\nSPRINT_KEY_MAPPING = {\n    \"Sprint 1 Initial Set up and Discovery\": \"sprint_1\",\n    \"Sprint 2 Data and advanced set up\": \"sprint_2\",\n    \"Sprint 3 Sales/Marketing/Service set up\": \"sprint_3\",\n    \"Sprint 4 Training and QA\": \"sprint_4\",\n    \"Additional Requests\": \"additional_requests\",\n    \"Goodstack requests\": \"goodstack_requests\",\n    \"No Sprint Field\": \"no_sprint_field\", # Consistent key for tasks without a sprint field\n    \"Sprint Value Not Found\": \"sprint_value_not_found\" # Consistent key for unmatched sprint values\n}\n\n# --- Main Processing Logic for a Single Task Input ---\n\n# Assuming 'items' contains exactly ONE task, as per the incremental solution requirement.\nif not items or not items[0].get('json'):\n    # Return an empty or default object if no task data is provided\n    return [{ \"json\": {\n        \"error\": \"No task data provided or input is empty for incremental update.\"\n    }}]\n\ntask = items[0]['json'] # Get the single task object\n\n# Initialize variables for the output\nproject_name_overall = \"N/A\"\nhubspot_deal_id = None\nclickup_list_id = None\nfinal_project_start_date = None\nfinal_project_end_date = None\ntotal_time_remaining = 0.0\noverall_project_performance_status = \"UNDEFINED\"\ntarget_actual_sprint_field_name = None # Initialized new field\nnumeric_sprint_id = None # Initialized new field\ntask_name_output = \"N/A\" # New variable for the task name in output\n\n# --- Extract direct task properties ---\ntry:\n    # time_spent and time_estimate are in milliseconds in the raw input\n    actual_hours_for_this_task = float(task.get('time_spent', '0')) / (1000 * 60 * 60)\n    scoped_hours_for_this_task = float(task.get('time_estimate', '0')) / (1000 * 60 * 60)\n    \n    # Task name extraction\n    task_name_output = task.get('name', 'N/A') # Extract the task name here\n\n    # Project name can be found from task['project']['name']\n    project_name_overall = task.get('project', {}).get('name', 'N/A').strip()\n    \n    # Get IDs from the single task\n    hubspot_deal_id = get_hubspot_deal_id(task.get('custom_fields', []))\n    if task.get('list'):\n        clickup_list_id = task['list'].get('id')\n\n    # Get start and end dates from this single task\n    task_start_date_obj = parse_date_safely(task.get('start_date'))\n    task_due_date_obj = parse_date_safely(task.get('due_date'))\n    \n    final_project_start_date = task_start_date_obj.strftime('%Y-%m-%d') if task_start_date_obj else None\n    final_project_end_date = task_due_date_obj.strftime('%Y-%m-%d') if task_due_date_obj else None\n\n    # Calculate time remaining for this single task\n    total_time_remaining = round(scoped_hours_for_this_task - actual_hours_for_this_task, 2)\n\n    # --- Determine status for this single task ---\n    current_date_obj = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)\n    date_closed_obj = parse_date_safely(task.get('date_closed'))\n    \n    if date_closed_obj:\n        if task_due_date_obj and date_closed_obj <= task_due_date_obj:\n            overall_project_performance_status = \"CLOSED ON TIME\"\n        else:\n            overall_project_performance_status = \"CLOSED LATE\"\n    elif current_date_obj and task_due_date_obj:\n        if current_date_obj <= task_due_date_obj:\n            overall_project_performance_status = \"OPEN - ON TRACK\"\n        else:\n            days_overdue = (current_date_obj - task_due_date_obj).days\n            if 1 <= days_overdue <= GRACE_PERIOD_DAYS:\n                overall_project_performance_status = \"OPEN - AT RISK\"\n            else:\n                overall_project_performance_status = \"OPEN - OFF TRACK\"\n    else: # Task has no due date and is not closed\n        overall_project_performance_status = \"STATUS UNKNOWN (Missing Due Date)\"\n\n    # --- Determine Target Actual Sprint Field Name (Generalized) ---\n    task_sprint_name = get_sprint_name(task.get('custom_fields', []))\n    cleaned_sprint_key = SPRINT_KEY_MAPPING.get(task_sprint_name, clean_sprint_name_for_key(task_sprint_name))\n    \n    # Construct the field name for ANY cleaned sprint key\n    target_actual_sprint_field_name = f\"actual_{cleaned_sprint_key}_hours\"\n\n    # --- Determine Numeric Sprint ID (1-4 or 5 for others) ---\n    if cleaned_sprint_key == \"sprint_1\":\n        numeric_sprint_id = \"1\"\n    elif cleaned_sprint_key == \"sprint_2\":\n        numeric_sprint_id = \"2\"\n    elif cleaned_sprint_key == \"sprint_3\":\n        numeric_sprint_id = \"3\"\n    elif cleaned_sprint_key == \"sprint_4\":\n        numeric_sprint_id = \"4\"\n    else:\n        numeric_sprint_id = \"5\" # For any other sprint/workstream category\n\nexcept Exception as e:\n    # If a critical error occurs during single task processing, log it and return partial data\n    print(f\"Critical Error processing single task '{task.get('name', 'Unknown')}' (ID: {task.get('id', 'N/A')}): {e}\")\n    # Populate with default/error values if something goes wrong\n    actual_hours_for_this_task = 0.0\n    scoped_hours_for_this_task = 0.0\n    total_time_remaining = 0.0\n    overall_project_performance_status = \"ERROR_PROCESSING\"\n    # Ensure task_name_output is also set to a default in case of error\n    task_name_output = task.get('name', 'ERROR_TASK_NAME')\n\n\n# --- Prepare Sprint-Specific Hours (only for the task's assigned sprint) ---\nactual_hours_by_sprint = defaultdict(float)\nscoped_hours_by_sprint = defaultdict(float)\n\n# Ensure cleaned_sprint_key is available even after an exception\nif 'cleaned_sprint_key' not in locals(): # Check if it was defined in the try block\n    # If an exception occurred before cleaned_sprint_key was set, define a default\n    task_sprint_name_for_fallback = get_sprint_name(task.get('custom_fields', [])) # Get sprint name for fallback\n    cleaned_sprint_key = SPRINT_KEY_MAPPING.get(task_sprint_name_for_fallback, clean_sprint_name_for_key(task_sprint_name_for_fallback))\n    target_actual_sprint_field_name = f\"actual_{cleaned_sprint_key}_hours\" # Ensure this is also set for output\n    numeric_sprint_id = \"5\" # Default to 5 if sprint cannot be determined\n\nactual_hours_by_sprint[cleaned_sprint_key] = actual_hours_for_this_task\nscoped_hours_by_sprint[cleaned_sprint_key] = scoped_hours_for_this_task\n\n\n# --- Construct the Final Output Dictionary ---\noutput_data = {\n    \"name\": task_name_output, # Added the task name here\n    \"project_name\": project_name_overall,\n    \"project_start_date\": final_project_start_date,\n    \"project_end_date\": final_project_end_date,\n    \"total_scoped_hours\": round(scoped_hours_for_this_task, 2), # This is now the TASK'S scoped hours\n    \"actual_hours_tracked\": round(actual_hours_for_this_task, 2), # This is now the TASK'S actual hours\n    \"total_time_remaining\": total_time_remaining,\n    \"project_status\": overall_project_performance_status, # This is now the TASK'S status\n    \"clickup_list_id\": clickup_list_id,\n    \"hs_object_id\": hubspot_deal_id,\n    \"hubspot_owner_id\": None, # Not present in provided raw task data\n    \"hubspot_team_id\": None, # Not present in provided raw task data\n    \"target_actual_sprint_field_name\": target_actual_sprint_field_name, # Field name for the current task's sprint\n    \"numeric_sprint_id\": numeric_sprint_id,\n}\n\n# Add sprint-specific hours. Only the relevant sprint will be non-zero.\n# Initialize all specified sprint keys to 0.0 first to ensure presence\n# This ensures a consistent set of keys in the output, even if their value is 0.\nall_sprint_keys_to_include = list(set(SPRINT_KEY_MAPPING.values()) | set(actual_hours_by_sprint.keys()))\n\nfor key_alias in sorted(all_sprint_keys_to_include): # Sort for consistent output order\n    output_data[f\"sprint_{key_alias}_scoped_hours\"] = round(scoped_hours_by_sprint[key_alias], 2)\n    output_data[f\"actual_{key_alias}_hours\"] = round(actual_hours_by_sprint[key_alias], 2)\n\n\n# --- Return in n8n-compatible format ---\nreturn [{ \"json\": output_data }]"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9951232a-969c-46c6-b314-a505e086ccdc",
+        "name": "Time Tracked Update Trigger",
+        "type": "n8n-nodes-base.clickUpTrigger",
+        "position": [
+          1700,
+          1460
+        ],
+        "webhookId": "68824f3c-6b7a-4369-96bd-78e19bfeda4e",
+        "parameters": {
+          "team": "9015730766",
+          "events": [
+            "taskTimeTrackedUpdated"
+          ],
+          "filters": {
+            "spaceId": "90153635535"
+          },
+          "authentication": "oAuth2"
+        },
+        "credentials": {
+          "clickUpOAuth2Api": {
+            "id": "credential-id",
+            "name": "clickUpOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f37f07d8-0cc2-4855-912a-6bb63ed766a5",
+        "name": "OnProjectFolder",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2980,
+          1500
+        ],
+        "parameters": {
+          "url": "https://api.hubapi.com/crm/v3/objects/objectTypeId/search",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"properties\": [\n    \"project_name\",\n    \"hubspot_company_id\",\n    \"project_start_date\",\n    \"project_end_date\",\n    \"total_scoped_hours\",\n    \"actual_hours_tracked\",\n    \"sprint_1_scoped_hours\",\n    \"actual_sprint_1_hours\",\n    \"sprint_2_scoped_hours\",\n    \"actual_sprint_2_hours\",\n    \"sprint_3_scoped_hours\",\n    \"actual_sprint_3_hours\",\n    \"sprint_4_scoped_hours\",\n    \"actual_sprint_4_hours\",\n    \"hubspot_owner_id\",\n    \"hubspot_team_id\",\n    \"total_time_remaining\",\n    \"project_status\",\n    \"clickup_list_id\"\n  ],\n  \"filterGroups\": [\n    {\n      \"filters\": [\n        {\n          \"propertyName\": \"project_name\",\n          \"operator\": \"EQ\",\n          \"value\": \"{{ $json.project_name }}\"\n        }\n      ]\n    }\n  ],\n  \"sorts\": [\n    {\n      \"propertyName\": \"project_start_date\",\n      \"direction\": \"DESCENDING\"\n    }\n  ],\n  \"limit\": 10\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "8baccf3c-becd-48aa-99bf-8d6ec104903e",
+        "name": "HubSpot: Update Project Hours (actual_additional_requests_hours)",
+        "type": "n8n-nodes-base.httpRequest",
+        "maxTries": 2,
+        "position": [
+          3560,
+          1360
+        ],
+        "parameters": {
+          "url": "=https://api.hubapi.com/crm/v3/objects/{objectTypeId}/{{ $json.results[0].id }}",
+          "method": "PATCH",
+          "options": {},
+          "jsonBody": "={\n  \"properties\": {\n    \"actual_hours_tracked\": \"{{ (parseFloat($json.results[0].properties.actual_hours_tracked || 0) + parseFloat($('Code: Extract Sprint & Task Data').item.json.actualHoursTracked)).round()}}\",\n    \"total_time_remaining\": \"{{ (parseFloat($json.results[0].properties.total_time_remaining || 0) - parseFloat($('Code: Extract Sprint & Task Data').item.json.actualHoursTracked)).toFixed(1) }}\"\n  }\n}\n\n\n",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 4.2
+      },
+      {
+        "id": "96e4f398-ad13-4a79-87d2-2e1174193db7",
+        "name": "HubSpot: Update Project Hours Sprint 1-4",
+        "type": "n8n-nodes-base.httpRequest",
+        "maxTries": 2,
+        "position": [
+          3560,
+          1660
+        ],
+        "parameters": {
+          "url": "=https://api.hubapi.com/crm/v3/objects/objectTypeId/{{ $json.results[0].id }}",
+          "method": "PATCH",
+          "options": {},
+          "jsonBody": "={\n  \"properties\": {\n    \"{{ $('Code: Extract Sprint & Task Data').item.json.target_actual_sprint_field_name }}\": \"{{ $('Code: Extract Sprint & Task Data').item.json.actual_hours_tracked }}\",\n    \"actual_hours_tracked\": \"{{ $('OnProjectFolder').item.json.results[0].properties.actual_hours_tracked.toNumber()+$('Code: Extract Sprint & Task Data').item.json.actual_hours_tracked}}\"\n\"total_time_remaining\": \"{{ $json.results[0].properties.total_time_remaining - $('Code: Extract Sprint & Task Data').item.json.actual_hours_tracked}}\"\n}\n\n\n",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 4.2
+      },
+      {
+        "id": "986eb283-e122-4e8d-a090-2ad9f17da217",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          820,
+          820
+        ],
+        "parameters": {
+          "width": 640,
+          "height": 1500,
+          "content": "### **Real-Time ClickUp Time Tracking to HubSpot Project Sync**\n\nThis workflow automates the synchronization of time tracked on ClickUp tasks directly to a custom project object in HubSpot, ensuring your project metrics are always accurate and up-to-date.\n\n\n### **Use Case & Problem**\n\nThis workflow is designed for teams that use a **custom object in HubSpot** for high-level project overviews (tracking scoped vs. actual hours per sprint) but manage daily tasks and time logging in **ClickUp**. The primary challenge is the constant, manual effort required to transfer tracked hours from ClickUp to HubSpot, a process that is both time-consuming and prone to errors. This automation eliminates that manual work entirely.\n\n\n### **How It Works**\n\n* **Triggers on Time Entry:** The workflow instantly starts whenever a user updates the time tracked on any task in a specified ClickUp space. ⏱️\n* **Fetches Task & Time Details:** It immediately retrieves all relevant data about the task (like its name and custom fields) and the specific time entry that was just updated.\n* **Identifies the Project & Sprint:** The workflow processes the task data to determine which HubSpot project it belongs to and categorizes the work into the correct sprint (e.g., Sprint 1, Sprint 2, Additional Requests).\n* **Updates HubSpot in Real-Time:** It finds the corresponding project record in HubSpot and updates the master `actual_hours_tracked` property. It then intelligently updates the specific field for the corresponding sprint (e.g., `actual_sprint_1_hours`), ensuring your reporting remains granular and accurate.\n\n---\n\n### **Requirements**\n\n✅ **ClickUp Account** with the following custom fields on your tasks:\n* A **Dropdown** custom field named `Sprint` to categorize tasks.\n* A **Short Text** custom field named `HubSpot Deal ID` or similar to link to the HubSpot record.\n\n✅ **HubSpot Account** with:\n* A **Custom Object** used for project tracking.\n* **Custom Properties** on that object to store total and sprint-specific hours (e.g., `actual_hours_tracked`, `actual_sprint_1_hours`, `total_time_remaining`, etc.).\n\n> **Note:** Since this workflow interacts with a **custom HubSpot object**, it uses flexible HTTP Request nodes instead of the standard n8n HubSpot nodes.\n\n---\n\n### **Setup Instructions**\n\n1.  **Configure Credentials:** Add your ClickUp (OAuth2) and HubSpot (Header Auth with a Private App Token) credentials to the respective nodes in the workflow.\n2.  **Set ClickUp Trigger:** In the **`Time Tracked Update Trigger`** node, select your ClickUp team and the specific space you want to monitor for time updates.\n3.  **Update HubSpot Object ID:** Find the ID of your custom project object in HubSpot. In the HubSpot HTTP Request nodes (e.g., `OnProjectFolder`), replace the placeholder ID `objectTypeId` in the URL with your own object ID.\n\n---\n\n### **How to Customize**\n\n* Adjust the **`Code: Extract Sprint & Task Data`** node to change how sprint names are mapped or how time is calculated.\n* Update the URLs in the HubSpot HTTP Request nodes if your custom object or property names differ."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dc3c9c3a-fe2c-4abb-9565-6378f45aeb20",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2540,
+          1020
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 660,
+          "height": 320,
+          "content": "### Explanation Box\n\nThis workflow instantly syncs ClickUp task time updates to HubSpot. It fetches task details, calculates time per sprint, finds the HubSpot project, and updates actual hours in the correct sprint fields, ensuring real-time project metric accuracy.\n\n### Important Note  \nIf current HubSpot data is out of sync, run the ClickUp Client Project Data Stream: Automated Syncworkflow for an initial full synchronization."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7ed05d2f-311a-487c-b598-d8254085512a",
+        "name": "Route by Sprint Type",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          3180,
+          1500
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "25b4da00-6ab5-415b-b102-41ad495a5f71",
+                "operator": {
+                  "type": "number",
+                  "operation": "gt"
+                },
+                "leftValue": "={{ $('Code: Extract Sprint & Task Data').item.json.numeric_sprint_id }}",
+                "rightValue": 4
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.2
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "OnProjectFolder": {
+        "main": [
+          [
+            {
+              "node": "Route by Sprint Type",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route by Sprint Type": {
+        "main": [
+          [
+            {
+              "node": "HubSpot: Update Project Hours (actual_additional_requests_hours)",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "HubSpot: Update Project Hours Sprint 1-4",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge: Task & Time Data": {
+        "main": [
+          [
+            {
+              "node": "Code: Extract Sprint & Task Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ClickUp: Get Task Details": {
+        "main": [
+          [
+            {
+              "node": "Merge: Task & Time Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Time Tracked Update Trigger": {
+        "main": [
+          [
+            {
+              "node": "ClickUp: Get Task Details",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "ClickUp: Get Time Entry Details",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ClickUp: Get Time Entry Details": {
+        "main": [
+          [
+            {
+              "node": "Merge: Task & Time Data",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Code: Extract Sprint & Task Data": {
+        "main": [
+          [
+            {
+              "node": "OnProjectFolder",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 11,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.clickUp": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 2
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.clickUpTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Stephan Koning",
+    "username": "reklaim",
+    "bio": "Account Executive by day , Noco builder for fun at night and always a proud dad of Togo the Samoyed.",
+    "verified": true,
+    "links": [
+      "https://linkedin.com/in/stephan-koning"
+    ],
+    "avatar": "https://gravatar.com/avatar/b031dafd83a3b9b7c7df6fd650d0a21a51a3eb8f27ff0f15a527ca834c13bf2b?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 129,
+      "icon": "file:clickup.svg",
+      "name": "n8n-nodes-base.clickUp",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.clickup/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/clickup/"
+              }
+            ]
+          },
+          "categories": [
+            "Productivity",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "ClickUp"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9Ii0xMCAwIDE1NSAxNTUiPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iYSIgeDE9IjAlIiB5MT0iNjguMDElIiB5Mj0iNjguMDElIj48c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjODkzMEZEIi8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjNDlDQ0Y5Ii8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9ImIiIHgxPSIwJSIgeTE9IjY4LjAxJSIgeTI9IjY4LjAxJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iI0ZGMDJGMCIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iI0ZGQzgwMCIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxnIGZpbGw9Im5vbmUiPjxwYXRoIGZpbGw9InVybCgjYSkiIGQ9Im0uNCAxMTkuMTIgMjMuODEtMTguMjRDMzYuODYgMTE3LjM5IDUwLjMgMTI1IDY1LjI2IDEyNWMxNC44OCAwIDI3Ljk0LTcuNTIgNDAuMDItMjMuOWwyNC4xNSAxNy44QzExMiAxNDIuNTIgOTAuMzQgMTU1IDY1LjI2IDE1NWMtMjUgMC00Ni44Ny0xMi40LTY0Ljg2LTM1Ljg4Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZD0iTTY1LjE4IDM5Ljg0IDIyLjggNzYuMzYgMy4yMSA1My42NCA2NS4yNy4xNmw2MS41NyA1My41Mi0xOS42OCAyMi42NHoiLz48L2c+PC9zdmc+"
+      },
+      "displayName": "ClickUp",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 4,
+          "name": "Productivity"
+        },
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 130,
+      "icon": "file:clickup.svg",
+      "name": "n8n-nodes-base.clickUpTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.clickuptrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/clickup/"
+              }
+            ]
+          },
+          "categories": [
+            "Productivity",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "ClickUp Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9Ii0xMCAwIDE1NSAxNTUiPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iYSIgeDE9IjAlIiB5MT0iNjguMDElIiB5Mj0iNjguMDElIj48c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjODkzMEZEIi8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjNDlDQ0Y5Ii8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9ImIiIHgxPSIwJSIgeTE9IjY4LjAxJSIgeTI9IjY4LjAxJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iI0ZGMDJGMCIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iI0ZGQzgwMCIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxnIGZpbGw9Im5vbmUiPjxwYXRoIGZpbGw9InVybCgjYSkiIGQ9Im0uNCAxMTkuMTIgMjMuODEtMTguMjRDMzYuODYgMTE3LjM5IDUwLjMgMTI1IDY1LjI2IDEyNWMxNC44OCAwIDI3Ljk0LTcuNTIgNDAuMDItMjMuOWwyNC4xNSAxNy44QzExMiAxNDIuNTIgOTAuMzQgMTU1IDY1LjI2IDE1NWMtMjUgMC00Ni44Ny0xMi40LTY0Ljg2LTM1Ljg4Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZD0iTTY1LjE4IDM5Ljg0IDIyLjggNzYuMzYgMy4yMSA1My42NCA2NS4yNy4xNmw2MS41NyA1My41Mi0xOS42OCAyMi42NHoiLz48L2c+PC9zdmc+"
+      },
+      "displayName": "ClickUp Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 4,
+          "name": "Productivity"
+        },
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 46,
+      "name": "Project Management"
+    }
+  ],
+  "image": []
+}

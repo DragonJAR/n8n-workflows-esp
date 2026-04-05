@@ -1,0 +1,1304 @@
+{
+  "id": 11489,
+  "name": "AI-powered review sentiment analysis to Salesforce & Google Sheets with Decodo",
+  "views": 46,
+  "recentViews": 0,
+  "totalViews": 46,
+  "createdAt": "2025-12-04T11:06:12.282Z",
+  "description": "## What this workflow does\n\nThis workflow scrapes **customer reviews from Trustpilot**, analyzes them with AI, and keeps both **Salesforce** and **Google Sheets** automatically updated with customer sentiment insights.\n\nIt uses **Decodo** to reliably extract review content from Trustpilot, processes the text with **OpenAI**, and orchestrates everything using **n8n**.\n\n\n👉 [Deocodo](https://visit.decodo.com/VOmXO6)\n\n\n\n## How it works (high level)\n\n1. Reads **Trustpilot review URLs** and **Salesforce Account IDs** from Google Sheets  \n2. Scrapes Trustpilot reviews using **Decodo**  \n3. Uses AI to summarize sentiment, trends, and key positives/negatives  \n4. Generates **two outputs in parallel**\n\n\n## Outputs generated\n\n### 1. Salesforce Account update\nThe workflow updates an **existing Salesforce Account** by writing the AI-generated sentiment summary into a **custom text field** (e.g. `recent_trend_summary__c`).\n\nThis brings external customer feedback directly into Salesforce, allowing teams to work with real market perception inside the CRM.\n\n### 2. Google Sheets analytics dataset\nAt the same time, structured review metrics are stored in Google Sheets:\n- Ratings and sentiment distribution  \n- Top positive and negative keywords  \n- Trend summaries over time  \n\nThis creates a reusable dataset for dashboards and reporting.\n\n\n## How to configure it (general)\n\n- **Google Sheets**: add review URLs + Salesforce Account IDs  \n- **[Decodo](https://visit.decodo.com/VOmXO6)**: add your API key to scrape Trustpilot reliably  \n   \n- **OpenAI**: add your API key for AI analysis  \n- **Salesforce**:\n  - Create a custom **Text (255)** field on Account  \n  - Connect Salesforce credentials in n8n  \n  - Only existing Accounts are updated  \n",
+  "workflow": {
+    "id": "4CACq4vzjqUWBrPb",
+    "meta": {
+      "instanceId": "4e4083555a8b04da6ca272b4d16899e878b7d29349c1be92689fb39d8714b96d",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "LLM-Driven Review Summary & KPI Extractor",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "e9618bd5-5db4-4b2c-9b16-41e757e7c818",
+        "name": "When clicking ‘Execute workflow’",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          464,
+          576
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "f3b60314-8e02-4a3a-b08f-78ea2a7becf1",
+        "name": "Code in JavaScript",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1504,
+          352
+        ],
+        "parameters": {
+          "jsCode": "function htmlToText(html) {\n  if (!html || typeof html !== \"string\") return \"\";\n\n  let text = html;\n\n  text = text.replace(/<script[\\s\\S]*?<\\/script>/gi, \"\");\n  text = text.replace(/<style[\\s\\S]*?<\\/style>/gi, \"\");\n\n  text = text.replace(/<\\/(p|div|section|article|li|tr|h1|h2|h3|h4|h5|h6)>/gi, \"\\n\");\n  text = text.replace(/<br\\s*\\/?>/gi, \"\\n\");\n\n  text = text.replace(/<\\/?[^>]+>/g, \"\");\n\n  text = text\n    .replace(/&nbsp;/gi, \" \")\n    .replace(/&amp;/gi, \"&\")\n    .replace(/&quot;/gi, \"\\\"\")\n    .replace(/&#39;/gi, \"'\")\n    .replace(/&lt;/gi, \"<\")\n    .replace(/&gt;/gi, \">\");\n\n  text = text\n    .split(\"\\n\")\n    .map(line => line.trim())\n    .filter(Boolean)\n    .join(\"\\n\");\n\n  return text;\n}\n\nfunction getDomain(url) {\n  try {\n    const u = new URL(url);\n    return u.hostname.replace(/^www\\./, \"\");\n  } catch (e) {\n    return \"\";\n  }\n}\n\nfunction extractTag(html, tag) {\n  if (!html) return \"\";\n  const regex = new RegExp(`<${tag}[^>]*>([\\\\s\\\\S]*?)<\\\\/${tag}>`, \"i\");\n  const match = html.match(regex);\n  return match ? String(match[1]).trim() : \"\";\n}\n\nfunction cleanEntityName(text) {\n  if (!text) return \"\";\n  return String(text)\n    .replace(/reviews?/gi, \"\")\n    .replace(/read customer service/gi, \"\")\n    .replace(/customer service/gi, \"\")\n    .replace(/\\|.*$/g, \"\")\n    .replace(/-.*$/g, \"\")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\n// NEW: extract slug from Trustpilot-like URL\nfunction extractEntitySlugFromUrl(url) {\n  if (!url) return \"\";\n  try {\n    const u = new URL(url);\n    // Example path: /review/maclear.ch\n    const parts = u.pathname.split(\"/\").filter(Boolean); // [\"review\",\"maclear.ch\"]\n    const reviewIdx = parts.findIndex(p => p.toLowerCase() === \"review\");\n    if (reviewIdx >= 0 && parts[reviewIdx + 1]) {\n      return parts[reviewIdx + 1].trim();\n    }\n    // Generic fallback: last path segment\n    return (parts[parts.length - 1] || \"\").trim();\n  } catch (e) {\n    // If it's not a valid URL string\n    const m = String(url).match(/\\/review\\/([^/?#]+)/i);\n    return m ? m[1].trim() : \"\";\n  }\n}\n\nconst newItems = [];\n\nfor (const item of items) {\n  const json = item.json || {};\n  let result = json;\n\n  // If wrapped in { results: [ ... ] }, extract first result\n  if (Array.isArray(json.results) && json.results.length > 0) {\n    result = json.results[0];\n  }\n\n  // URL can come from different places depending on your node\n  const url = result.url || json.url || \"\";\n  const html = result.content || result.html || \"\";\n\n  const pageText = htmlToText(html);\n  const domain = getDomain(url);\n\n  // Trustpilot-like slug: maclear.ch / apify.com\n  const entitySlug = extractEntitySlugFromUrl(url) || null;\n\n  // Prefer h1/title, but fallback to slug if extraction is messy\n  const h1Text = extractTag(html, \"h1\");\n  const titleText = extractTag(html, \"title\");\n  const extractedName = cleanEntityName(h1Text || titleText);\n\n  const entityName = extractedName\n    ? extractedName\n    : (entitySlug ? entitySlug : null);\n\n  newItems.push({\n    json: {\n      url,\n      domain,\n      entity_slug: entitySlug,\n      entity_name: entityName,\n      page_text: pageText,\n      raw_html_length: html.length\n    }\n  });\n}\n\nreturn newItems;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "bab39db3-d0d7-422e-aff9-075909f6dd00",
+        "name": "AI Agent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          1728,
+          352
+        ],
+        "parameters": {
+          "text": "=You are given the cleaned text of a review page.\n\nMetadata:\n- URL: {{ $json[\"url\"] || \"\" }}\n- Domain: {{ $json[\"domain\"] || \"\" }}\n\nFull page text:\n\"\"\"\n{{ $json[\"page_text\"] || \"\" }}\n\"\"\"\n\nFrom this text, you must infer as many reviews as possible and then return ONLY a single JSON object with the following structure:\n\n{\n  \"source_url\": \"\",\n  \"source_domain\": \"\",\n  \"estimated_total_reviews\": 0,\n  \"average_rating\": null,\n  \"rating_scale_max\": 5,\n  \"rating_distribution\": {\n    \"1\": 0,\n    \"2\": 0,\n    \"3\": 0,\n    \"4\": 0,\n    \"5\": 0\n  },\n  \"sentiment_distribution\": {\n    \"positive\": 0,\n    \"neutral\": 0,\n    \"negative\": 0\n  },\n  \"top_positive_keywords\": [],\n  \"top_negative_keywords\": [],\n  \"top_praises\": [],\n  \"top_complaints\": [],\n  \"topic_distribution\": {\n    \"pricing\": 0,\n    \"usability\": 0,\n    \"features\": 0,\n    \"support\": 0,\n    \"performance\": 0,\n    \"other\": 0\n  },\n  \"recent_trend_summary\": \"\",\n  \"data_quality_notes\": \"\"\n}\n\nField definitions and instructions:\n\n- \"source_url\":\n  - Copy exactly the URL provided.\n\n- \"source_domain\":\n  - Copy exactly the domain provided.\n\n- \"estimated_total_reviews\":\n  - Your best estimate of how many individual reviews are present in the text.\n  - If unclear, use 0.\n\n- \"average_rating\":\n  - The average rating across all detected reviews.\n  - Use a numeric value like 4.3 if there is enough information.\n  - If no rating information is reliably available, use null.\n\n- \"rating_scale_max\":\n  - The maximum rating scale observed or assumed (usually 5).\n  - If unclear, default to 5.\n\n- \"rating_distribution\":\n  - Number of reviews that fall into each star bucket (1–5).\n  - If you detect a different scale (e.g., 1–10), still try to map to 1–5 as best as possible.\n  - If information is unclear, keep values as 0.\n\n- \"sentiment_distribution\":\n  - Number of reviews that are overall positive, neutral, or negative based on the text.\n  - If you have no signal at all, use 0 for all three.\n\n- \"top_positive_keywords\":\n  - Array of short keywords or phrases frequently mentioned in positive reviews.\n  - Examples: [\"easy to use\", \"great support\", \"fast\", \"intuitive interface\"]\n  - Maximum 10 entries.\n\n- \"top_negative_keywords\":\n  - Array of short keywords or phrases frequently mentioned in negative reviews.\n  - Examples: [\"too expensive\", \"bugs\", \"slow performance\", \"poor support\"]\n  - Maximum 10 entries.\n\n- \"top_praises\":\n  - Short bullet-style sentences summarizing what customers like the most.\n  - Example: \"Users appreciate how easy it is to get started.\"\n  - 3 to 7 items.\n\n- \"top_complaints\":\n  - Short bullet-style sentences summarizing the main pain points or complaints.\n  - Example: \"Several users complain about slow response times from support.\"\n  - 3 to 7 items.\n\n- \"topic_distribution\":\n  - A rough count of how many reviews mention each topic:\n    - \"pricing\"\n    - \"usability\"\n    - \"features\"\n    - \"support\"\n    - \"performance\"\n    - \"other\"\n  - Use integer counts. If something is unclear, leave it as 0.\n\n- \"recent_trend_summary\":\n  - A short paragraph (3–5 lines) describing:\n    - overall tone (improving, stable, deteriorating)\n    - any shifts in sentiment or recurring issues\n    - anything noteworthy for a product / CX team.\n\n- \"data_quality_notes\":\n  - Explain briefly any limitations:\n    - e.g., \"Only a small subset of reviews is visible.\"\n    - \"Ratings are not explicitly shown, so rating distribution is approximate.\"\n    - \"Some reviews appear duplicated.\"\n\nVERY IMPORTANT:\n- If something is unclear or not available, do NOT invent precise numbers.\n- Use conservative estimates or 0/null/empty lists.\n- Return ONLY the JSON object, with no extra commentary, no markdown and no backticks.\n",
+          "options": {
+            "systemMessage": "You are an AI assistant specialized in analyzing customer reviews and generating aggregated metrics.\n\nYou will receive the cleaned text content of one or more review pages (from platforms like G2, Capterra, Trustpilot, Amazon, Google Play, etc.). The text may be noisy, but it will contain multiple customer reviews, ratings, dates, and comments.\n\nYour job is to:\n- Detect and infer individual reviews from the text (as best as possible).\n- Aggregate the information.\n- Return ONLY a single JSON object with high-level metrics about these reviews.\n\nYou MUST:\n- Follow the JSON schema provided in the user instructions exactly.\n- Return ONLY a valid JSON object, with no extra text, no explanations, and no markdown.\n- Be conservative with assumptions: if something is unclear, use null, 0, or an empty array.\n- Focus on metrics that are useful for product, marketing, and CX teams (quality, sentiment, themes, trends)."
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "be657b0c-23e1-4b8c-bd25-9915a5947358",
+        "name": "Code in JavaScript1",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2080,
+          352
+        ],
+        "parameters": {
+          "jsCode": "// This Function node takes the LLM \"output\" field (JSON string),\n// parses it, and flattens it into a structure ready to be saved\n// into Google Sheets (one row per item).\n\nconst newItems = [];\n\nfor (const item of items) {\n  const rawOutput = item.json.output;\n\n  let parsed;\n  if (typeof rawOutput === 'string') {\n    try {\n      parsed = JSON.parse(rawOutput);\n    } catch (error) {\n      // If parsing fails, keep debug info\n      newItems.push({\n        json: {\n          parse_error: true,\n          error_message: error.message || 'Failed to parse LLM output',\n          original_output: rawOutput\n        }\n      });\n      continue;\n    }\n  } else if (typeof rawOutput === 'object' && rawOutput !== null) {\n    // In case the LLM node already returns an object\n    parsed = rawOutput;\n  } else {\n    newItems.push({\n      json: {\n        parse_error: true,\n        error_message: 'Unexpected output type from LLM',\n        original_output: rawOutput\n      }\n    });\n    continue;\n  }\n\n  const ratingDist = parsed.rating_distribution || {};\n  const sentimentDist = parsed.sentiment_distribution || {};\n  const topicDist = parsed.topic_distribution || {};\n\n  // Build a flat JSON object for Google Sheets\n  const flat = {\n    // Basic metadata\n    source_url: parsed.source_url || \"\",\n    source_domain: parsed.source_domain || \"\",\n    estimated_total_reviews: parsed.estimated_total_reviews ?? null,\n    average_rating: parsed.average_rating ?? null,\n    rating_scale_max: parsed.rating_scale_max ?? 5,\n\n    // Rating distribution (1–5)\n    rating_1: ratingDist[\"1\"] ?? 0,\n    rating_2: ratingDist[\"2\"] ?? 0,\n    rating_3: ratingDist[\"3\"] ?? 0,\n    rating_4: ratingDist[\"4\"] ?? 0,\n    rating_5: ratingDist[\"5\"] ?? 0,\n\n    // Sentiment distribution\n    sentiment_positive: sentimentDist.positive ?? 0,\n    sentiment_neutral: sentimentDist.neutral ?? 0,\n    sentiment_negative: sentimentDist.negative ?? 0,\n\n    // Topic distribution\n    topic_pricing: topicDist.pricing ?? 0,\n    topic_usability: topicDist.usability ?? 0,\n    topic_features: topicDist.features ?? 0,\n    topic_support: topicDist.support ?? 0,\n    topic_performance: topicDist.performance ?? 0,\n    topic_other: topicDist.other ?? 0,\n\n    // Arrays → strings\n    top_positive_keywords: Array.isArray(parsed.top_positive_keywords)\n      ? parsed.top_positive_keywords.join(\", \")\n      : \"\",\n\n    top_negative_keywords: Array.isArray(parsed.top_negative_keywords)\n      ? parsed.top_negative_keywords.join(\", \")\n      : \"\",\n\n    top_praises: Array.isArray(parsed.top_praises)\n      ? parsed.top_praises.join(\"\\n\")\n      : \"\",\n\n    top_complaints: Array.isArray(parsed.top_complaints)\n      ? parsed.top_complaints.join(\"\\n\")\n      : \"\",\n\n    // Text fields\n    recent_trend_summary: parsed.recent_trend_summary || \"\",\n    data_quality_notes: parsed.data_quality_notes || \"\"\n  };\n\n  newItems.push({ json: flat });\n}\n\nreturn newItems;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7ce9b06a-402b-4ff6-b857-431f01c75f2a",
+        "name": "Get row(s) in sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          688,
+          560
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TqXzrR4lq9oijo09pLFLqSUz2OK2uCRKu7CPQz0MxWo/edit#gid=0",
+            "cachedResultName": "input"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1TqXzrR4lq9oijo09pLFLqSUz2OK2uCRKu7CPQz0MxWo",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TqXzrR4lq9oijo09pLFLqSUz2OK2uCRKu7CPQz0MxWo/edit?usp=drivesdk",
+            "cachedResultName": "url_feedback_truspilot"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "f26790bb-a333-4e1d-9309-f2e30a6c59fd",
+        "name": "Append row in sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2304,
+          352
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "source_url": "={{ $json.source_url }}",
+              "average_rating": "={{ $json.average_rating }}",
+              "sentiment_neutral": "={{ $json.sentiment_neutral }}",
+              "sentiment_negative": "={{ $json.sentiment_negative }}",
+              "sentiment_positive": "={{ $json.sentiment_positive }}",
+              "recent_trend_summary": "={{ $json.recent_trend_summary }}",
+              "top_negative_keywords": "={{ $json.top_negative_keywords }}",
+              "top_positive_keywords": "={{ $json.top_positive_keywords }}",
+              "estimated_total_reviews": "={{ $json.estimated_total_reviews }}"
+            },
+            "schema": [
+              {
+                "id": "source_url",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "source_url",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "estimated_total_reviews",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "estimated_total_reviews",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "average_rating",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "average_rating",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sentiment_positive",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sentiment_positive",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sentiment_neutral",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sentiment_neutral",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sentiment_negative",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sentiment_negative",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "top_positive_keywords",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "top_positive_keywords",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "top_negative_keywords",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "top_negative_keywords",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "recent_trend_summary",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "recent_trend_summary",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 697979134,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TqXzrR4lq9oijo09pLFLqSUz2OK2uCRKu7CPQz0MxWo/edit#gid=697979134",
+            "cachedResultName": "output"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1TqXzrR4lq9oijo09pLFLqSUz2OK2uCRKu7CPQz0MxWo",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TqXzrR4lq9oijo09pLFLqSUz2OK2uCRKu7CPQz0MxWo/edit?usp=drivesdk",
+            "cachedResultName": "url_feedback_truspilot"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "6b7f37a7-354f-4f5d-a62b-d70aeb497387",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          -144
+        ],
+        "parameters": {
+          "height": 1200,
+          "content": "## What this workflow does\nThis workflow scrapes **customer reviews from Trustpilot**, analyzes them with AI, and keeps both **Salesforce** and **Google Sheets** automatically updated with customer sentiment insights.\n\nIt uses **Decodo** to reliably extract review content from Trustpilot, processes the text with **OpenAI**, and orchestrates everything using **n8n**.\n\nDecodo (scraping layer):  \n👉 https://visit.decodo.com/raqXGD\n\n\n## How it works (high level)\n\n1. Reads **Trustpilot review URLs** and **Salesforce Account IDs** from Google Sheets  \n2. Scrapes Trustpilot reviews using **Decodo**  \n3. Uses AI to summarize sentiment, trends, and key positives/negatives  \n4. Generates **two outputs in parallel**  \n\n## Outputs generated\n\n### 1. Salesforce Account update  \nThe workflow updates an **existing Salesforce Account** by writing the AI-generated sentiment summary into a **custom text field** (e.g. `recent_trend_summary__c`).\n\nThis brings external customer feedback directly into Salesforce, so teams can:\n- See real customer sentiment inside the CRM  \n- Make faster, better-informed decisions  \n- Avoid manual review checks  \n\n### 2. Google Sheets analytics dataset  \nAt the same time, the workflow appends structured review metrics into Google Sheets, including:\n- Estimated total reviews  \n- Average rating  \n- Positive / neutral / negative sentiment counts  \n- Top positive and negative keywords  \n- Trend summary  \n\nThis sheet becomes a **central analytics layer** for dashboards, reporting, and historical comparison.\n\n\n## How to configure it (general)\n\n- **Google Sheets**: provide review URLs + Salesforce Account IDs  \n- **Decodo**: add your API key to scrape Trustpilot reliably  \n  👉 https://visit.decodo.com/raqXGD  \n- **OpenAI**: add your API key for sentiment summarization  \n- **Salesforce**:\n  - Create a custom **Text (255)** field on Account\n  - Connect Salesforce credentials in n8n\n  - The workflow updates existing Accounts only (no creation)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cac8d1e3-de91-47d4-96e8-7a4109a32d7b",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1072,
+          176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 128,
+          "content": "##  Data Extraction  \nReads Trustpilot URLs and Salesforce Account IDs from Google Sheets and controls the execution flow"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "19a14699-c1dd-4368-91cd-a91c7a5278a1",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1584,
+          176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 512,
+          "height": 128,
+          "content": "## AI Analysis  \nScrapes Trustpilot reviews via **Decodo**, cleans the text, and generates sentiment insights using OpenAI"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "55190458-90d6-44b5-ae91-d9c0b05dd82d",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3232,
+          48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 848,
+          "height": 624,
+          "content": "## Data Output  \n![txt](https://ik.imagekit.io/agbb7sr41/salesforce_feedback.png)\n![txt](https://ik.imagekit.io/agbb7sr41/n8n_output_2.png)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "de95cc00-c6a2-4226-ab10-aa7d1b3d0efa",
+        "name": "Decodo",
+        "type": "@decodo/n8n-nodes-decodo.decodo",
+        "position": [
+          1280,
+          352
+        ],
+        "parameters": {
+          "url": "={{ $('Get row(s) in sheet').item.json.url }}"
+        },
+        "credentials": {
+          "decodoApi": {
+            "id": "credential-id",
+            "name": "decodoApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bf870fff-71bd-4b9c-ac28-6b2b1fc64da3",
+        "name": "Create or update an account",
+        "type": "n8n-nodes-base.salesforce",
+        "position": [
+          2976,
+          476
+        ],
+        "parameters": {
+          "name": "={{ $('Code in JavaScript').item.json.entity_slug }}",
+          "resource": "account",
+          "operation": "upsert",
+          "externalId": "Id",
+          "externalIdValue": "={{ $('Get row(s) in sheet').item.json.salesforce_account_id }}",
+          "additionalFields": {
+            "customFieldsUi": {
+              "customFieldsValues": [
+                {
+                  "value": "={{ $json.recent_trend_summary }}",
+                  "fieldId": "feedback__c"
+                }
+              ]
+            }
+          }
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "credential-id",
+            "name": "salesforceOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b63a97fe-e81f-42b3-bf4c-9a48766ea103",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          1800,
+          576
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-nano",
+            "cachedResultName": "gpt-4.1-nano"
+          },
+          "options": {},
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "6b55d083-2370-478a-812b-02cc06c7fa3a",
+        "name": "Code in JavaScript2",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2752,
+          352
+        ],
+        "parameters": {
+          "jsCode": "function truncateTo255Smart(value) {\n  if (!value) return \"\";\n\n  const text = String(value);\n\n  // If already within limit, return as is\n  if (text.length <= 255) {\n    return text;\n  }\n\n  // Cut to max length\n  const truncated = text.slice(0, 255);\n\n  // Try to avoid cutting words\n  const lastSpace = truncated.lastIndexOf(\" \");\n\n  return lastSpace > 200\n    ? truncated.slice(0, lastSpace)\n    : truncated;\n}\n\n// Apply truncation to the Salesforce field\nconst safeTrendSummary = truncateTo255Smart($input.first().json.recent_trend_summary);\n\nreturn [\n  {\n    json: {\n\n      recent_trend_summary: safeTrendSummary\n    }\n  }\n];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "669cde21-0d71-45d8-aae8-1104803a67b6",
+        "name": "If",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          2528,
+          352
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "9790b05b-3c77-40d4-b33c-04f97c22129d",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{ $('Get row(s) in sheet').item.json.salesforce_account_id }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "28e7741a-ef0b-470c-8d71-97fe9013a6d9",
+        "name": "Loop Over Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          1056,
+          368
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "45ac4709-d499-40f4-944a-b441f0e911ed",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2288,
+          192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 448,
+          "height": 128,
+          "content": "## CRM + Google sheets update\nUpdates the Salesforce Account with the sentiment summary and stores full analytics in Google Sheets"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5311f4f3-49aa-463e-af61-20b09df7aaab",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          432,
+          144
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 288,
+          "content": "## Input \n![txt](https://ik.imagekit.io/agbb7sr41/input_job_2-png.png)"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "266ddd23-8bd8-49d1-9903-44e201471260",
+    "connections": {
+      "If": {
+        "main": [
+          [
+            {
+              "node": "Code in JavaScript2",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decodo": {
+        "main": [
+          [
+            {
+              "node": "Code in JavaScript",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Agent": {
+        "main": [
+          [
+            {
+              "node": "Code in JavaScript1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Decodo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code in JavaScript": {
+        "main": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Append row in sheet": {
+        "main": [
+          [
+            {
+              "node": "If",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code in JavaScript1": {
+        "main": [
+          [
+            {
+              "node": "Append row in sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code in JavaScript2": {
+        "main": [
+          [
+            {
+              "node": "Create or update an account",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get row(s) in sheet": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create or update an account": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When clicking ‘Execute workflow’": {
+        "main": [
+          [
+            {
+              "node": "Get row(s) in sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 18,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 3
+      },
+      "n8n-nodes-base.salesforce": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "@decodo/n8n-nodes-decodo.decodo": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Kevin Meneses ",
+    "username": "pythonia-kevin",
+    "bio": "CRM consultant and content creator helping businesses streamline customer management, automate workflows, and boost growth through smart integration",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/kevin-meneses-gonzalez/"
+    ],
+    "avatar": "https://gravatar.com/avatar/19dee2010941996b1cce342ad66f6964baa6eac898570992e3cddc1b00143a79?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 324,
+      "icon": "file:salesforce.svg",
+      "name": "n8n-nodes-base.salesforce",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.salesforce/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/salesforce/"
+              }
+            ]
+          },
+          "categories": [
+            "Sales",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Salesforce"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzUgNTMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwYTFlMCIgZD0iTTMwLjc3NyA1LjY1M2MyLjQtMi40NzYgNS43Mi00LjA0IDkuMzkyLTQuMDQgNC44OTUgMCA5LjEzNiAyLjczMiAxMS40MTIgNi43NzNhMTUuNyAxNS43IDAgMCAxIDYuNDYtMS4zNjZjOC44MjMgMCAxNS45MzcgNy4yIDE1LjkzNyAxNi4wOHMtNy4xNDMgMTYuMDg4LTE1LjkzNyAxNi4wODhjLTEuMDggMC0yLjEzNC0uMTE0LTMuMTMtLjMxM2ExMS42OCAxMS42OCAwIDAgMS0xMC4yIDUuOTc3IDExLjc1IDExLjc1IDAgMCAxLTUuMDk0LTEuMTY3Yy0yLjAyIDQuNzUzLTYuNzQ1IDguMS0xMi4yMzggOC4xLTUuNzIgMC0xMC42MTUtMy42MTQtMTIuNDk0LTguNy0uODMzLjE3MS0xLjY4Mi4yNTctMi41MzMuMjU2QzUuNTIyIDQzLjM0MSAwIDM3Ljc2MyAwIDMwLjg0N2ExMi41MiAxMi41MiAwIDAgMSA2LjE3Ni0xMC44MTUgMTQuMSAxNC4xIDAgMCAxLTEuMTk1LTUuNzJDNC45NTUgNi40MzIgMTEuNDE1IDAgMTkuMzI1IDBhMTQuMzQgMTQuMzQgMCAwIDEgMTEuNDQxIDUuNjYzIi8+PHBhdGggZD0ibTEwLjcxMiAyNi44NTYuMzEzLS44MjVjLjA1Ny0uMTQyLjE0Mi0uMDg1LjItLjA1N2wuMjU2LjE3YTMuNTMgMy41MyAwIDAgMCAxLjk2NC41N2MuNjU1IDAgMS4wOC0uMzQyIDEuMDgtLjgyNXYtLjAyOGMwLS41MTItLjYyNi0uNy0xLjM2Ni0uOTRsLS4xNy0uMDU3Yy0uOTk2LS4yODUtMi4wNzgtLjctMi4wNzgtMS45NjR2LS4wMjhjMC0xLjE5NS45NjgtMi4wNSAyLjM2Mi0yLjA1aC4xNDJjLjgyNSAwIDEuNTk0LjIyOCAyLjE2My41OTguMDU3LjAyOC4xMTQuMDg1LjA4NS4xN2wtLjMxMy44MjVjLS4wNTcuMTQyLS4yLjA1Ny0uMi4wNTdhNC4zIDQuMyAwIDAgMC0xLjkzNS0uNDg0Yy0uNTk4IDAtLjk2OC4zMTMtLjk2OC43NHYuMDI4YzAgLjQ4NC42NTUuNyAxLjM5NS45NGwuMTQyLjAyOGMuOTk2LjMxMyAyLjA1Ljc0IDIuMDUgMS45NjR2LjAyOGMwIDEuMy0uOTQgMi4xMDYtMi40NDggMi4xMDYtLjc0IDAtMS40NS0uMTE0LTIuMjItLjUxMi0uMTQyLS4wODUtLjI4NS0uMTQyLS40MjctLjI1Ni0uMDI4LS4wNTctLjA4NS0uMDg1LS4wMjgtLjJ6bTIyLjIgMCAuMzEzLS44MjVjLjA1Ny0uMTQyLjE3LS4wODUuMi0uMDU3bC4yNTYuMTdhMy41MyAzLjUzIDAgMCAwIDEuOTY0LjU3Yy42NTUgMCAxLjA4LS4zNDIgMS4wOC0uODI1di0uMDI4YzAtLjUxMi0uNjI2LS43LTEuMzY2LS45NGwtLjE3LS4wNTdjLS45OTYtLjI4NS0yLjA3OC0uNy0yLjA3OC0xLjk2NHYtLjAyOGMwLTEuMTk1Ljk2OC0yLjA1IDIuMzYyLTIuMDVoLjE0MmMuODI1IDAgMS41OTQuMjI4IDIuMTYzLjU5OC4wNTcuMDI4LjExNC4wODUuMDg1LjE3bC0uMzEzLjgyNWMtLjA1Ny4xNDItLjIuMDU3LS4yLjA1N2E0LjMgNC4zIDAgMCAwLTEuOTM1LS40ODRjLS41OTggMC0uOTY4LjMxMy0uOTY4Ljc0di4wMjhjMCAuNDg0LjY1NS43IDEuMzk1Ljk0bC4xNDIuMDI4Yy45OTYuMzEzIDIuMDUuNzQgMi4wNSAxLjk2NHYuMDI4YzAgMS4zLS45NCAyLjEwNi0yLjQ0OCAyLjEwNi0uNzQgMC0xLjQ1LS4xMTQtMi4yMi0uNTEyLS4xNDItLjA4NS0uMjg1LS4xNDItLjQyNy0uMjU2IDAtLjA1Ny0uMDU3LS4wODUtLjAyOC0uMnptMTYuNDUtMy45Yy4xMTQuNDI3LjIuODgyLjIgMS4zNjZzLS4wNTcuOTQtLjIgMS4zNjZhMi44IDIuOCAwIDAgMS0uNTcgMS4xIDIuNzUgMi43NSAwIDAgMS0uOTY4Ljc0cS0uNTk3LjI1NS0xLjM2Ni4yNTZjLS43NjkuMDAxLS45NjgtLjA4NS0xLjM2Ni0uMjU2cy0uNy0uNDI3LS45NjgtLjc0YTMgMyAwIDAgMS0uNTctMS4xYy0uMTE1LS40MTctLjItLjg4Mi0uMi0xLjM2NnMuMDU3LS45NC4yLTEuMzY2Yy4xMTQtLjQyNy4zMTMtLjc5Ny41Ny0xLjFhMi43NSAyLjc1IDAgMCAxIC45NjgtLjc0IDMuNCAzLjQgMCAwIDEgMS4zNjYtLjI4NWMuNTEyIDAgLjk2OC4wODUgMS4zNjYuMjg1LjM5OC4xNy43LjQyNy45NjguNzRhMyAzIDAgMCAxIC41NyAxLjFtLTEuMjggMS4zMzhjMC0uNzQtLjE0Mi0xLjMtLjM5OC0xLjcwOHMtLjY4My0uNTk4LTEuMjI0LS41OThjLS41NyAwLS45NjguMi0xLjIyNC41OThzLS4zOTguOTY4LS4zOTggMS43MDguMTQyIDEuMy4zOTggMS43MzZjLjI1Ni4zOTguNjU1LjU5OCAxLjIyNC41OThzLjk2OC0uMiAxLjIyNC0uNTk4Yy4yODUtLjM5OC4zOTgtLjk5Ni4zOTgtMS43MzZtMTEuNjk3IDIuMTM0LjMxMy44NTRjLjAyOC4xMTQtLjA1Ny4xNDItLjA1Ny4xNDItLjQ4NC4yLTEuMTM4LjMxMy0xLjc5My4zMTNxLTEuNjUgMC0yLjUwNC0uOTRjLS44NTQtLjk0LS44NTQtMS40OC0uODU0LTIuNTMzIDAtLjQ4NC4wNTctLjk0LjItMS4zNjZzLjM0Mi0uNzk3LjYyNi0xLjFhMyAzIDAgMCAxIDEuMDI1LS43NCAzLjYgMy42IDAgMCAxIDEuNDIzLS4yODUgOCA4IDAgMCAxIC45MzkuMDU3Yy4yODUuMDU3LjY4My4xNDIuODU0LjIyOC4wMjggMCAuMTE0LjA1Ny4wODUuMTQybC0uMzEzLjg1NGMtLjA1Ny4xNDItLjE0Mi4wODUtLjE0Mi4wODVhNCA0IDAgMCAwLTEuMzM4LS4yYy0uNjI2IDAtMS4xLjItMS4zOTUuNjI2LS4zMTMuMzk4LS40ODQuOTQtLjQ4NCAxLjY4IDAgLjc5Ny4yIDEuMzY2LjU0IDEuNzM2cy44MjUuNTQgMS40NS41NGMuMjU2IDAgLjQ4NC0uMDI4LjY4My0uMDU3cy4zOTgtLjA4NS41OTgtLjE3Yy0uMDI4LjA1Ny4wODUuMDI4LjE0Mi4xNDJ6bTYuNDYtMy43MjhjLjI4NS45NjguMTQyIDEuNzkzLjExNCAxLjg1IDAgLjExNC0uMTE0LjExNC0uMTE0LjExNGgtNC4yOTdjLjAyOC42NTUuMTcgMS4xLjUxMiAxLjQyMy4zMTMuMzEzLjc5Ny41MTIgMS40OC41MTIgMS4wMjUgMCAxLjQ1LS4yIDEuNzY1LS4zMTMgMCAwIC4xMTQtLjAyOC4xNy4wODVsLjI4NS43OTdjLjA1Ny4xNDIgMCAuMTctLjAyOC4yLS4yNTYuMTQyLS45LjQyNy0yLjE2My40MjctLjU5OCAwLTEuMTM4LS4wODUtMS41NjUtLjI1NnMtLjc5Ny0uMzk4LTEuMDgtLjctLjQ4NC0uNjgzLS42MjYtMS4wOGMtLjE0Mi0uNDI3LS4yLS44ODItLjItMS4zNjZzLjA1Ny0uOTQuMi0xLjM2NmMuMTE0LS40MjcuMzEzLS43OTcuNTctMS4xcy41OTgtLjU3Ljk5Ni0uNzRjLjM5OC0uMi44ODItLjI4NSAxLjQyMy0uMjg1LjQ1NSAwIC44ODIuMDg1IDEuMjI0LjI1Ni4yNTYuMTE0LjU0LjMxMy44MjUuNjI2LjE0Mi4xMTQuMzk4LjU0LjUxMi45NHptLTQuMjcuOWgzLjA0NWMtLjAyOC0uMzk4LS4xMTQtLjc0LS4yODUtMS4wMjUtLjI1Ni0uMzk4LS42MjYtLjYyNi0xLjE5NS0uNjI2cy0uOTY4LjIyOC0xLjIyNC42MjZjLS4xNy4yNTYtLjI1Ni41OTgtLjM0MiAxLjAyNXptLTMwLjA4Mi0uOWMuMjg1Ljk2OC4xNDIgMS43OTMuMTQyIDEuODUgMCAuMTE0LS4xMTQuMTE0LS4xMTQuMTE0aC00LjI5N2MuMDI4LjY1NS4xNyAxLjEuNTEyIDEuNDIzLjMxMy4zMTMuNzk3LjUxMiAxLjQ4LjUxMiAxLjAyNSAwIDEuNDUtLjIgMS43NjUtLjMxMyAwIDAgLjExNC0uMDI4LjE3LjA4NWwuMjg1Ljc5N2MuMDU3LjE0MiAwIC4xNy0uMDI4LjItLjI1Ni4xNDItLjkuNDI3LTIuMTYzLjQyNy0uNTk4IDAtMS4xMzgtLjA4NS0xLjU2NS0uMjU2cy0uNzk3LS4zOTgtMS4wOC0uNy0uNDg0LS42ODMtLjYyNi0xLjA4Yy0uMTQyLS40MjctLjItLjg4Mi0uMi0xLjM2NnMuMDU3LS45NC4yLTEuMzY2Yy4xMTQtLjQyNy4zMTMtLjc5Ny41Ny0xLjFzLjU5OC0uNTcuOTk2LS43NGMuMzk4LS4yLjg4Mi0uMjg1IDEuNDIzLS4yODUuNDU1IDAgLjg4Mi4wODUgMS4yMjQuMjU2LjI1Ni4xMTQuNTQuMzEzLjgyNS42MjYuMTE0LjExNC4zOTguNTQuNDg0Ljk0em0tNC4yNy45aDMuMDc0Yy0uMDI4LS4zOTgtLjExNC0uNzQtLjI4NS0xLjAyNS0uMjU2LS4zOTgtLjYyNi0uNjI2LTEuMTk1LS42MjZzLS45NjguMjI4LTEuMjI0LjYyNmMtLjIuMjU2LS4yODUuNTk4LS4zNyAxLjAyNW0tNy41NDItLjIyOC43LjA4NXYtLjE3YzAtLjU3LS4xMTQtLjg1NC0uMzQyLTEuMDI1cy0uNTk4LS4yODUtMS4wNTMtLjI4NWMwIDAtMS4wNTMgMC0xLjg3OC40MjctLjAyOC4wMjgtLjA1Ny4wMjgtLjA1Ny4wMjhzLS4xMTQuMDI4LS4xNDItLjA1N2wtLjMxMy0uODI1Yy0uMDU3LS4xMTQuMDI4LS4xNy4wMjgtLjE3LjM5OC0uMzEzIDEuMy0uNDg0IDEuMy0uNDg0YTggOCAwIDAgMSAxLjEzOC0uMTE0cTEuMjggMCAxLjk2NC41OThjLjY4NC41OTguNjgzIDEuMDI1LjY4MyAxLjkwN3YzLjkyN3MwIC4xMTQtLjA4NS4xNDJjMCAwLS4xNy4wNTctLjMxMy4wODVsLTEuMDguMmE2LjYgNi42IDAgMCAxLTEuMy4xMTRjLS40MjcgMC0uNzk3LS4wMjgtMS4xMzgtLjExNGEyLjggMi44IDAgMCAxLS44ODItLjM3IDEuOSAxLjkgMCAwIDEtLjU3LS42ODNjLS4xNDItLjI1Ni0uMi0uNTk4LS4yLS45NjhhMi4yNiAyLjI2IDAgMCAxIC4yMjgtLjk5NmMuMTQzLS4yOTYuMzctLjUxMi42MjYtLjdzLjU3LS4zMTMuODgyLS40MjdhNC4zIDQuMyAwIDAgMSAxLjA1My0uMTQybC43NC4wMjh6bS0xLjcwOCAzLjAxN3MuMzk4LjMxMyAxLjI1Mi4yNTZjLjYyNi0uMDI4IDEuMTY3LS4xNDIgMS4xNjctLjE0MnYtMS45NTVzLS41NC0uMDg1LTEuMTY3LS4wODVjLS44ODIgMC0xLjI1Mi4zMTMtMS4yNTIuMzEzLS4yNTYuMTctLjM3LjQ1NS0uMzcuODI1YTEuMSAxLjEgMCAwIDAgLjE0Mi41NjljLjAyOC4wNTcuMDU3LjExNC4yMjguMjI4em0zNi4yODYtNS4yMDhjLS4wMjguMTE0LS4yNTYuNy0uMzEzLjktLjAyOC4wODUtLjA4NS4xMTQtLjE3LjExNCAwIDAtLjI1Ni0uMDU3LS40ODQtLjA1N2EyLjMgMi4zIDAgMCAwLS41NjkuMDg1Yy0uMi4wNTctLjM3LjE3LS41NC4zMTNzLS4yODUuMzctLjM3LjYyNi0uMTQyLjY4My0uMTQyIDEuMTM4djMuMTg3YzAgLjA4NS0uMDU3LjE0Mi0uMTQyLjE0MmgtMS4xMjhjLS4wODUgMC0uMTQyLS4wNTctLjE0Mi0uMTQydi02LjRjMC0uMDg1LjA1Ny0uMTQyLjExNC0uMTQyaDEuMWMuMDg1IDAgLjExNC4wNTcuMTE0LjE0MnYuNTEyYTEuOSAxLjkgMCAwIDEgLjctLjU0Yy4yNDUtLjExMy41Ny0uMiAxLjEtLjE3LjI4NS4wMjguNjU1LjA4NS43LjExNC4xMTQuMDI4LjE3LjA1Ny4xNDIuMTd6bS0xMC41Ni0yLjk2Yy4wMjggMCAuMTE0LjA1Ny4wODUuMTQybC0uMzQyLjljLS4wMjguMDU3LS4wNTcuMTE0LS4yLjA1Ny0uMDI4IDAtLjA4NS0uMDI4LS4yMjgtLjA1Ny0uMDg1LS4wMjgtLjIyOC0uMDI4LS4zNDItLjAyOC0uMTcgMC0uMzEzLjAyOC0uNDU1LjA1N3MtLjI1Ni4xMTQtLjM3LjIyOC0uMjI4LjI1Ni0uMzEzLjQ1NWE0LjMgNC4zIDAgMCAwLS4yMjguOTY4aDEuMzY2Yy4xMTQgMCAuMTQyLjA1Ny4xNDIuMTQybC0uMTcuODgyYy0uMDI4LjE0Mi0uMTQyLjExNC0uMTQyLjExNGgtMS40MjNsLS45IDUuNDkzYy0uMTE0LjU3LS4yMjggMS4wNTMtLjM3IDEuNDVzLS4zMTMuNjgzLS41Ny45NjhjLS4yMjguMjU2LS40ODQuNDU1LS43OTcuNTQtLjI4NS4xMTQtLjY1NS4xNy0xLjA1My4xNy0uMiAwLS4zOTggMC0uNjI2LS4wNTdhMS42IDEuNiAwIDAgMS0uMzk4LS4xMTRjLS4wNTctLjAyOC0uMDg1LS4wODUtLjA1Ny0uMTdsLjI5My0uODYzYy4wNTctLjExNC4xNDItLjA1Ny4xNDItLjA1N2wuMjI4LjA4NWMuMTE0LjAyOC4yMjguMDI4LjM0Mi4wMjhxLjMgMCAuNTEyLS4wODVjLjE3LS4wNTcuMjg1LS4xNy4zOTgtLjMxM3MuMi0uMzQyLjMxMy0uNTk4cS4xNTgtLjUxOS4yNTYtMS4wNTNsLjk2OC01LjM4aC0uOTRjLS4xMTQgMC0uMTQyLS4wNTctLjE0Mi0uMTQybC4xNy0uODgyYy4wMjgtLjE0Mi4xNDItLjExNC4xNDItLjExNGguOTY4bC4wNTctLjI4NWMuMTQyLS44NTQuNDI3LTEuNTA4Ljg1NC0xLjkzNXMxLjA1My0uNjU1IDEuODItLjY1NXEuMzAyLjAwMy41OTguMDU3Yy4xMTQtLjAyOC4yNTYgMCAuMzk4LjA1N3ptLTE5LjE4MiA5LjI1YzAgLjA4NS0uMDU3LjE0Mi0uMTE0LjE0MmgtMS4xMzhjLS4wODUgMC0uMTE0LS4wNTctLjExNC0uMTQydi05LjEzNmMwLS4wNTcuMDU3LS4xNDIuMTE0LS4xNDJoMS4xMzhjLjA4NSAwIC4xMTQuMDU3LjExNC4xNDJ6Ii8+PC9nPjwvc3ltYm9sPjwvc3ZnPg=="
+      },
+      "displayName": "Salesforce",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 2,
+          "name": "Sales"
+        },
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

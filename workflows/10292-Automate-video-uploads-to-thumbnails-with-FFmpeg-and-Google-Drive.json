@@ -1,0 +1,910 @@
+{
+  "id": 7595,
+  "name": "Automate video uploads to thumbnails with FFmpeg and Google Drive",
+  "views": 1515,
+  "recentViews": 0,
+  "totalViews": 1515,
+  "createdAt": "2025-08-19T14:25:55.838Z",
+  "description": "# Automate Video Upload → Auto-Thumbnail → Google Drive\n\nThis workflow accepts a video via HTTP upload, verifies it’s a valid video, extracts a thumbnail frame at the **5-second** mark using **FFmpeg** (auto-installs a static build if missing), uploads the image to a specified **Google Drive** folder and returns a structured JSON response containing the new file’s details.\n\n## Who’s it for\n\n* **Marketing / Social teams** who need ready-to-publish thumbnails from raw uploads.\n* **Developers** who want an API-first thumbnail microservice without standing up extra infrastructure.\n* **Agencies / Creators** standardizing assets in a shared Drive.\n\n## How it works\n\n1. **Accept Video Upload (Webhook)**\n   Receives `multipart/form-data` with file in field `media` at `/mediaUpload`. Response is deferred until the final node.\n2. **Validate Upload is Video (IF)**\n   Checks `{{$binary.media.mimeType}}` contains `video/`. Non-video payloads can be rejected with HTTP 400.\n3. **Persist Upload to /tmp (Write Binary File)**\n   Writes the uploaded file to `/tmp/&lt;originalFilename or input.mp4&gt;` for stable processing.\n4. **Extract Thumbnail with FFmpeg (Execute Command)**\n   * Uses system `ffmpeg` if available; otherwise downloads a static binary to `/tmp/ffmpeg`.\n   * Runs: `ffmpeg -y -ss 5 -i <video> -frames:v 1 -q:v 2 /tmp/thumbnail.jpg`\n5. **Load Thumbnail from Disk (Read Binary File)**\n   Reads `/tmp/thumbnail.jpg` into the item’s binary as `thumbnail`.\n6. **Upload Thumbnail to Drive (Google Drive)**\n   Uploads to your target folder. File name is `&lt;original&gt;-thumb.jpg`.\n7. **Return API Response (Respond to Webhook)**\n   Sends JSON to the client including Drive file `id`, `name`, links, size, and checksums (if available).\n\n## How to set up\n\n1. **Import the workflow JSON** into n8n.\n2. **Google Drive**\n   * Create (or choose) a destination folder; copy its **Folder ID**.\n   * Add **Google Drive OAuth2** credentials in n8n and select them in the Drive node.\n   * Set the folder in the Drive “Upload” node.\n3. **Webhook**\n   * The endpoint is `POST /webhook/mediaUpload`.\n   * Test:\n     ```bash\n     curl -X POST https://YOUR-N8N-URL/webhook/mediaUpload \\\n       -F \"media=@/path/to/video.mp4\"\n     ```\n4. **FFmpeg**\n   * Nothing to install manually: the Execute Command node auto-installs a static `ffmpeg` if it’s not present.\n   * (Optional) If running n8n in Docker and you want permanence, use an image that includes `ffmpeg`.\n5. **Response body**\n   * The Respond node returns JSON with file metadata. You can customize the fields as needed.\n6. **(Optional) Non-video branch**\n   * On the IF node’s **false** output, add a Respond node with HTTP **400** and a helpful message.\n\n## Requirements\n* n8n instance with **Execute Command** node enabled (self-hosted/container/VM).\n* **Outbound network** access (to fetch static FFmpeg if not installed).\n* **Google Drive OAuth2** credential with permission to the destination folder.\n* Adequate temp space in `/tmp` for the uploaded video and generated thumbnail.\n\n## How to customize\n\n* **Timestamp**: change `-ss 5` to another second, or parameterize it via query/body (e.g., `timestamp=15`).\n* **Multiple thumbnails**: duplicate the FFmpeg + Read steps with `-ss 5`, `-ss 15`, `-ss 30`, suffix names `-thumb-5.jpg`, etc.\n* **File naming**: include the upload time or Drive file ID: `{{ base + '-' + $now + '-thumb.jpg' }}`.\n* **Public sharing**: add a **Drive → Permission: Create** node (Role: `reader`, Type: `anyone`) and return `webViewLink`.\n* **Output target**: replace the Drive node with **S3 Upload** or **Zoho WorkDrive (HTTP Request)** if needed.\n* **Validation**: enforce max file size/MIME whitelist in a small Function node before writing to disk.\n* **Logging**: append a row to Google Sheets/Notion with `sourceFile`, `thumbId`, `size`, `duration`, `status`.\n\n## Add-ons\n\n* **Slack / Teams notification** with the uploaded thumbnail link.\n* **Image optimization** (e.g., convert to WebP or resize variants).\n* **Retry & alerts** via error trigger workflow.\n* **Audit log** to a database (e.g., Postgres) for observability.\n\n## Use Case Examples\n\n* **CMS ingestion**: Editors upload videos; workflow returns a thumbnail URL to store alongside the article.\n* **Social scheduling**: Upload longform to generate a quick hero image for a post.\n* **Client portals**: Clients drop raw footage; you keep thumbnails uniform in one Drive folder.\n\n## Common troubleshooting\n\n| Issue                                                 | Possible Cause                                         | Solution                                                                                                         |\n| ----------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |\n| `ffmpeg: not found`                                   | System lacks ffmpeg and static build couldn’t download | Ensure outbound HTTPS allowed; keep the auto-installer lines intact; or use a Docker image that includes ffmpeg. |\n| Webhook returns 400 “not a video”                     | Wrong field name or non-video MIME                     | Send file in `media` field; ensure it’s `video/*`.                                                               |\n| Drive upload fails (`403` / insufficient permissions) | OAuth scope or account lacks folder access             | Reconnect Drive credential; verify the destination **Folder ID** and sharing/ownership.                          |\n| Response missing `webViewLink` / `webContentLink`     | Drive node not returning link fields                   | Enable link fields in the Drive node or build URLs using the returned `id`.                                      |\n| `413 Payload Too Large` at reverse proxy              | Proxy limits on upload size                            | Increase body size limits in your proxy (e.g., Nginx `client_max_body_size`).                                    |\n| Disk full / ENOSPC                                    | Large uploads filling `/tmp`                           | Increase temp storage; keep **Cleanup** step; consider size caps and early rejection.                            |\n| Corrupt thumbnail or black frame                      | Timestamp lands on a black frame                       | Change `-ss` or use `-ss` *before* `-i` vs. after; try different seconds (e.g., 1–3s).                           |\n| Slow extraction                                       | Large or remote files; cold FFmpeg download            | Warm the container; host near upload source; keep static ffmpeg cached in image.                                 |\n| Duplicate outputs                                     | Repeat requests with same video/name                   | Add a de-dup check (query Drive for existing `&lt;base&gt;-thumb.jpg` before upload).                                  |\n\n## Need Help?\n\nWant this wired to **S3 or Zoho WorkDrive** or to generate **multiple timestamps** and **public links** out of the box? We're happy to help.",
+  "workflow": {
+    "id": "W69y1dllbQpuNZQ0",
+    "meta": {
+      "instanceId": "14e4c77104722ab186539dfea5182e419aecc83d85963fe13f6de862c875ebfa",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Automate Video Upload → Auto-Thumbnail → Google Drive",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "0f0dc32f-cadc-4001-9ded-4049186ed556",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -570,
+          -180
+        ],
+        "parameters": {
+          "width": 1600,
+          "height": 340,
+          "content": "## Video Upload → Auto-Thumbnail → Google Drive\n\n### **What it does (high level)**\nAccepts a video via HTTP upload, validates it’s a real video file, extracts a thumbnail at the 5-second mark using FFmpeg (auto-installs if missing), saves the thumbnail to a designated Google Drive folder, and returns a JSON response with the new file’s details."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9e6b7fcd-2c7a-4762-8dd7-efa102ad9599",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -560,
+          180
+        ],
+        "parameters": {
+          "width": 1580,
+          "height": 660,
+          "content": "# **Node Breakdown & Descriptions:**\n\n### \\* The workflow starts with a **Webhook** node named **“Accept Video Upload”**, which activates on an HTTP **POST** to `/mediaUpload`. It expects `multipart/form-data` with the file in the `media` field and defers responding until the last node, so the API reply can include the uploaded thumbnail’s metadata.\n\n### \\* The next node, **IF** named **“Validate Upload is Video”**, checks `{{$binary.media.mimeType}}` contains `video/`. Only true (video) items proceed. If it ever receives a non-video, the false branch can return a **400** (optional improvement).\n\n### \\* The **Write Binary File** node named **“Persist Upload to /tmp”** writes the incoming `media` binary to disk at `/tmp/<originalFilename or input.mp4>`. This produces a stable file path for FFmpeg to read from.\n\n### \\* The **Execute Command** node named **“Extract Thumbnail with FFmpeg (Auto-Install)”** runs FFmpeg to grab a single frame at **5 seconds**:\n\n* If FFmpeg exists in the environment, it uses it.\n* Otherwise it **downloads a static FFmpeg** build into `/tmp/ffmpeg` (no root needed) and uses that.\n* Command outputs `/tmp/thumbnail.jpg` (`-ss 5 -frames:v 1 -q:v 2`).\n\n### \\* The **Read Binary File** node named **“Load Thumbnail from Disk”** reads `/tmp/thumbnail.jpg` back into the item’s binary data, preparing it for upload (thumbnail is now available as the node’s binary output).\n\n### \\* The **Google Drive** node named **“Upload Thumbnail to Drive”** uploads the thumbnail image to your target folder (folder ID you configured). The file name is derived from the original video name with a `-thumb.jpg` suffix. On success, it returns Drive metadata such as `id` and `name`.\n\n### \\* Finally, the **Respond to Webhook** node named **“Return API Response”** sends a JSON response to the caller indicating success, including the Drive `thumbnailFileId` and `thumbnailName`, so the client can reference or share the thumbnail immediately."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "eb68ca4d-93d6-4535-a009-be7a129e18f3",
+        "name": "Accept Video Upload (Webhook)",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -480,
+          0
+        ],
+        "webhookId": "53a1804d-fde6-4e38-abd4-f22f5cf2e4b2",
+        "parameters": {
+          "path": "mediaUpload",
+          "options": {},
+          "httpMethod": "POST",
+          "responseData": "allEntries",
+          "responseMode": "lastNode"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "22cf7a78-1f4b-4dac-83b6-718476d74c11",
+        "name": "Validate Upload is Video (IF)",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -260,
+          0
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "string": [
+              {
+                "value1": "={{$binary.file.mimeType}}",
+                "value2": "video/",
+                "operation": "contains"
+              }
+            ],
+            "boolean": []
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9bc950c0-4ffd-4c86-9345-7aa2bb682625",
+        "name": "Persist Upload to /tmp (Write Binary File)",
+        "type": "n8n-nodes-base.writeBinaryFile",
+        "position": [
+          -40,
+          0
+        ],
+        "parameters": {
+          "options": {},
+          "fileName": "={{$('Accept Video Upload (Webhook)').item.binary.media.fileName ? \"/tmp/\" + $('Accept Video Upload (Webhook)').item.binary.media.fileName : \"/tmp/input.mp4\"}}",
+          "dataPropertyName": "media"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b8ecc2ac-ddca-42cb-a735-ec3e79e02f1c",
+        "name": "Extract Thumbnail with FFmpeg (Auto-Install) (Execute Command)",
+        "type": "n8n-nodes-base.executeCommand",
+        "position": [
+          180,
+          0
+        ],
+        "parameters": {
+          "command": "=set -e\n\nVIDEO=\"{{ $('Persist Upload to /tmp (Write Binary File)').item.json.fileName }}\"\nOUT=\"/tmp/{{ $('Accept Video Upload (Webhook)').item.binary.media.fileName }}_thumbnail.jpg\"\n\n# 1) locate ffmpeg\nif command -v ffmpeg >/dev/null 2>&1; then\n  FFMPEG_BIN=\"$(command -v ffmpeg)\"\nelif [ -x /tmp/ffmpeg/ffmpeg ]; then\n  FFMPEG_BIN=\"/tmp/ffmpeg/ffmpeg\"\nelse\n  # 2) fetch a static ffmpeg (no root). Works on most Linux hosts/containers.\n  ARCH=\"$(uname -m)\"\n  case \"$ARCH\" in\n    x86_64|amd64)  URL=\"https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz\" ;;\n    aarch64|arm64) URL=\"https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz\" ;;\n    armv7l|armhf)  URL=\"https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-armhf-static.tar.xz\" ;;\n    i686|i386)     URL=\"https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-i686-static.tar.xz\" ;;\n    *) echo \"Unsupported CPU arch: $ARCH\" >&2; exit 1 ;;\n  esac\n\n  mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg\n\n  # downloader: prefer curl, else wget\n  if command -v curl >/dev/null 2>&1; then\n    curl -fsSL \"$URL\" -o ffmpeg.tar.xz\n  elif command -v wget >/dev/null 2>&1; then\n    wget -qO ffmpeg.tar.xz \"$URL\"\n  else\n    echo \"Need curl or wget to fetch ffmpeg\" >&2\n    exit 1\n  fi\n\n  # extract (xz support required by most tars on Linux)\n  tar -xJf ffmpeg.tar.xz --strip-components=1\n  chmod +x ./ffmpeg ./ffprobe\n  FFMPEG_BIN=\"/tmp/ffmpeg/ffmpeg\"\nfi\n\n# 3) do the work\n\"$FFMPEG_BIN\" -y -ss 5 -i \"$VIDEO\" -frames:v 1 -q:v 2 \"$OUT\"\n",
+          "executeOnce": false
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "736a61c2-bfeb-4821-8ca2-a0e54ddfb04d",
+        "name": "Load Thumbnail from Disk (Read Binary File)",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "position": [
+          400,
+          0
+        ],
+        "parameters": {
+          "filePath": "=/tmp/{{ $('Persist Upload to /tmp (Write Binary File)').item.binary.media.fileName }}_thumbnail.jpg"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8b2760d0-22f8-4291-9663-71f01e3c397b",
+        "name": "Upload Thumbnail to Drive (Google Drive)",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          620,
+          0
+        ],
+        "parameters": {
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "options": {},
+          "folderId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1AXMk_yyq3sD_Oc9f5eRLuqtJevbX-d1i",
+            "cachedResultUrl": "",
+            "cachedResultName": "Video_Thumbnail"
+          }
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "418127d5-2902-472c-b4dc-5f9628c7c6b7",
+        "name": "Return API Response (Respond to Webhook)",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          840,
+          0
+        ],
+        "parameters": {
+          "options": {
+            "responseCode": 200
+          },
+          "respondWith": "json",
+          "responseBody": "={\n  \"ok\": true,\n  \"fileName\": \"{{ $json.name || $json.originalFilename }}\",\n  \"type\": \"{{ $json.mimeType || $json.fullFileExtension || $json.fileExtension }}\",\n  \"sizeBytes\": \"{{ $json.size }}\",\n  \"sizeHuman\": \"={{ (Number($json.size) >= 1048576 ? (Number($json.size)/1048576).toFixed(2) + ' MB' : (Number($json.size)/1024).toFixed(2) + ' KB') }}\",\n  \"url\": \"={{ $json.webViewLink || ('https://drive.google.com/file/d/' + $json.id + '/view') }}\",\n  \"downloadUrl\": \"={{ $json.webContentLink || ('https://drive.google.com/uc?id=' + $json.id + '&export=download') }}\",\n  \"createdTime\": \"{{ $json.createdTime }}\",\n  \"modifiedTime\": \"{{ $json.modifiedTime }}\",\n  \"image\": {\n    \"width\": \"{{ $json.imageMediaMetadata && $json.imageMediaMetadata.width }}\",\n    \"height\": \"{{ $json.imageMediaMetadata && $json.imageMediaMetadata.height }}\",\n    \"rotation\": \"{{ $json.imageMediaMetadata && $json.imageMediaMetadata.rotation }}\"\n  },\n  \"owner\": \"{{ $json.owners && $json.owners[0] && $json.owners[0].displayName }}\"\n}"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "8797b44a-f6aa-4043-9997-84a2147ae0aa",
+    "connections": {
+      "Accept Video Upload (Webhook)": {
+        "main": [
+          [
+            {
+              "node": "Validate Upload is Video (IF)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Upload is Video (IF)": {
+        "main": [
+          [
+            {
+              "node": "Persist Upload to /tmp (Write Binary File)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Thumbnail to Drive (Google Drive)": {
+        "main": [
+          [
+            {
+              "node": "Return API Response (Respond to Webhook)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Persist Upload to /tmp (Write Binary File)": {
+        "main": [
+          [
+            {
+              "node": "Extract Thumbnail with FFmpeg (Auto-Install) (Execute Command)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Load Thumbnail from Disk (Read Binary File)": {
+        "main": [
+          [
+            {
+              "node": "Upload Thumbnail to Drive (Google Drive)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Thumbnail with FFmpeg (Auto-Install) (Execute Command)": {
+        "main": [
+          [
+            {
+              "node": "Load Thumbnail from Disk (Read Binary File)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 9,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleDrive": {
+        "count": 1
+      },
+      "n8n-nodes-base.executeCommand": {
+        "count": 1
+      },
+      "n8n-nodes-base.readBinaryFile": {
+        "count": 1
+      },
+      "n8n-nodes-base.writeBinaryFile": {
+        "count": 1
+      },
+      "n8n-nodes-base.respondToWebhook": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "WeblineIndia",
+    "username": "weblineindia",
+    "bio": "A Leading Software Engineering, Consulting & Outsourcing Services Company in USA & India serving Clients Globally since 1999.",
+    "verified": true,
+    "links": [
+      "https://www.weblineindia.com/hire-n8n-developers/"
+    ],
+    "avatar": "https://gravatar.com/avatar/a229d43aefca4588581583c58bb37b4773aebbdf4c1fef86a08bb1d38eae91fa?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 13,
+      "icon": "fa:terminal",
+      "name": "n8n-nodes-base.executeCommand",
+      "codex": {
+        "data": {
+          "alias": [
+            "Shell",
+            "Command",
+            "OS",
+            "Bash"
+          ],
+          "details": "Execute command allows you to run terminal commands on the computer/server hosting your n8n instance. Useful for executing a shell script or interacting with your n8n instance programmatically via the CLI.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executecommand/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Execute Command",
+        "color": "#886644"
+      },
+      "iconData": {
+        "icon": "terminal",
+        "type": "icon"
+      },
+      "displayName": "Execute Command",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "icon": "fa:file-import",
+      "name": "n8n-nodes-base.readBinaryFile",
+      "codex": {
+        "data": {
+          "alias": [
+            "Text",
+            "Open",
+            "Import"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.readwritefile/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Files"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Read Binary File",
+        "color": "#449922"
+      },
+      "iconData": {
+        "icon": "file-import",
+        "type": "icon"
+      },
+      "displayName": "Read Binary File",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "icon": "fa:file-export",
+      "name": "n8n-nodes-base.writeBinaryFile",
+      "codex": {
+        "data": {
+          "alias": [
+            "Text",
+            "Save",
+            "Export"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.readwritefile/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Files"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Write Binary File",
+        "color": "#CC2233"
+      },
+      "iconData": {
+        "icon": "file-export",
+        "type": "icon"
+      },
+      "displayName": "Write Binary File",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googledrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Drive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 535,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.respondToWebhook",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.respondtowebhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Respond to Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Respond to Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 31,
+      "name": "Content Creation"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}

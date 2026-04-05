@@ -1,0 +1,1133 @@
+{
+  "id": 7665,
+  "name": "Monitor Kubernetes services & pods with Prometheus and send alerts to Slack",
+  "views": 928,
+  "recentViews": 0,
+  "totalViews": 928,
+  "createdAt": "2025-08-20T19:07:35.628Z",
+  "description": "#### 🧩 Short Summary\n\nProactively alert to service endpoint changes and pod/container issues (Pending, Not Ready, Restart spikes) using Prometheus metrics, formatted and sent to Slack.\n\n#### 🗂️ Category\n\nDevOps / Monitoring & Observability\n\n#### 🏷️ Tags\n\nkubernetes, prometheus, slack, alerting, sre, ops, kube-state-metrics\n\n#### ✅ Prerequisites\n\n- Prometheus scraping kube-state-metrics v2.x.\n- Slack App or Incoming Webhook (channel access).\n- n8n instance with outbound access to Prometheus & Slack.\n\n\n#### 🔑 Required Credentials in n8n\n\nSlack: Bot OAuth (chat:write) or Incoming Webhook URL.\n\n(Optional) Prometheus Basic Auth (if your Prometheus needs it).\n\n#### 🧠 What This Template Does\n\n- Detects pods stuck in Pending (scheduling problems like taints/affinity/capacity).\n- Detects containers Not Ready (readiness probe failures).\n- Detects container restart spikes over a sliding window (default 5 minutes).\n- Detects service discovery changes (endpoint count diffs current vs previous snapshot).\n- Sends clean, emoji-enhanced Slack alerts with pod/namespace/service context.\n- Outputs a 5-minute summary block to reduce noise.\n\n#### 📣 Slack Message Style (examples)\n\n![image.png](fileId:2165)\n\n![image.png](fileId:2164)",
+  "workflow": {
+    "id": "uHuCUw3vQH7eXOyI",
+    "meta": {
+      "instanceId": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "name": "Service_and_Pods_Discovery",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "de0cfea0-77c9-4918-9eb6-e18189c17cfd",
+        "name": "🕒 Every 5 Min Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -900,
+          520
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "4a46ca36-bba6-4670-96a4-487764a60cba",
+        "name": "📤 Send Alerts to Slack",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2240,
+          580
+        ],
+        "parameters": {
+          "url": "https://slack.com/api/chat.postMessage",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "channel",
+                "value": "#k8s-alerts"
+              },
+              {
+                "name": "text",
+                "value": "={{$json[\"text\"]}}"
+              }
+            ]
+          },
+          "genericAuthType": "httpBearerAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "credential-id",
+            "name": "httpBearerAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "59853fd1-1249-4652-afbd-f7263d7fda9a",
+        "name": "CrashLoopBackOff / Termination Reason",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -200,
+          1060
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=kube_pod_container_status_waiting_reason{reason=\"CrashLoopBackOff\"} == 1",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "ef3f8b16-c9a6-4af3-a4aa-19f7cbe02254",
+        "name": "Pod Restart Spike (last 5m)",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -200,
+          1440
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=increase(kube_pod_container_status_restarts_total[5m]) > 0",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "bcac438e-4fcc-4fba-8dc5-69571113b4b4",
+        "name": "Normalization",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1480,
+          580
+        ],
+        "parameters": {
+          "jsCode": "const output = [];\n\nfor (const item of items) {\n  const data = item.json;\n\n  // Case 1: service snapshot (object with namespace/service keys)\n  if (data && Object.keys(data).some(k => k.includes('/'))) {\n    for (const [svc, count] of Object.entries(data)) {\n      output.push({\n        type: \"service\",\n        name: svc,\n        count: count\n      });\n    }\n    continue;\n  }\n\n  // Case 2: already-normalized pod_restart object\n  if (data?.type === \"pod_restart\") {\n    output.push({\n      type: \"pod_restart\",\n      namespace: data.namespace,\n      pod: data.pod,\n      container: data.container || null,\n      value: data.value ? Number(data.value) : 0\n    });\n    continue;\n  }\n\n  // Case 3: raw Prometheus format with data.result array\n  if (data?.data?.result) {\n    for (const r of data.data.result) {\n      const ns = r.metric.namespace;\n      const pod = r.metric.pod;\n      const container = r.metric.container || null;\n      const reason = r.metric.reason || null;\n      const val = parseFloat(r.value[1]);\n\n      // classify\n      let issueType = \"pod\";\n      if (reason) issueType = \"pod_waiting_reason\";\n      if (r.metric.__name__?.includes(\"ready\") && val === 0) issueType = \"pod_not_ready\";\n      if (r.metric.__name__?.includes(\"restarts_total\")) issueType = \"pod_restart\";\n\n      // NEW: detect Pending pods\n      if (\n        r.metric.__name__?.includes(\"pod_status_phase\") &&\n        r.metric.phase === \"Pending\" &&\n        val > 0\n      ) {\n        issueType = \"pod_pending\";\n      }\n\n      output.push({\n        type: issueType,\n        namespace: ns,\n        pod,\n        container,\n        reason,\n        phase: r.metric.phase || null,\n        value: val\n      });\n    }\n  }\n}\n\nreturn output.map(o => ({ json: o }));\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "951d0319-c333-4ec0-89cd-28e2a413fda9",
+        "name": "Slack formatter with summary",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1920,
+          580
+        ],
+        "parameters": {
+          "jsCode": "const data = items.map(i => i.json);\n\n// Group data\nlet services = [];\nlet podsNotReady = [];\nlet podsWaiting = [];\nlet podsRestarts = [];\nlet podsPending = [];   // NEW group\n\nfor (const d of data) {\n  if (d.type === \"service\") {\n    services.push(d);\n  }\n  if (d.type === \"pod_not_ready\" && d.value === 0) {\n    podsNotReady.push(d);\n  }\n  if (d.type === \"pod_waiting_reason\" && d.value > 0) {\n    podsWaiting.push(d);\n  }\n  if (d.type === \"pod_restart\" && d.value > 0) {\n    podsRestarts.push(d);\n  }\n  if (d.type === \"pod_pending\" && d.value > 0) {   // NEW condition\n    podsPending.push(d);\n  }\n}\n\n// ---- Service comparison (detect changes) ----\nlet serviceChanges = [];\nif (services.length > 0) {\n  // Split into two snapshots (prev & curr)\n  const half = services.length / 2;\n  const prev = services.slice(0, half);\n  const curr = services.slice(half);\n\n  // Build dicts\n  const prevMap = {};\n  prev.forEach(s => prevMap[s.name] = s.count);\n  const currMap = {};\n  curr.forEach(s => currMap[s.name] = s.count);\n\n  for (const svc in currMap) {\n    const current = currMap[svc];\n    const previous = prevMap[svc] ?? 0;\n\n    if (current !== previous) {\n      if (previous === 0 && current > 0) {\n        serviceChanges.push(`🆕 Service \\`${svc}\\` appeared with *${current}* endpoints`);\n      } else if (current === 0) {\n        serviceChanges.push(`❌ Service \\`${svc}\\` lost all endpoints (was *${previous}*)`);\n      } else {\n        serviceChanges.push(`⚠️ Service \\`${svc}\\` endpoint count changed from *${previous}* → *${current}*`);\n      }\n    }\n  }\n}\n\n// ---- Slack message builder ----\nlet msg = \":mag: *Kubernetes Cluster Health Update*\\n\\n\";\n\n// Service section\nmsg += \":gear: *Service Discovery Changes:*\\n\";\nif (serviceChanges.length > 0) {\n  msg += serviceChanges.map(c => `• ${c}`).join(\"\\n\") + \"\\n\\n\";\n} else {\n  msg += \"✅ No service endpoint changes detected\\n\\n\";\n}\n\n// Pods Not Ready\nif (podsNotReady.length > 0) {\n  msg += \":warning: *Pods Not Ready:*\\n\";\n  msg += podsNotReady.map(p => `• [${p.namespace}] \\`${p.pod}\\` (container: ${p.container})`).join(\"\\n\") + \"\\n\\n\";\n}\n\n// Pods Pending (NEW)\nif (podsPending.length > 0) {\n  msg += \":hourglass_flowing_sand: *Pods Pending Scheduling:*\\n\";\n  msg += podsPending.map(p => `• [${p.namespace}] \\`${p.pod}\\` (phase: ${p.phase})`).join(\"\\n\") + \"\\n\\n\";\n}\n\n// Pods Waiting\nif (podsWaiting.length > 0) {\n  msg += \":fire: *Pods in Waiting State:*\\n\";\n  msg += podsWaiting.map(p => `• [${p.namespace}] \\`${p.pod}\\` – reason: *${p.reason}*`).join(\"\\n\") + \"\\n\\n\";\n}\n\n// Pods Restarts\nif (podsRestarts.length > 0) {\n  msg += \":repeat: *Pods with Restart Spike (5m):*\\n\";\n  msg += podsRestarts.map(p => `• [${p.namespace}] \\`${p.pod}\\` (container: ${p.container}) – restarts: ${p.value}`).join(\"\\n\") + \"\\n\\n\";\n}\n\nreturn [{ json: { text: msg.trim() } }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "27e4b29b-88be-432f-b319-b938cce8210f",
+        "name": "Pods Running State",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -220,
+          340
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=sum(kube_pod_status_phase{phase=\"Running\"}) by (namespace, pod)",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "c02b93c4-3feb-4cbf-b2a2-08ab5ab98783",
+        "name": "Map Prometheus results into namespace/service",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          200,
+          -460
+        ],
+        "parameters": {
+          "jsCode": "// Map Prometheus results into { \"<namespace>/<service>\": value }\nconst out = {};\nfor (const r of $json[\"data\"][\"result\"]) {\n  const ns = r.metric.namespace;\n  const svc = r.metric.service;\n  const val = parseFloat(r.value[1]);\n  out[`${ns}/${svc}`] = val;\n}\nreturn [{ json: out }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a956b2e8-cdf2-41a2-b7f2-64c4babf6e67",
+        "name": "Map Prometheus results into namespace/service1",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          200,
+          -40
+        ],
+        "parameters": {
+          "jsCode": "// Map Prometheus results into { \"<namespace>/<service>\": value }\nconst out = {};\nfor (const r of $json[\"data\"][\"result\"]) {\n  const ns = r.metric.namespace;\n  const svc = r.metric.service;\n  const val = parseFloat(r.value[1]);\n  out[`${ns}/${svc}`] = val;\n}\nreturn [{ json: out }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "85775145-07dc-4647-94be-b5ed3a4dd5f5",
+        "name": "Normalization Node",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          160,
+          1120
+        ],
+        "parameters": {
+          "jsCode": "const prom = $json;\nconst results = [];\n\nif (prom.data && prom.data.result) {\n  for (const r of prom.data.result) {\n    results.push({\n      type: \"pod_restart\",\n      namespace: r.metric.namespace,\n      pod: r.metric.pod,\n      container: r.metric.container || \"unknown\",\n      value: Math.round(Number(r.value[1])) // round off decimals\n    });\n  }\n}\n\nreturn results.map(r => ({ json: r }));\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "187490ee-ce35-4264-95f1-31131918ee09",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -980,
+          720
+        ],
+        "parameters": {
+          "content": "⏲ Runs every 5 minutes\n\nKicks off the monitoring workflow automatically\n\nEnsures continuous health checks of pods & endpoints"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8564d65f-ab8b-47c2-87e3-140a6fc05da8",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -320,
+          -280
+        ],
+        "parameters": {
+          "content": "Runs a Prometheus query for current service endpoints\n\nFetches real-time endpoint data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "36aa2ee7-b5c1-4ef4-bff2-2d97b00072cf",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          140,
+          -280
+        ],
+        "parameters": {
+          "content": "Maps the raw Prometheus query result into structured format:\nnamespace → service → endpoint"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4bd71c97-a234-4887-93ff-af1f51fd7280",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -300,
+          100
+        ],
+        "parameters": {
+          "content": "Runs a Prometheus query for endpoints 5 minutes ago\n\nUseful for comparing trends / changes"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f140b207-760e-4f46-981d-00de30d96adf",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          120,
+          140
+        ],
+        "parameters": {
+          "content": "Maps endpoint data from 5 minutes ago\n\nNormalizes it into namespace/service format"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fe62ffac-c069-4dbf-bba1-2e5fdb3bcd70",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          620,
+          80
+        ],
+        "parameters": {
+          "content": "Merges current and 5-min old endpoint data\n\nAllows comparison for detecting endpoint changes"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "14e5b194-d5a6-4e3e-b638-a50d977ecf5b",
+        "name": "Merge (endpoints)",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          700,
+          -120
+        ],
+        "parameters": {},
+        "typeVersion": 3.2
+      },
+      {
+        "id": "32a8c08c-556e-4a47-a437-ac16946c2704",
+        "name": "Current endpoints",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -240,
+          -460
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=sum by (namespace, service) (kube_endpoint_address_available)",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "9ff7200d-c20c-47bf-ad02-eb6f19d36b65",
+        "name": "Endpoints 5m ago",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -240,
+          -40
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=sum by (namespace, service) (kube_endpoint_address_available offset 5m)",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "6ee1beaa-23bb-466f-aecf-7cde506a809d",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -280,
+          500
+        ],
+        "parameters": {
+          "content": "Queries Prometheus for pods in Running state\n\nHelps verify overall cluster health"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f489089f-4587-49a1-8a84-8938d31b7d49",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -280,
+          840
+        ],
+        "parameters": {
+          "content": "Queries Prometheus for pods stuck in Not Ready state\n\nUseful for spotting readiness probe failures"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "deb8cc8f-684c-4f70-82ac-eac1f97e1ff2",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -240,
+          1240
+        ],
+        "parameters": {
+          "content": "Queries pods in CrashLoopBackOff or terminated with error\n\nCritical for alerting on failed workloads"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5b026032-b8f2-4479-a6a0-c17abb4ee90e",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -280,
+          1640
+        ],
+        "parameters": {
+          "content": "Queries pods that restarted multiple times in last 5 minutes\n\nDetects unhealthy pods with restart loops"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2ffe714e-94de-4789-a60e-0d5f57dd7aca",
+        "name": "Sticky Note10",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          540,
+          1220
+        ],
+        "parameters": {
+          "content": "Normalizes pod restart data\n\nEnsures consistent format before merging"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "317d2898-3084-46bf-b62d-9cfc9032bb9d",
+        "name": "Sticky Note11",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1040,
+          740
+        ],
+        "parameters": {
+          "content": "Merges all pod health data (running, not ready, crashloop, restarts, endpoints)\n\nProduces a single combined dataset"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9c5263e2-a9b5-4bf3-9ed7-145b8c22f0d0",
+        "name": "Merge All data collected",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          1180,
+          520
+        ],
+        "parameters": {
+          "numberInputs": 6
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "8aaddff7-b4a2-49b1-ab55-442f4f830231",
+        "name": "Sticky Note12",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1420,
+          740
+        ],
+        "parameters": {
+          "content": "Cleans and structures merged data\n\nRemoves duplicates / empty values"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "efe1f39c-3909-4a96-9015-e0cb7dcb3381",
+        "name": "Sticky Note13",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1820,
+          740
+        ],
+        "parameters": {
+          "content": "Converts monitoring results into human-readable Slack message format\n\nAdds severity & summary tags"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dcb941ad-ef98-480d-a187-f37d1868f0ca",
+        "name": "Sticky Note14",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2160,
+          740
+        ],
+        "parameters": {
+          "content": "Sends the final alert message to Slack channel via webhook\n\nNotifies DevOps team instantly"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2e1fab83-c020-4b0e-bb17-093c1500c5cc",
+        "name": "Containers Not Ready",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -220,
+          680
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=kube_pod_container_status_ready == 0",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "dae09119-ffca-4864-bdb4-4474311bafcd",
+        "name": "Pod Pending State",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -180,
+          1880
+        ],
+        "parameters": {
+          "url": "http://prometheus-kube-prometheus-prometheus.monitoring:9090/api/v1/query?query=kube_pod_status_phase{phase=\"Pending\"} > 0",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "73454815-0054-48f8-9c1b-7b7395c11660",
+        "name": "Sticky Note15",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1380,
+          -460
+        ],
+        "parameters": {
+          "width": 580,
+          "height": 760,
+          "content": "📌 Trigger → Runs every 5 minutes via Cron ⏱️.\n\n📌 Prometheus Queries → Collects different metrics:\n\n🔁 Pod restarts\n\n⏳ Pending pods\n\n🚫 Not ready pods\n\n⚙️ Service discovery counts\n\n📌 Normalization Layer → All metrics transformed into a standard JSON object schema (pod_restart, pod_waiting_reason, pod_not_ready, service).\n\n📌 Merging Node → Combines Prometheus Service Discovery and Pods/Containers normalization streams into a single pipeline.\n\n📌 Error Filtering → Keeps only meaningful values (> 0 for errors, drop noise).\n\n📌 Slack Delivery → Sends structured health updates with emojis.\n\n📌 Deduplication → Avoids duplicate alerts in Slack.\n\n📌 Aggregation (5m window) → Sends summary updates with grouped insights"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "70d006e9-27b5-46cf-bec4-5155e6a326c3",
+    "connections": {
+      "Normalization": {
+        "main": [
+          [
+            {
+              "node": "Slack formatter with summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Endpoints 5m ago": {
+        "main": [
+          [
+            {
+              "node": "Map Prometheus results into namespace/service1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Current endpoints": {
+        "main": [
+          [
+            {
+              "node": "Map Prometheus results into namespace/service",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge (endpoints)": {
+        "main": [
+          [
+            {
+              "node": "Merge All data collected",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pod Pending State": {
+        "main": [
+          [
+            {
+              "node": "Merge All data collected",
+              "type": "main",
+              "index": 5
+            }
+          ]
+        ]
+      },
+      "Normalization Node": {
+        "main": [
+          [
+            {
+              "node": "Merge All data collected",
+              "type": "main",
+              "index": 4
+            }
+          ]
+        ]
+      },
+      "Pods Running State": {
+        "main": [
+          [
+            {
+              "node": "Merge All data collected",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Containers Not Ready": {
+        "main": [
+          [
+            {
+              "node": "Merge All data collected",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Merge All data collected": {
+        "main": [
+          [
+            {
+              "node": "Normalization",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🕒 Every 5 Min Trigger": {
+        "main": [
+          [
+            {
+              "node": "Current endpoints",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Endpoints 5m ago",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Pods Running State",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Containers Not Ready",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "CrashLoopBackOff / Termination Reason",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Pod Restart Spike (last 5m)",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Pod Pending State",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pod Restart Spike (last 5m)": {
+        "main": [
+          [
+            {
+              "node": "Normalization Node",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Slack formatter with summary": {
+        "main": [
+          [
+            {
+              "node": "📤 Send Alerts to Slack",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "CrashLoopBackOff / Termination Reason": {
+        "main": [
+          [
+            {
+              "node": "Merge All data collected",
+              "type": "main",
+              "index": 3
+            }
+          ]
+        ]
+      },
+      "Map Prometheus results into namespace/service": {
+        "main": [
+          [
+            {
+              "node": "Merge (endpoints)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Map Prometheus results into namespace/service1": {
+        "main": [
+          [
+            {
+              "node": "Merge (endpoints)",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 32,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 5
+      },
+      "n8n-nodes-base.merge": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 16
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 8
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "John Pranay Kumar Reddy",
+    "username": "johnpranay",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/john-pranay-kumar-reddy-yaramala-370294162/"
+    ],
+    "avatar": "https://gravatar.com/avatar/b75f18a390f84d907c707ec538e20cbb168a6003200532339d265a209f988d36?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": [
+    {
+      "id": 2164,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/image_1ae98bdb44.png"
+    },
+    {
+      "id": 2165,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/image_9fbb159bc0.png"
+    }
+  ]
+}

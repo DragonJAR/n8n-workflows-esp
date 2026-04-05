@@ -1,0 +1,1372 @@
+{
+  "id": 9909,
+  "name": "Send multi-city weather forecasts with AI-enhanced formatting from OpenWeatherMap to Gmail",
+  "views": 2491,
+  "recentViews": 1,
+  "totalViews": 2491,
+  "createdAt": "2025-10-19T18:13:57.270Z",
+  "description": "## Overview\n\nThis workflow automates weather forecast delivery by collecting city names, fetching 5-day forecasts from OpenWeatherMap, and generating professionally formatted HTML emails using GPT-4. The AI creates condition-based color-coded reports with safety precautions and sends them via Gmail.\n\n## How It Works\n\nA form trigger collects up to three city names, which are geocoded via OpenWeatherMap API to retrieve coordinates and 5-day forecasts. \n\nJavaScript nodes process the raw weather data into daily summaries, calculating temperature ranges, precipitation levels, wind speeds, and dominant weather conditions. \n\nGPT-4 then generates professionally formatted HTML emails with condition-based color coding: The AI intelligently adds contextual safety warnings for heavy rain, extreme heat, high winds, and thunderstorms. \n\nA validation node ensures proper JSON formatting before Gmail sends the final briefing.\n\n## Use Cases\n\n• Field ops & construction crew briefings\n• Travel planning and itinerary preparation\n• Outdoor event planning & coordination\n• Logistics and transportation route planning\n• Real estate property viewing scheduling\n• Sports and recreational activity planning\n\n## Setup Requirements\n\n1) OpenWeatherMap API credentials\n2) OpenAI API key\n3) Gmail OAuth2 authentication\n\n## Need Help?\n\nJoin the [Discord](https://discord.com/invite/XPKeKXeB7d) or ask in the [Forum](https://community.n8n.io/)!\nREADME file available at https://tinyurl.com/MulticityWeatherForecast\n\n\n\n\n\n\n\n",
+  "workflow": {
+    "id": "MQmMLg34LuvMsRan",
+    "meta": {
+      "instanceId": "a24c3628d7fa97ff1f4002e54a6f44641e116c70a069e29f6d0359e4681ff811",
+      "templateId": "806",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Weather prediction in 3 cities",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "45a9c8c7-b596-4f48-baf8-09a46e4004df",
+        "name": "JS - Validate JSON from LLM",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1824,
+          16
+        ],
+        "parameters": {
+          "jsCode": "function extractRaw(o) {\n  if (typeof o === 'string') return o;\n  const m = o.message || o.messages || o;\n  if (typeof m?.content === 'string') return m.content;\n  if (Array.isArray(m?.content)) {\n    const first = m.content[0];\n    if (typeof first?.text?.value === 'string') return first.text.value;\n    if (typeof first?.text === 'string') return first.text;\n  }\n  if (Array.isArray(m)) {\n    const c = m[0]?.content;\n    if (typeof c === 'string') return c;\n    if (Array.isArray(c)) {\n      const first = c[0];\n      if (typeof first?.text?.value === 'string') return first.text.value;\n      if (typeof first?.text === 'string') return first.text;\n    }\n  }\n  return JSON.stringify(o);\n}\nfunction tryParseJSON(s) {\n  if (!s || typeof s !== 'string') return null;\n  try { return JSON.parse(s); } catch {}\n  const start = s.indexOf('{');\n  const end = s.lastIndexOf('}');\n  if (start >= 0 && end > start) {\n    const candidate = s.slice(start, end + 1);\n    try { return JSON.parse(candidate); } catch {}\n  }\n  return null;\n}\n\nconst raw = extractRaw($json);\nconst parsed = tryParseJSON(raw);\n\nif (parsed && parsed.subject && parsed.html) {\n  return [{ subject: parsed.subject, html: parsed.html, ok: true }];\n} else {\n  return [{ ok: false, reason: 'bad_json', raw }];\n}\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f837e628-3bac-4d22-afef-32ba3df0c016",
+        "name": "GMAIL - Send Weather Briefing",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          1712,
+          352
+        ],
+        "webhookId": "9043b9cb-2579-49d5-8812-f39b84575dc7",
+        "parameters": {
+          "sendTo": "<<user@example.com>>",
+          "message": "={{ $('LLM - AI Weather Briefing Composer').item.json.message.content.html }}",
+          "options": {},
+          "subject": "={{ $('LLM - AI Weather Briefing Composer').item.json.message.content.subject }}"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "b6c7d8b2-0a69-472d-b508-3453eadeea4b",
+        "name": "JS - Bundle Cities for LLM",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1328,
+          96
+        ],
+        "parameters": {
+          "jsCode": "// Pack all incoming items into one payload for the LLM.\nconst cities = items.map(i => ({\n  city: i.json.city,\n  country: i.json.country,\n  summaries: i.json.summaries\n}));\nreturn [{ cities }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e4a3a918-3b48-44ba-a463-3d77786fdc9a",
+        "name": "JS - Build Daily Summaries (5 days)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1216,
+          288
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// We need to get the asked city from Pick Lat/Lon node\n// Since we can't use $items() reliably, we'll store it differently\n\n// The OpenWeatherMap response has city.name which is the API's name\n// But we need the original asked city name\n// Check if we have it in the input, otherwise fall back to API name\nconst apiCityName = $json.city?.name || 'City';\nconst apiCountry = $json.city?.country || '';\nconst tzOffset = $json.city?.timezone || 0; // seconds\nconst data = $json.list || [];\nconst units = 'metric';\n\n// Use the API city name for now - we'll fix this in the next step\nconst city = apiCityName;\nconst country = apiCountry;\n\nfunction toLocalDateStr(dt) {\n  // dt is unix seconds; shift by city timezone\n  const d = new Date((dt + tzOffset) * 1000);\n  return d.toISOString().slice(0,10); // YYYY-MM-DD\n}\n\n// Group by day\nconst days = {};\nfor (const p of data) {\n  const day = toLocalDateStr(p.dt);\n  if (!days[day]) days[day] = { points: [] };\n  days[day].points.push(p);\n}\n\n// Aggregate per day\nconst daySummaries = Object.entries(days).map(([date, obj]) => {\n  const pts = obj.points;\n\n  const temps = pts.map(p => p.main.temp);\n  const min = Math.min(...temps);\n  const max = Math.max(...temps);\n\n  // wind\n  const windMax = Math.max(...pts.map(p => (p.wind?.gust ?? p.wind?.speed ?? 0)));\n\n  // rain total (mm)\n  const rain = pts.reduce((acc, p) => acc + (p.rain?.['3h'] || 0), 0);\n\n  // pop average (precip probability 0..1)\n  const popAvg = pts.reduce((a,p)=>a+(p.pop||0),0) / (pts.length || 1);\n\n  // humidity average\n  const humAvg = pts.reduce((a,p)=>a+(p.main?.humidity||0),0) / (pts.length || 1);\n\n  // dominant condition by frequency\n  const counts = {};\n  for (const p of pts) {\n    const desc = (p.weather?.[0]?.main || 'Other');\n    counts[desc] = (counts[desc] || 0) + 1;\n  }\n  const dominant = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'Other';\n\n  return {\n    date,\n    min_temp: Number(min.toFixed(1)),\n    max_temp: Number(max.toFixed(1)),\n    dominant_condition: dominant,\n    rain_mm: Number(rain.toFixed(1)),\n    precip_prob_avg: Number((popAvg*100).toFixed(0)),\n    wind_max: Number(windMax.toFixed(1)),\n    humidity_avg: Number(humAvg.toFixed(0)),\n    unit_temp: units === 'metric' ? '°C' : '°F',\n    unit_wind: units === 'metric' ? 'm/s' : 'mph'\n  };\n}).sort((a,b)=>a.date.localeCompare(b.date));\n\n// keep only next 5 days\nconst next5 = daySummaries.slice(0,5);\n\nreturn {\n  city,\n  country,\n  timezone_offset_seconds: tzOffset,\n  summaries: next5\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0a824d7f-d3d3-4c8e-b782-36d5c94191ae",
+        "name": "OpenWeatherMap (OWM) - 5 Day Forecast (by City)",
+        "type": "n8n-nodes-base.openWeatherMap",
+        "position": [
+          1024,
+          80
+        ],
+        "parameters": {
+          "cityName": "={{ $json.asked_city }}",
+          "operation": "5DayForecast"
+        },
+        "credentials": {
+          "openWeatherMapApi": {
+            "id": "credential-id",
+            "name": "openWeatherMapApi Credential"
+          }
+        },
+        "executeOnce": false,
+        "typeVersion": 1
+      },
+      {
+        "id": "2ad3a2e8-3605-4203-a113-44fe99c34e66",
+        "name": "JS - Pick Lat/Lon",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          640,
+          288
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const asked = $json.city || null;\nconst location = $json.body?.[0] || $json.body;\n\nif (!location || !location.lat || !location.lon) {\n  throw new Error('No valid geocoding results for: ' + asked);\n}\n\nreturn {\n  asked_city: asked,\n  city_from_api: location.name || asked,\n  country: location.country || null,\n  lat: location.lat,\n  lon: location.lon\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e6202cc9-8516-4c12-beea-1c3dca68dc8a",
+        "name": "SET - Carry Asked City to Forecast",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          832,
+          288
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "2c7d6017-02ca-4e76-ab6e-000707eea2ab",
+                "name": "asked_city",
+                "type": "string",
+                "value": "={{ $json.asked_city }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "d2f43ed1-2f4a-476b-8e38-4277ce72e786",
+        "name": "MERGE - Pair Cities",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          464,
+          288
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {
+            "includeUnpaired": false
+          },
+          "combineBy": "combineByPosition"
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "5dd95724-b5fe-4230-87b4-4554f1dc74ea",
+        "name": "HTTP - OWM Geocoding",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          224,
+          32
+        ],
+        "parameters": {
+          "url": "https://api.openweathermap.org/geo/1.0/direct\n",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "q",
+                "value": "=={{ encodeURIComponent($json.city) }}"
+              },
+              {
+                "name": "limit",
+                "value": "1"
+              },
+              {
+                "name": "appid",
+                "value": "<<YOUR_API_KEY>>"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "d574f191-aed1-472c-80e0-96f22ef14480",
+        "name": "JS - Normalize City Inputs",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          16,
+          304
+        ],
+        "parameters": {
+          "jsCode": "// Collect only city names from the form payload\n// Filter out metadata fields like submittedAt and formMode\nconst cities = [];\n\nfor (const [key, value] of Object.entries($json)) {\n  // Exclude known metadata fields\n  if (key === 'submittedAt' || key === 'formMode') {\n    continue;\n  }\n  \n  // Include all other string values that are not empty\n  if (typeof value === 'string' && value.trim()) {\n    cities.push(value.trim());\n  }\n}\n\n// Limit to 3 cities and create one item per city\nreturn cities.slice(0, 3).map(c => ({ city: c }));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "11ec0415-f62f-4e61-8416-7468c235e2b7",
+        "name": "TRIGGER - Input City Names",
+        "type": "n8n-nodes-base.formTrigger",
+        "position": [
+          -160,
+          304
+        ],
+        "webhookId": "37fec581-130f-4c8f-9aad-33f0832f2fd3",
+        "parameters": {
+          "options": {},
+          "formTitle": "Weather predictor demo task",
+          "formFields": {
+            "values": [
+              {
+                "fieldLabel": "Enter City Name 1",
+                "placeholder": "eg: Hyderabad",
+                "requiredField": true
+              },
+              {
+                "fieldLabel": "Enter City Name 2",
+                "placeholder": "eg: Bangalore",
+                "requiredField": true
+              },
+              {
+                "fieldLabel": "Enter City Name 3",
+                "placeholder": "Chennai",
+                "requiredField": true
+              }
+            ]
+          },
+          "formDescription": "It provides the weather prediction of 3 cities and provide general tips and precuations"
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "7b1dfae5-be7d-4d76-9f6c-3bf3bc0eb271",
+        "name": "LLM - AI Weather Briefing Composer",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          1520,
+          16
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4o-mini",
+            "cachedResultName": "GPT-4O-MINI"
+          },
+          "options": {},
+          "messages": {
+            "values": [
+              {
+                "role": "system",
+                "content": "=You are an expert meteorologist creating professional weather briefings. Return STRICT JSON with keys: subject, html. Use clear, actionable language. No conversational text outside the JSON.\n\n"
+              },
+              {
+                "content": "=You are an expert meteorologist creating professional weather briefings. Return STRICT JSON with keys: subject, html. Use clear, actionable language. No conversational text outside the JSON.\n```\n\n## **Revised User Prompt:**\n```\nCreate a professional 5-day weather forecast email for EACH city in this JSON:\n{{ JSON.stringify($json.cities) }}\n\nREQUIREMENTS:\n\n📋 Structure:\n- Start with a friendly greeting and brief intro\n- For each city, use H2 with \"🌤️ City — Country\"\n- HTML table with these columns: Date | Temp Range | Conditions | Rain(mm) | Precip(%) | Wind(m/s) | General Tips | Precautions\n- Add a concluding paragraph with travel/planning tips across all cities\n\n🎨 Styling (use inline CSS):\n- Header row: background #4A90E2 (blue), white text, bold, font-size: 14px\n- Borders: 1px solid #DEE2E6 on all cells\n- Padding: 10px in cells\n- Font: Arial, sans-serif, font-size: 13px\n- Center-align all table content\n- Table width: 100%, border-collapse: collapse\n\n🌈 CONDITION-BASED ROW COLORS (apply to entire row based on dominant_condition):\n- \"Clear\": background-color: #FFFACD (light yellow)\n- \"Clouds\": background-color: #ADD8E6 (light blue)\n- \"Rain\": background-color: #FFB6C6 (light red/pink)\n- Extremely sunny (max_temp ≥ 35°C AND condition is \"Clear\"): background-color: #FFBF00 (amber)\n- Default (other conditions): background-color: #FFFFFF (white)\n\n📊 Content Guidelines:\n- Date: Format as \"YYYY-MM-DD (Day)\" - e.g., \"2025-10-19 (Sun)\"\n- Temp Range: Show as \"Min°C / Max°C\" (e.g., \"24° / 32°\")\n- Conditions: Add weather emoji + condition name:\n  - Clear: ☀️ Clear\n  - Clouds: ☁️ Clouds\n  - Rain: 🌧️ Rain\n  - Thunderstorm: ⛈️ Thunderstorm\n- Rain: Show mm value\n- Precip%: Show percentage value\n- Wind: Show m/s value\n- General Tips: Brief everyday advice (e.g., \"Stay hydrated\", \"Dress lightly\")\n- Precautions: Specific safety warnings (detailed below)\n\n⚠️ PRECAUTIONS Column Content (show relevant warnings only, or \"None\" if weather is safe):\n- Heavy rain (rain_mm ≥ 10 OR precip_prob_avg ≥ 70): \"⚠️ Heavy rain expected. Carry umbrella, avoid travel if possible. Expect waterlogging.\"\n- Moderate rain (rain_mm ≥ 5 AND < 10 OR precip_prob_avg ≥ 50 AND < 70): \"☔ Rain likely. Carry rain gear, drive carefully.\"\n- Extreme heat (max_temp ≥ 35°C): \"🌡️ HEAT ALERT: Stay indoors during peak hours (12-4 PM). Drink 3+ liters water. Risk of heat stroke.\"\n- High heat (max_temp ≥ 32°C AND < 35°C): \"☀️ Very hot. Limit outdoor activities. Use sunscreen SPF 50+.\"\n- High wind (wind_max ≥ 10 m/s): \"💨 Strong winds expected. Secure loose objects. Avoid outdoor hoardings.\"\n- Thunderstorms (if \"Thunderstorm\" in conditions): \"⛈️ STORM WARNING: Stay indoors. Unplug electronics. Avoid water bodies.\"\n- Multiple conditions: Combine warnings separated by \" | \"\n- Safe weather: \"None\" or \"✅ Safe weather conditions\"\n\n💡 GENERAL TIPS Column Content (positive, practical daily advice):\n- Clear & pleasant (max < 32°C): \"Great for outdoor activities\"\n- Clear & hot (max ≥ 32°C): \"Stay hydrated, use sun protection\"\n- Clouds: \"Comfortable weather, good for sightseeing\"\n- Light rain: \"Keep umbrella handy\"\n- Heavy rain: \"Plan indoor activities\"\n- Windy: \"Secure loose items\"\n\n📝 Email Subject:\nCreate an engaging subject that highlights the most significant weather event:\n- If any day has rain_mm ≥ 10: \"⚠️ Heavy Rain Alert: [City Names] | 5-Day Forecast\"\n- If any day has max_temp ≥ 35°C: \"🌡️ Heat Wave Alert: [City Names] | 5-Day Forecast\"\n- If all days are clear: \"☀️ Sunny Week Ahead: [City Names] | 5-Day Forecast\"\n- Otherwise: \"5-Day Weather Forecast: [City Names]\"\n\n🎯 Conclusion Paragraph:\nInclude:\n- Overall weather pattern across all cities\n- Best days for outdoor activities/travel\n- Most important safety advisory if any extreme weather\n- Friendly closing line\n\nCRITICAL: Apply the condition-based background color to the ENTIRE ROW (all cells in that row), not just the Conditions column.\n\nReturn ONLY valid JSON:\n{\"subject\":\"...\",\"html\":\"...\"}"
+              }
+            ]
+          },
+          "jsonOutput": true
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "07e5c472-3d02-4579-a1ef-77bd8ea44bf5",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -816,
+          -512
+        ],
+        "parameters": {
+          "width": 608,
+          "height": 1056,
+          "content": "# Try Out\n\n## Overview\n### This workflow automates weather forecast delivery by collecting city names, fetching 5-day forecasts from OpenWeatherMap, and generating professionally formatted HTML emails using GPT-4. The AI creates condition-based color-coded reports with safety precautions and sends them via Gmail.\n\n## How It Works\nA form trigger collects up to three city names, which are geocoded via OpenWeatherMap API to retrieve coordinates and 5-day forecasts.\n\nJavaScript nodes process the raw weather data into daily summaries, calculating temperature ranges, precipitation levels, wind speeds, and dominant weather conditions.\n\nGPT-4 then generates professionally formatted HTML emails with condition-based color coding: The AI intelligently adds contextual safety warnings for heavy rain, extreme heat, high winds, and thunderstorms.\n\nA validation node ensures proper JSON formatting before Gmail sends the final briefing.\n\n## Use Cases\n\n• Field ops & construction crew briefings\n• Travel planning and itinerary preparation\n• Outdoor event planning & coordination\n• Logistics and transportation route planning\n• Real estate property viewing scheduling\n• Sports and recreational activity planning\n\n## Setup Requirements\n\nOpenWeatherMap API credentials\nOpenAI API key\nGmail OAuth2 authentication\n\n## Need Help?\nJoin the Discord or ask in the Forum!\nREADME file available at https://tinyurl.com/MulticityWeatherForecast"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "39f8510b-c1a3-44b7-97bd-fe491bd72d15",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          176,
+          -160
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 208,
+          "height": 656,
+          "content": "## Geocoding (OWM)\n### Resolve each city to lat/lon using OpenWeather Geocoding API."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "746f1466-187a-421b-8160-b4a982dd02a8",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          400,
+          96
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 560,
+          "height": 400,
+          "content": "## Pairing Cities ↔ Coordinates\n### Align normalized city with its geocode (by position) and select asked_city, country, lat, lon."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fd98f570-9beb-4cb7-9de3-eb1fb2599a33",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          976,
+          -144
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 208,
+          "height": 640,
+          "content": "## Forecast Retrieval\n### Pull 5-day forecast per city by coordinates."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7864bbf7-eeab-43a6-ab00-7d1786a5f414",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1456,
+          -144
+        ],
+        "parameters": {
+          "color": 2,
+          "width": 576,
+          "height": 352,
+          "content": "## LLM AI Weather Briefing\n### Ask LLM to produce subject + HTML for an email; validate/extract the result."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8ac37160-d037-42a3-8900-c70f326c5901",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1200,
+          -144
+        ],
+        "parameters": {
+          "color": 4,
+          "height": 640,
+          "content": "## Summarization & Packaging\n### Convert raw OWM output into per-day tables & guidance; bundle all cities into one payload."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fe07b361-deae-4f13-b3a7-d85804d5d7a7",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1456,
+          224
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 576,
+          "height": 288,
+          "content": "## Delivery \n### Send the formatted briefing to the recipient(s)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0d440118-543a-44ca-bdc1-03187c110850",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -192,
+          112
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 352,
+          "height": 384,
+          "content": "## Input & Normalization\n### Collect 3 city names from the form and normalize (trim, title-case, dedupe)."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "dd0565ff-6b0c-4003-a4a6-fd5579f32295",
+    "connections": {
+      "JS - Pick Lat/Lon": {
+        "main": [
+          [
+            {
+              "node": "SET - Carry Asked City to Forecast",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "MERGE - Pair Cities": {
+        "main": [
+          [
+            {
+              "node": "JS - Pick Lat/Lon",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP - OWM Geocoding": {
+        "main": [
+          [
+            {
+              "node": "MERGE - Pair Cities",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "JS - Bundle Cities for LLM": {
+        "main": [
+          [
+            {
+              "node": "LLM - AI Weather Briefing Composer",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "JS - Normalize City Inputs": {
+        "main": [
+          [
+            {
+              "node": "HTTP - OWM Geocoding",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "MERGE - Pair Cities",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "TRIGGER - Input City Names": {
+        "main": [
+          [
+            {
+              "node": "JS - Normalize City Inputs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "JS - Validate JSON from LLM": {
+        "main": [
+          [
+            {
+              "node": "GMAIL - Send Weather Briefing",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "LLM - AI Weather Briefing Composer": {
+        "main": [
+          [
+            {
+              "node": "JS - Validate JSON from LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SET - Carry Asked City to Forecast": {
+        "main": [
+          [
+            {
+              "node": "OpenWeatherMap (OWM) - 5 Day Forecast (by City)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "JS - Build Daily Summaries (5 days)": {
+        "main": [
+          [
+            {
+              "node": "JS - Bundle Cities for LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenWeatherMap (OWM) - 5 Day Forecast (by City)": {
+        "main": [
+          [
+            {
+              "node": "JS - Build Daily Summaries (5 days)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 20,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 5
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 8
+      },
+      "n8n-nodes-base.formTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.openWeatherMap": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Sridevi Edupuganti",
+    "username": "edupuganti",
+    "bio": "I help customers experience 10x faster ROI through AI Automation.\n\nAI Generalist | Pursuing Generative AI & ML(IIT-G) | Google Certified Prompt Engineer | Ex-VP | Ex-Microsoft | ISB Certified CTO & AI Leader | Azure & AI Strategist | 5X Azure | n8n level2 | Wellness Advocate & Cult Ninja",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/srideviedupuganti/"
+    ],
+    "avatar": "https://gravatar.com/avatar/cbe6a8969d43c7ef677a24799bf237865adfdfed736d030a4c0eb446e96ac0ba?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "icon": "file:openWeatherMap.svg",
+      "name": "n8n-nodes-base.openWeatherMap",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-telegram-bots-with-n8n-a-no-code-platform/",
+                "icon": "💬",
+                "label": "Creating Telegram Bots with n8n, a No-Code Platform"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.openweathermap/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/openweathermap/"
+              }
+            ]
+          },
+          "categories": [
+            "Miscellaneous",
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "OpenWeatherMap"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2LjA2OTUgMjIuODgzM0MzNS43NjM3IDIyLjg3MDggMzUuNDU2MiAyMi44NzUgMzUuMTQ4MSAyMi44NzkxQzM0Ljk5MzggMjIuODgxMiAzNC44Mzk1IDIyLjg4MzMgMzQuNjg1MSAyMi44ODMzQzMzLjc0OTYgMjIuODgzMyAzMy4yNzk0IDIyLjg4MzMgMzMuMDQ4MSAyMi42NDgyQzMyLjgxNDMgMjIuNDEwNiAzMi44MjQ3IDIxLjkzMjkgMzIuODQ1NSAyMC45NzIzQzMyLjkyNTkgMTguNzYyMSAzMi41Mjc4IDE2LjU2MDcgMzEuNjc4NSAxNC41MTg3QzMwLjgyOTMgMTIuNDc2NyAyOS41NDg4IDEwLjY0MjIgMjcuOTI0OCA5LjE0MDg5VjkuMTIyMDhMMjcuNTg2MyA4LjgyMTEyQzI1Ljg5NDggNy4zMzc0MSAyMy44OTg1IDYuMjQyNTIgMjEuNzM4MSA1LjYxMzU5QzE5LjU3NzcgNC45ODQ2NiAxNy4zMDU3IDQuODM2OTcgMTUuMDgyMSA1LjE4MDkxQzEyLjg1ODUgNS41MjQ4NiAxMC43MzczIDYuMzUyMDcgOC44Njc5MiA3LjYwNDMzQzYuOTk4NSA4Ljg1NjU1IDUuNDI2MzQgMTAuNTAzNCA0LjI2MjExIDEyLjQyODhMNC4yMzU3OCAxMi40NzAyQzQuMjA5NDUgMTIuNTE1NCA0LjE4MjcgMTIuNTYwNSA0LjE1NTk1IDEyLjYwNTdDNC4xMDI0NSAxMi42OTU5IDQuMDQ4OTMgMTIuNzg2MiAzLjk5ODc4IDEyLjg3NjVDMi41MDA1NiAxNS41MjYxIDEuODI2MDcgMTguNTYyMSAyLjA2MTM3IDIxLjU5NjdDMi4wNjY4IDIxLjY4NzYgMi4wODI1IDIxLjc4NjQgMi4wOTg2IDIxLjg4NzZDMi4xNzE3NiAyMi4zNDc2IDIuMjUzMDMgMjIuODU4NiAxLjQxNDMxIDIyLjkxNzJDMC41MzAyNTEgMjIuOTc3NCAtMC4xMzE4NTUgMjMuNDE3NSAwLjAyMjM4NTUgMjQuNDIyQzAuMTc2NjI2IDI1LjQyNjQgMC45NDc4MjggMjUuNTUwNiAxLjgwOTMyIDI1LjU1MDZDMi42OTk3OCAyNS41MzMgMy41OTE5MiAyNS41Mzg5IDQuNDgzNSAyNS41NDQ3QzQuOTI4OTQgMjUuNTQ3NiA1LjM3NDY4IDI1LjU1MDYgNS44MTk1NyAyNS41NTA2QzYuNjc3MjkgMjUuNTUwNiA3LjI5NDI2IDI1Ljg5NjcgNy4zMjQzNSAyNi44MDMzQzcuMzUwNjggMjcuNjIzNCA2LjgyNzc3IDI4LjA3ODYgNi4wMTg5NSAyOC4wODk5QzUuMDE0NTEgMjguMDg5OSA0LjM1OTkzIDI4LjU1MjYgNC40Mzg5MyAyOS41NjQ2QzQuNTE3OTMgMzAuNTc2NSA1LjM0NTU2IDMwLjY5MzIgNi4xOTk1MiAzMC42NzA2QzguNTk1ODkgMzAuNjUxOCAxMC45OTIzIDMwLjY0OCAxMy4zOTI0IDMwLjY3MDZDMTQuMjc2NSAzMC42NzA2IDE0LjkzMSAzMS4wNDY4IDE0Ljg3ODQgMzIuMDczOEMxNC44Mjk1IDMzLjAxMDUgMTQuMjIzOCAzMy4zMDc3IDEzLjM3MzYgMzMuMzA0SDguOTQ1NzVDOC4wMDkwMyAzMy4zMDQgNy4wOTExMSAzMy4zNTI5IDcuMDg3MzUgMzQuNTgzQzcuMDgzNTkgMzUuODEzMiA4LjAxMjc5IDM1Ljg1NDYgOC45NDU3NSAzNS44NTA4SDMwLjM4NTJDMzEuMjY1NSAzNS44NTA4IDMxLjk5NTMgMzUuNjg5IDMyLjAyMTYgMzQuNjM5NUMzMi4wNTE3IDMzLjUxMDkgMzEuMjY5MiAzMy4yODUxIDMwLjM1MTMgMzMuMzA3N0gyMi42MDU0QzIxLjczNjQgMzMuMzA3NyAyMS4xNjA4IDMyLjkzMTUgMjEuMTM0NSAzMi4wMjg3QzIxLjEwODIgMzEuMTI1OCAyMS43MDYzIDMwLjczNDUgMjIuNTQ5IDMwLjY3NDNDMjIuNzMyMiAzMC42NTkzIDIyLjkxNzEgMzAuNjY0MyAyMy4xMDE1IDMwLjY2OTNDMjMuMTkzNCAzMC42NzE4IDIzLjI4NTIgMzAuNjc0MyAyMy4zNzY2IDMwLjY3NDNDMjQuMjE5MyAzMC42NzQzIDI1LjAwNTYgMzAuNTgwMyAyNS4wNzMzIDI5LjUxNTdDMjUuMTQ4NSAyOC4zODcxIDI0LjM5NjEgMjguMTIgMjMuNDYzMiAyOC4xMTYyQzIyLjYxMyAyOC4wNzExIDIyLjEyMDEgMjcuNTc0NSAyMi4xMjAxIDI2LjgyMjFDMjIuMTIwMSAyNS45NjgxIDIyLjY4MDcgMjUuNTA1NCAyMy41Nzk4IDI1LjUzMTdIMzYuMDMxOUMzNi45Mzg1IDI1LjUzMTcgMzcuNTg5MyAyNS4yNDU4IDM3LjYxOTQgMjQuMjMzOUMzNy42NDk1IDIzLjIyMTkgMzYuOTM0NyAyMi45MjA5IDM2LjA2OTUgMjIuODgzM1oiIGZpbGw9IiNFQjZENEEiLz4KPHBhdGggZD0iTTM4LjgxMDUgMjguMTA3MlYyOC4xMDk2QzM5LjQ3NDMgMjguMTUwMyA0MCAyOC43MDE1IDQwIDI5LjM3NTVDNDAgMzAuMDQ5NSAzOS40NzQzIDMwLjYwMDcgMzguODEwNSAzMC42NDE1VjMwLjY0MzlIMzUuNDAzNFYzMC42MzczQzM0Ljc2NDEgMzAuNTcyMSAzNC4yNjUzIDMwLjAzMjEgMzQuMjY1MyAyOS4zNzU1QzM0LjI2NTMgMjguNzE5IDM0Ljc2NDEgMjguMTc5IDM1LjQwMzQgMjguMTEzOFYyOC4xMDcySDM4LjgxMDVaIiBmaWxsPSIjRUI2RDRBIi8+CjxwYXRoIGQ9Ik0zMS4zMzc4IDI4LjEwOTZWMjguMTA3MkgyNy45MzA3VjI4LjExMzhDMjcuMjkxMSAyOC4xNzg3IDI2Ljc5MiAyOC43MTg4IDI2Ljc5MiAyOS4zNzU1QzI2Ljc5MiAzMC4wMzIyIDI3LjI5MTEgMzAuNTcyNCAyNy45MzA3IDMwLjYzNzNWMzAuNjQzOUgzMS4zMzc4VjMwLjY0MTRDMzIuMDAxMyAzMC42MDA1IDMyLjUyNjggMzAuMDQ5NCAzMi41MjY4IDI5LjM3NTVDMzIuNTI2OCAyOC43MDE3IDMyLjAwMTMgMjguMTUwNiAzMS4zMzc4IDI4LjEwOTZaIiBmaWxsPSIjRUI2RDRBIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenWeatherMap",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 11,
+          "name": "Miscellaneous"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1225,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.formTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "table",
+            "submit",
+            "post"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.formtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "On form submission"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form Trigger",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 43,
+      "name": "Personal Productivity"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}

@@ -1,0 +1,826 @@
+{
+  "id": 10711,
+  "name": "Upload large files to Dropbox with chunking & web UI progress tracking",
+  "views": 36,
+  "recentViews": 0,
+  "totalViews": 36,
+  "createdAt": "2025-11-11T01:33:12.069Z",
+  "description": "# Dropbox Large File Upload System\n\n## How It Works\n\nThis workflow enables uploading large files (300MB+) to Dropbox through a web interface with real-time progress tracking. It bypasses Dropbox's 150MB single-request limit by breaking files into 8MB chunks and uploading them sequentially using Dropbox's upload session API.\n\n**Upload Flow:**\n\n1. **User accesses page** - Visits `/webhook/upload-page` and sees HTML form with file picker and folder path input\n2. **Selects file** - Chooses file and clicks \"Upload to Dropbox\" button\n3. **JavaScript initiates session** - Calls `/webhook/start-session` → Dropbox creates upload session → Returns `sessionId`\n4. **Chunk upload loop** - JavaScript splits file into 8MB chunks and for each chunk:\n   - Calls `/webhook/append-chunk` with sessionId, offset, and chunk binary data\n   - Dropbox appends chunk to session\n   - Progress bar updates (e.g., 25%, 50%, 75%)\n5. **Finalize upload** - After all chunks uploaded, calls `/webhook/finish-session` with final offset and target path\n6. **File committed** - Dropbox commits all chunks into complete file at specified path (e.g., `/Uploads/video.mp4`)\n\n**Why chunking?** Dropbox API has a 150MB limit for single `upload` requests. The upload session API (`upload_session/start`, `append_v2`, `finish`) allows unlimited file sizes by chunking.\n\n**Technical Architecture:**\n- Four webhook endpoints handle different stages (serve UI, start, append, finish)\n- All chunk data sent as `multipart/form-data` with binary blobs\n- Dropbox API requires cursor metadata (session_id, offset) in `Dropbox-API-Arg` header\n- `autorename: true` prevents file overwrites\n\n## Setup Steps\n\n**Time estimate: ~20-25 minutes (first time)**\n\n1. **Create Dropbox app** - Go to [Dropbox App Console](https://www.dropbox.com/developers/apps):\n   - Click \"Create app\"\n   - Choose \"Scoped access\" API\n   - Select \"Full Dropbox\" access type\n   - Name your app (e.g., \"n8n File Uploader\")\n   - Under Permissions tab, enable: `files.content.write`\n   - Copy App Key and App Secret\n\n2. **Configure n8n OAuth2 credentials** - In n8n:\n   - Create new \"Dropbox OAuth2 API\" credential\n   - Paste App Key and App Secret\n   - Set OAuth Redirect URL to your n8n instance (e.g., `https://your-n8n.com/rest/oauth2-credential/callback`)\n   - Complete OAuth flow to get access token\n\n3. **Connect credentials to HTTP nodes** - Add your Dropbox OAuth2 credential to these three nodes:\n   - \"Dropbox Start Session\"\n   - \"Dropbox Append Chunk\"\n   - \"Dropbox Finish Session\"\n\n4. **Activate workflow** - Click \"Active\" toggle to generate production webhook URLs\n\n5. **Customize default folder (optional)** - In \"Respond with HTML\" node:\n   - Find line: `&lt;input type=\"text\" id=\"dropboxFolder\" value=\"/Uploads/\" ...`\n   - Change `/Uploads/` to your preferred default path\n\n6. **Get upload page URL** - Copy the production webhook URL from \"Serve Upload Page\" node (e.g., `https://your-n8n.com/webhook/upload-page`)\n\n7. **Test upload** - Visit the URL, select a small file first (~50MB), choose folder path, click Upload\n\n## Important Notes\n\n**File Size Limits:**\n- Standard Dropbox API: 150MB max per request\n- This workflow: Unlimited (tested with 300MB+ files)\n- Chunk size: 8MB (configurable in HTML JavaScript `CHUNK_SIZE` variable)\n\n**Upload Behavior:**\n- Files with same name are auto-renamed (e.g., `video.mp4` → `video (1).mp4`) due to `autorename: true`\n- Upload is synchronous - browser must stay open until complete\n- If upload fails mid-process, partial chunks remain in Dropbox session (expire after 24 hours)\n\n**Security Considerations:**\n- Webhook URLs are public - anyone with URL can upload to your Dropbox\n- Add authentication if needed (HTTP Basic Auth on webhook nodes)\n- Consider rate limiting for production use\n\n**Dropbox API Quotas:**\n- Free accounts: 2GB storage, 150GB bandwidth/day\n- Plus accounts: 2TB storage, unlimited bandwidth\n- Upload sessions expire after 4 hours of inactivity\n\n**Progress Tracking:**\n- Real-time progress bar shows percentage (0-100%)\n- Status messages: \"Starting upload...\", \"✓ Upload complete!\", \"✗ Upload failed: [error]\"\n- Final response includes file path, size, and Dropbox file ID\n\n**Troubleshooting:**\n- If chunks fail: Check Dropbox OAuth token hasn't expired (refresh if needed)\n- If session not found: Ensure sessionId is passed correctly between steps\n- If finish fails: Verify target path exists and app has write permissions\n- If page doesn't load: Activate workflow first to generate webhook URLs\n\n**Performance:**\n- 8MB chunks = ~37 requests for 300MB file\n- Upload speed depends on internet connection and Dropbox API rate limits\n- Typical: 2-5 minutes for 300MB file on good connection\n\n**Pro tip:** Test with a small file (10-20MB) first to verify credentials and flow, then try larger files. Monitor n8n execution list to see each webhook call and troubleshoot any failures. For production, consider adding error handling and retry logic in the JavaScript.",
+  "workflow": {
+    "meta": {
+      "instanceId": "42bde649da4575cc0d49afcf8affcdbece40e5e40061aa2c9b7a8b3639284dfe",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "b1a6205f-e68e-4292-b778-e2156ec366ff",
+        "name": "Main Documentation",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          -160
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1fe62951-2fe8-4789-99ab-aa4466cc697c",
+        "name": "UI Background",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          -80
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c54a0055-5b9e-49bd-86d7-3060ee8e8c21",
+        "name": "UI Section Header",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          -160
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "39eddd42-6ea1-4458-8242-fe0197367a9e",
+        "name": "UI Detail",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          160,
+          64
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "15b8b6d2-317e-4c17-837e-d5e0a45a80ca",
+        "name": "Start Background",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          464,
+          -160
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "65a317b5-e1cd-419e-a7f9-41c9366812e6",
+        "name": "Start Section Header",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          464,
+          -160
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "78fc085b-4907-4379-ab64-d247616d8be5",
+        "name": "Start Detail",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          480,
+          64
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dce22af1-628a-46cd-b374-51678b663ffc",
+        "name": "Append Background",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          448
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8295dd0e-7ec8-4223-bae8-85761f51d222",
+        "name": "Append Section Header",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          432
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a235b7bb-e44c-4b83-9c8a-2d6941b58a08",
+        "name": "Append Detail",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -112,
+          672
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "06aee634-4697-4853-8e10-4056d77a0253",
+        "name": "Finish Background",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          464,
+          448
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3f44d87e-3a6e-44bc-83c1-91615b0d260b",
+        "name": "Finish Section Header",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          464,
+          432
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f599a537-7593-4561-a40b-d63c24e9b203",
+        "name": "Finish Detail",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          480,
+          672
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fd38b1ba-f39b-4097-85b1-8091f13d3dbd",
+        "name": "Credentials Detail",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          768,
+          64
+        ],
+        "parameters": {
+          "content": ""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "50dfaa3a-2350-40b4-a797-3c264603005c",
+        "name": "Serve Upload Page",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -48,
+          -64
+        ],
+        "webhookId": "upload-ui",
+        "parameters": {},
+        "typeVersion": 2.1
+      },
+      {
+        "id": "549b3787-c326-4b2f-8513-794a61bab2a6",
+        "name": "Respond with HTML",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          240,
+          -64
+        ],
+        "parameters": {},
+        "typeVersion": 1.4
+      },
+      {
+        "id": "137e1f83-4f74-495b-a39a-88e7075e1e52",
+        "name": "Start Session Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          544,
+          -64
+        ],
+        "webhookId": "start-session",
+        "parameters": {},
+        "typeVersion": 2.1
+      },
+      {
+        "id": "7ff8607d-848c-4032-9289-8e853fbf2895",
+        "name": "Dropbox Start Session",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          720,
+          -64
+        ],
+        "parameters": {},
+        "typeVersion": 4.2
+      },
+      {
+        "id": "6a3a5664-5645-4e75-8664-d1a2d31b12f6",
+        "name": "Respond Session ID",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          944,
+          -64
+        ],
+        "parameters": {},
+        "typeVersion": 1.4
+      },
+      {
+        "id": "ef758c8e-b005-428b-a22c-f3dffc904d01",
+        "name": "Append Chunk Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -80,
+          544
+        ],
+        "webhookId": "append-chunk",
+        "parameters": {},
+        "typeVersion": 2.1
+      },
+      {
+        "id": "4cd2d514-d7a9-4ff1-8fc1-d4749bad53eb",
+        "name": "Dropbox Append Chunk",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          128,
+          544
+        ],
+        "parameters": {},
+        "typeVersion": 4.2
+      },
+      {
+        "id": "0942636b-2b1e-4663-b55c-cf576d398920",
+        "name": "Respond Chunk OK",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          304,
+          544
+        ],
+        "parameters": {},
+        "typeVersion": 1.4
+      },
+      {
+        "id": "cc500b0c-e913-45b1-862b-92c6a3233eb1",
+        "name": "Finish Session Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          544,
+          544
+        ],
+        "webhookId": "finish-session",
+        "parameters": {},
+        "typeVersion": 2.1
+      },
+      {
+        "id": "e0c3cbc2-5e6e-485c-a62f-f6fc78435ca4",
+        "name": "Dropbox Finish Session",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          736,
+          544
+        ],
+        "parameters": {},
+        "typeVersion": 4.2
+      },
+      {
+        "id": "e9d0850f-28a9-4f7d-bcda-21df4b7df343",
+        "name": "Respond Complete",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          944,
+          544
+        ],
+        "parameters": {},
+        "typeVersion": 1.4
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Serve Upload Page": {
+        "main": [
+          [
+            {
+              "node": "Respond with HTML",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Append Chunk Webhook": {
+        "main": [
+          [
+            {
+              "node": "Dropbox Append Chunk",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dropbox Append Chunk": {
+        "main": [
+          [
+            {
+              "node": "Respond Chunk OK",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dropbox Start Session": {
+        "main": [
+          [
+            {
+              "node": "Respond Session ID",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Start Session Webhook": {
+        "main": [
+          [
+            {
+              "node": "Dropbox Start Session",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dropbox Finish Session": {
+        "main": [
+          [
+            {
+              "node": "Respond Complete",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Finish Session Webhook": {
+        "main": [
+          [
+            {
+              "node": "Dropbox Finish Session",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 25,
+    "nodeTypes": {
+      "n8n-nodes-base.webhook": {
+        "count": 4
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 14
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.respondToWebhook": {
+        "count": 4
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Anthony",
+    "username": "usascholar",
+    "bio": "I write code to save you headaches. I post workflows, that I had a hard time with or find was really needed. If you pay for one of my workflows, congratulations... it probably took me 10x the $$ amount in my personal time, figuring the darn thing out.",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/69eb505b47f7bb74259d4831868829a61ef61188161f33447e8438724895014f?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 535,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.respondToWebhook",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.respondtowebhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Respond to Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Respond to Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 36,
+      "name": "File Management"
+    }
+  ],
+  "image": []
+}

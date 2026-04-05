@@ -1,0 +1,2529 @@
+{
+  "id": 6494,
+  "name": "Automatically transfer Shopify order data to structured Airtable records",
+  "views": 232,
+  "recentViews": 0,
+  "totalViews": 232,
+  "createdAt": "2025-07-26T17:11:28.101Z",
+  "description": "Shopify Order Data to Airtable\n\nThis n8n template demonstrates how to capture incoming Shopify order webhooks, transform the data into a structured format, and insert each product line item as a separate record in an Airtable sheet. It provides both high-level order information and detailed product-level metrics, making it ideal for analytics, reporting, inventory management, and customer insights.\n\nGood to Know\n\nAirtable API Rate Limits: By default, Airtable allows 5 requests per second per base. Consider batching or adding delays if you process high volumes of orders.\n\nShopify Webhook Configuration: Ensure you have configured the orders/create webhook in your Shopify Admin to point to the n8n webhook node.\n\nField Mapping: The template maps standard Shopify fields; if your store uses custom order or line item properties, update the Function nodes accordingly.\n\nHow It Works\n\nWebhook Trigger: A Shopify orders/create webhook fires when a new order is placed.\n\nNormalize Order Data: The Function node extracts core order, customer, shipping, and billing details and computes financial totals (subtotal, tax, shipping, discounts).\n\nLine Item Breakdown: A second Function node builds an array of objects—one per line item—calculating per-item totals, tax/shipping allocation, and product attributes (color, size, material).\n\nCheck Customer Record: Optionally check against an Airtable \"Customers\" sheet to flag new vs existing customers.\n\nAuto-Increment Record ID: A Function node generates a running serial number for each Airtable record.\n\nInsert Records: The Airtable node writes each line item object into the target base and table, creating rich records with both order-level and product-level details.\n\nHow to Use\n\nClone the Template: Click \"Use Template\" in your n8n instance to import this workflow.\n\nConfigure Credentials:\n\nShopify Trigger: Add your Shopify store domain and webhook secret.\n\nAirtable Node: Set up your Airtable API key and select the base and table.\n\nReview Field Names: Match the field names in the Function nodes to the columns in your Airtable table.\n\nActivate Workflow: Turn on the workflow and place a test order in your Shopify store.\n\nVerify Records: Check your Airtable sheet to see the new order and its line items.\n\nRequirements\n\nn8n@latest\n\nShopify Store with orders/create webhook configured\n\nAirtable Account with a base and table ready to receive records\n\nCustomizing This Workflow\n\nAdd Custom Fields: Extend the Functions to include additional Shopify metafields, discounts, or customer tags.\n\nAlternative Destinations: Replace the Airtable node with Google Sheets, Supabase, or another database by swapping in the corresponding node.\n\nError Handling: Insert If/Wait nodes to retry on API failures or send notifications on errors.\n\nMulti-Currency Support: Adapt the currency logic to convert totals based on dynamic exchange rates.\n\n",
+  "workflow": {
+    "id": "KDiL56rl4YovAr9v",
+    "meta": {
+      "instanceId": "ac3395400729d0f53e6b8e43c425ec1af04a99e154bcd808417b3b72fa9dec1f",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Shopify Order Data",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "78d221dc-8297-4181-8a9e-e97c04fc97c3",
+        "name": "Code",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -100,
+          460
+        ],
+        "parameters": {
+          "jsCode": "// 1. Extract and normalize order data\nconst payload = items[0].json;\nconst order = payload.order || payload.body || payload;\nconst lineItems = Array.isArray(order.line_items) ? order.line_items : [];\nconst customer = order.customer || {};\nconst shippingAddress = order.shipping_address || {};\nconst billingAddress = order.billing_address || {};\n\n// 2. Get financial totals (order-level)\nconst subtotal = order.subtotal_price || order.current_subtotal_price_set?.amount || '0.00';\nconst shippingTotal = parseFloat(order.shipping_lines?.[0]?.price || order.current_shipping_price_set?.amount || 0);\nconst taxTotal = parseFloat(order.total_tax || '0.00');\nconst discountsTotal = order.total_discounts || '0.00';\nconst grandTotal = parseFloat(order.total_price || order.current_total_price_set?.amount || '0.00');\nconst currency = order.currency || 'USD';\n\n// 3. Calculate total line item value\nconst totalLineItemValue = lineItems.reduce((sum, item) => {\n  return sum + (parseFloat(item.price || 0) * item.quantity);\n}, 0);\n\n// 4. Find only taxable items\nconst taxableItems = lineItems.filter(item => item.tax_lines && item.tax_lines.length > 0);\nconst taxableTotal = taxableItems.reduce((sum, item) => {\n  return sum + (parseFloat(item.price || 0) * item.quantity);\n}, 0);\n\n// 5. Clean formatted billing address (in 1 column)\nconst billingFullAddress = [\n  billingAddress.name || `${customer.first_name || \"\"} ${customer.last_name || \"\"}`.trim(),\n  billingAddress.phone,\n  order.email || customer.email,\n  billingAddress.address1,\n  billingAddress.city,\n  billingAddress.province,\n  billingAddress.zip,\n  billingAddress.country\n].filter(Boolean).join(\", \");\n\n// 6. Build order-level base data\nconst orderBase = {\n  \"Order ID\": order.id || \"\",\n  \"Order Name\": order.name || \"\",\n  \"Order Number\": order.order_number || \"\",\n  \"Order Created At\": order.created_at || \"\",\n  \"Order Status URL\": order.order_status_url || \"\",\n  \"Financial Status\": order.financial_status || \"\",\n  \"Payment Gateway\": order.gateway || \"\",\n  \"Currency\": currency,\n  \"Subtotal\": subtotal,\n  \"Grand Total\": grandTotal.toFixed(2),\n  \"Total Tax\": taxTotal.toFixed(2),\n  \"Shipping Total\": shippingTotal.toFixed(2),\n  \"Discount Total\": discountsTotal,\n\n  \"Customer Email\": order.email || customer.email || \"\",\n  \"Customer Name\": `${customer.first_name || \"\"} ${customer.last_name || \"\"}`.trim(),\n  \"Customer Phone\": customer.phone || \"\",\n  \"Shipping City\": shippingAddress.city || \"\",\n  \"Shipping Country\": shippingAddress.country || \"\",\n  \"Shipping Phone\": shippingAddress.phone || \"\",\n  \"Billing Address\": billingFullAddress\n};\n\n// 7. Final output: one row per variant\nconst output = lineItems.map(item => {\n  const lineTotal = parseFloat(item.price || 0) * item.quantity;\n  const orderWeight = totalLineItemValue > 0 ? lineTotal / totalLineItemValue : 0;\n\n  const isTaxable = item.tax_lines && item.tax_lines.length > 0;\n  const taxWeight = isTaxable && taxableTotal > 0 ? lineTotal / taxableTotal : 0;\n\n  const [color = \"\", size = \"\", material = \"\"] = (item.variant_title || \"\").split(\" / \").concat([\"\", \"\", \"\"]).slice(0, 3);\n\n  return {\n    json: {\n      ...orderBase,\n\n      // Product Info\n      \"Product Name\": item.title || \"\",\n      \"Variant Title\": item.variant_title || \"\",\n      \"Color\": color,\n      \"Size\": size,\n      \"Material\": material,\n      \"Quantity\": item.quantity || 0,\n      \"Unit Price\": parseFloat(item.price || 0).toFixed(2),\n      \"Line Total\": lineTotal.toFixed(2),\n      \"Product ID\": item.product_id || \"\",\n      \"Variant ID\": item.variant_id || \"\",\n      \"SKU\": item.sku || \"\",\n      \"Vendor\": item.vendor || \"\",\n      \"Requires Shipping\": item.requires_shipping ? \"Yes\" : \"No\",\n      \"Confirmation Number\": order.confirmation_number || \"\",\n      \"Admin GraphQL API ID\": item.admin_graphql_api_id || \"\",\n\n      // Allocated values\n      \"Allocated Tax\": (taxTotal * taxWeight).toFixed(2),\n      \"Allocated Shipping\": (shippingTotal * orderWeight).toFixed(2),\n      \"Item % of Order\": (orderWeight * 100).toFixed(2) + \"%\",\n\n      // Clarity\n      \"Is Taxable\": isTaxable ? \"Yes\" : \"No\"\n    }\n  };\n});\n\nreturn output;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b5ccebd2-e080-4e7f-a7d0-48dac47ffeff",
+        "name": "create order",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -740,
+          460
+        ],
+        "webhookId": "b9ff3875-9fc3-4eb6-89cf-f2e4ccabdd53",
+        "parameters": {
+          "path": "createorder",
+          "options": {},
+          "httpMethod": "POST"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "73e33596-7fe5-4573-8081-5e4557b7a332",
+        "name": "Loop Over Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          380,
+          460
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "74f0ef0a-06da-4ce1-83ee-718b22327bdd",
+        "name": "Sheet ",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          720,
+          700
+        ],
+        "parameters": {
+          "options": {
+            "dotNotation": true
+          },
+          "assignments": {
+            "assignments": [
+              {
+                "id": "71623f2e-aa21-49e1-a785-ccfc9614f423",
+                "name": "=S No",
+                "type": "string",
+                "value": ""
+              },
+              {
+                "id": "2613143d-766c-4b4f-9aa0-a7fb37d69057",
+                "name": "Order ID",
+                "type": "string",
+                "value": "={{ $json[\"Order ID\"] }}"
+              },
+              {
+                "id": "960b7c7f-646d-499a-ae5f-bfc4ca6acfee",
+                "name": "Order Number",
+                "type": "string",
+                "value": "={{ $json[\"Order Number\"] }}"
+              },
+              {
+                "id": "4458ae90-f35a-4928-ba87-ea48c869a801",
+                "name": "Order Created At",
+                "type": "string",
+                "value": "={{ $json[\"Order Created At\"] }}"
+              },
+              {
+                "id": "c0bc05e5-c450-4732-bba5-1692322e0a34",
+                "name": "Order Status URL",
+                "type": "string",
+                "value": "={{ $json[\"Order Status URL\"] }}"
+              },
+              {
+                "id": "5777e1fa-034a-479a-985b-de9b9c48cefa",
+                "name": "Customer Name",
+                "type": "string",
+                "value": "={{ $json[\"Customer Name\"] }}"
+              },
+              {
+                "id": "c0ff0664-045e-4468-b5be-3135fc7ee246",
+                "name": "Customer Email",
+                "type": "string",
+                "value": "={{ $json[\"Customer Email\"] }}"
+              },
+              {
+                "id": "cfc0d46c-6f00-4ac3-9c84-6ad6ae872d18",
+                "name": "Customer Phone",
+                "type": "string",
+                "value": "={{ $json[\"Customer Phone\"] }}"
+              },
+              {
+                "id": "22e96322-bd4e-444a-9dca-1e9c6a95d08f",
+                "name": "Product Name",
+                "type": "string",
+                "value": "={{ $json[\"Product Name\"] }}"
+              },
+              {
+                "id": "106f0cf6-e82f-40c3-b86e-6e114541752f",
+                "name": "Variant Title",
+                "type": "string",
+                "value": "={{ $json[\"Variant Title\"] }}"
+              },
+              {
+                "id": "aa960a31-51bd-49a4-9d46-b806b11ec66c",
+                "name": "Color",
+                "type": "string",
+                "value": "={{ $json.Color }}"
+              },
+              {
+                "id": "3d5161e8-7cf6-45df-a3ef-31111ebb951a",
+                "name": "Size",
+                "type": "string",
+                "value": "={{ $json.Size }}"
+              },
+              {
+                "id": "8518647c-6c7e-464b-8a52-532a1cb3814d",
+                "name": "Material",
+                "type": "string",
+                "value": "={{ $json.Material }}"
+              },
+              {
+                "id": "ae901273-2c28-46ec-96fe-97a5c52163df",
+                "name": "SKU",
+                "type": "string",
+                "value": "={{ $json.SKU }}"
+              },
+              {
+                "id": "5af804c1-c135-4dac-9bbf-2e6796d31332",
+                "name": "Quantity",
+                "type": "string",
+                "value": "={{ $json.Quantity }}"
+              },
+              {
+                "id": "f8d4d4a9-eb7b-4fb2-9a12-5edf5560cae6",
+                "name": "Unit Price",
+                "type": "string",
+                "value": "={{ $json[\"Unit Price\"] }}"
+              },
+              {
+                "id": "b5a568a2-2f7b-4867-b025-5103777a5e5f",
+                "name": "Line Total (Price * Quantity)",
+                "type": "string",
+                "value": "={{ $json[\"Line Total\"] }}"
+              },
+              {
+                "id": "9d1670c8-f646-4c5a-92bb-8aa145dbc99c",
+                "name": "Product ID",
+                "type": "string",
+                "value": "={{ $json[\"Product ID\"] }}"
+              },
+              {
+                "id": "1f93d125-b9d2-4efe-b150-19bd8be7d52c",
+                "name": "Variant ID",
+                "type": "string",
+                "value": "={{ $json[\"Variant ID\"] }}"
+              },
+              {
+                "id": "b5cde5e9-7cc0-46e9-965b-fa41d1d65cfb",
+                "name": "Line Tax",
+                "type": "string",
+                "value": "={{ $json[\"Allocated Tax\"] }}"
+              },
+              {
+                "id": "f0e02ce7-4220-4f00-8d01-c39b288d5db6",
+                "name": "Line Shipping Charges",
+                "type": "string",
+                "value": "={{ $json[\"Allocated Shipping\"] }}"
+              },
+              {
+                "id": "8814ea80-03ad-4854-b087-e388d875efc9",
+                "name": "Vendor",
+                "type": "string",
+                "value": "={{ $json.Vendor }}"
+              },
+              {
+                "id": "0047cbce-5ec5-4ded-a9cb-9a6053cfa119",
+                "name": "Requires Shipping",
+                "type": "string",
+                "value": "={{ $json[\"Requires Shipping\"] }}"
+              },
+              {
+                "id": "5d15ab9b-64f7-48b1-a12e-ff3972d691cf",
+                "name": "Billing Address",
+                "type": "string",
+                "value": "={{ $json[\"Billing Address\"] }}"
+              },
+              {
+                "id": "a2cdeef2-683b-4cb7-88df-5c0590ec5d2f",
+                "name": "Shipping City",
+                "type": "string",
+                "value": "={{ $json[\"Shipping City\"] }}"
+              },
+              {
+                "id": "3dca84bb-5f9f-4729-b74c-b8cb4adcf9b7",
+                "name": "Shipping Country",
+                "type": "string",
+                "value": "={{ $json[\"Shipping Country\"] }}"
+              },
+              {
+                "id": "92c12a61-31db-4510-98af-5b8bd61551cd",
+                "name": "Order Name",
+                "type": "string",
+                "value": "={{ $json[\"Order Name\"] }}"
+              },
+              {
+                "id": "a874d9fa-60d8-4486-940e-878e6a49d98a",
+                "name": "Financial Status",
+                "type": "string",
+                "value": "={{ $json[\"Financial Status\"] }}"
+              },
+              {
+                "id": "64f6c2e9-c64e-4e7c-abef-538757f145c9",
+                "name": "Payment Gateway",
+                "type": "string",
+                "value": "={{ $json[\"Payment Gateway\"] }}"
+              },
+              {
+                "id": "79ee1385-1915-4e1e-b148-22c125840c92",
+                "name": "Currency",
+                "type": "string",
+                "value": "={{ $json.Currency }}"
+              },
+              {
+                "id": "0101c2fc-5b21-4551-b12f-795c000d6bbf",
+                "name": "Order Products Total / Subtotal",
+                "type": "string",
+                "value": "={{ $json.Subtotal }}"
+              },
+              {
+                "id": "49f76039-ffec-4009-9c04-07cefe562fe6",
+                "name": "Order Overall Total Tax",
+                "type": "string",
+                "value": "={{ $json[\"Total Tax\"] }}"
+              },
+              {
+                "id": "f54aec9e-065f-407b-a2db-0df8d73bfc86",
+                "name": "Discount Total",
+                "type": "string",
+                "value": "={{ $json[\"Discount Total\"] }}"
+              },
+              {
+                "id": "5321b2ee-a609-4c52-8bdc-8ec71fe32432",
+                "name": "Order Shipping Overall Total",
+                "type": "string",
+                "value": "={{ $json[\"Shipping Total\"] }}"
+              },
+              {
+                "id": "48ee43ec-bfcf-4117-86a4-37d0114ce481",
+                "name": "Grand Total",
+                "type": "string",
+                "value": "={{ $json[\"Grand Total\"] }}"
+              },
+              {
+                "id": "7a7cc264-c854-4d25-bd47-54e0d15c3e48",
+                "name": "Customer Order Confirmation Code",
+                "type": "string",
+                "value": "={{ $json[\"Confirmation Number\"] }}"
+              },
+              {
+                "id": "f851c5a7-c057-408f-b390-ff4bc69a172f",
+                "name": "Item % of Order",
+                "type": "string",
+                "value": "={{ $json[\"Item % of Order\"] }}"
+              },
+              {
+                "id": "1d2e65c7-a370-4bdb-917f-5973ace42c4e",
+                "name": "Is Taxable",
+                "type": "string",
+                "value": "={{ $json[\"Is Taxable\"] }}"
+              },
+              {
+                "id": "1f0025c2-080f-4baf-8ec6-5e4bb28b4692",
+                "name": "Shipping Phone",
+                "type": "string",
+                "value": "={{ $json[\"Shipping Phone\"] }}"
+              },
+              {
+                "id": "43527d4b-b115-4b12-b611-6838ee39aa3c",
+                "name": "Admin GraphQL API ID",
+                "type": "string",
+                "value": "={{ $json[\"Admin GraphQL API ID\"] }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "da068325-94a1-47ab-a538-b4411bc187d1",
+        "name": "Order Sheeet",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          1080,
+          700
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appgGEef4Mw8vFS78",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78",
+            "cachedResultName": "IPM"
+          },
+          "sort": {
+            "property": [
+              {
+                "field": "S No"
+              }
+            ]
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tbl2B5IiIhRwkVz1I",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78/tbl2B5IiIhRwkVz1I",
+            "cachedResultName": "Order Sheet"
+          },
+          "options": {},
+          "operation": "search",
+          "filterByFormula": "1"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "f8482c76-a80d-46db-b2e5-4bb89e03f536",
+        "name": "Code23",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1640,
+          700
+        ],
+        "parameters": {
+          "jsCode": "const rows = $input.all();\nconst lastRow = rows[rows.length - 1];\nreturn [lastRow];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5ee6a75d-b528-4c5f-bbe7-bc3a11400e9f",
+        "name": "Edit Fields",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2020,
+          700
+        ],
+        "parameters": {
+          "options": {
+            "dotNotation": true
+          },
+          "assignments": {
+            "assignments": [
+              {
+                "id": "46465961-4bb9-4f27-96d6-efdd83d4e538",
+                "name": "S No",
+                "type": "string",
+                "value": "={{ $json['S No'] }}"
+              },
+              {
+                "id": "0a13fe64-d786-4a9e-bfdb-8f0082a20c5c",
+                "name": "Order ID",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order ID'] }}"
+              },
+              {
+                "id": "dadbf9cc-c15e-4c9b-8945-584f896e1e64",
+                "name": "Order Name",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Name'] }}"
+              },
+              {
+                "id": "6fd1f97c-3adb-4aa5-af83-7a3a07d7d3c9",
+                "name": "Order Number",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Number'] }}"
+              },
+              {
+                "id": "88537f3a-1f27-4da7-8afe-6b6fcbba0f1c",
+                "name": "Order Created At",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Created At'] }}"
+              },
+              {
+                "id": "08999973-b970-4e0f-872b-38927ac47058",
+                "name": "Order Status URL",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Status URL'] }}"
+              },
+              {
+                "id": "c31fb846-515d-4cb0-a307-421bece04857",
+                "name": "Customer Name",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Customer Name'] }}"
+              },
+              {
+                "id": "e29f43ae-b0d7-441c-9d5b-85f719b3cc0d",
+                "name": "Customer Email",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Customer Email'] }}"
+              },
+              {
+                "id": "3e9dda78-7d7a-4436-9bf6-bb0d11bf65ba",
+                "name": "Customer Phone Number",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Customer Phone'] }}"
+              },
+              {
+                "id": "8ff30025-c234-4e93-b50c-293cbf6b071a",
+                "name": "Product Name",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Product Name'] }}"
+              },
+              {
+                "id": "074ed98d-f025-47c8-9ad7-85538d9f7bad",
+                "name": "Variant Title",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Variant Title'] }}"
+              },
+              {
+                "id": "2c348d20-7f17-41fd-b6eb-6b56577fc84c",
+                "name": "Color",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.Color }}"
+              },
+              {
+                "id": "38bbca83-b643-40e5-a89a-5858471f53ea",
+                "name": "Size",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.Size }}"
+              },
+              {
+                "id": "68e618e6-bd25-40a3-afb3-ee43af127198",
+                "name": "Material",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.Material }}"
+              },
+              {
+                "id": "135ce05c-77b5-494c-a315-83e70ee688a6",
+                "name": "SKU",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.SKU }}"
+              },
+              {
+                "id": "11fc378a-5bd4-4166-b582-49af87c697ea",
+                "name": "Quantity",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.Quantity }}"
+              },
+              {
+                "id": "7c26836e-d4f5-4d08-b85a-0bd633755fb5",
+                "name": "Unit Price",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Unit Price'] }}"
+              },
+              {
+                "id": "b0124180-e50d-4a95-a7d2-2a73d8a0784f",
+                "name": "Line Total (Price * Quantity)",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Line Total (Price * Quantity)'] }}"
+              },
+              {
+                "id": "33aba9e1-1d21-4839-b14e-f573f3f5e0c4",
+                "name": "Product ID",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Product ID'] }}"
+              },
+              {
+                "id": "e2adf5ee-d54e-4d20-b270-eb1cc8045675",
+                "name": "Variant ID",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Variant ID'] }}"
+              },
+              {
+                "id": "728a3455-b8b1-4761-86ff-95653e091d9e",
+                "name": "Line Tax",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Line Tax'] }}"
+              },
+              {
+                "id": "c4e3ef93-4040-426f-9767-6222ae244028",
+                "name": "Line Shipping Charges",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Line Shipping Charges'] }}"
+              },
+              {
+                "id": "19e9426a-ca95-4809-b9b8-94b224b07483",
+                "name": "Vendor",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.Vendor }}"
+              },
+              {
+                "id": "ac8b1ff8-922e-4020-8e95-7f9e66e5b3d3",
+                "name": "Requires Shipping",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Requires Shipping'] }}"
+              },
+              {
+                "id": "8c7bbdcf-b309-41c8-a489-b230248edb9d",
+                "name": "Billing Address",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Billing Address'] }}"
+              },
+              {
+                "id": "004e21f2-d57e-4dff-af8c-1030e363be5d",
+                "name": "Shipping City",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Shipping City'] }}"
+              },
+              {
+                "id": "4c3d679f-620a-4a4f-8478-b8c516390a5a",
+                "name": "Shipping Country",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Shipping Country'] }}"
+              },
+              {
+                "id": "05356209-5c49-493c-9b5c-0428aeced748",
+                "name": "Financial Status",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Financial Status'] }}"
+              },
+              {
+                "id": "1b96ccd2-ef51-4212-8ff2-e600222853eb",
+                "name": "Payment Gateway",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Payment Gateway'] }}"
+              },
+              {
+                "id": "6f96316d-2061-42aa-a54b-d21a97d8870b",
+                "name": "Currency",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json.Currency }}"
+              },
+              {
+                "id": "7a60d041-aff9-49d3-8698-318c24df6c13",
+                "name": "Order Products Total / Subtotal",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Products Total / Subtotal'] }}"
+              },
+              {
+                "id": "c85083a4-25bb-44da-a9f7-63b117726a34",
+                "name": "Order Overall Total Tax",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Overall Total Tax'] }}"
+              },
+              {
+                "id": "eefdb7e4-d772-4adc-b7af-ada9013fd516",
+                "name": "Discount Total",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Discount Total'] }}"
+              },
+              {
+                "id": "e020e52f-a88a-40de-b2f3-81c05853d5fb",
+                "name": "Order Shipping Overall Total",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Order Shipping Overall Total'] }}"
+              },
+              {
+                "id": "c3810749-f07f-49d4-8355-5730e5d20477",
+                "name": "Grand Total",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Grand Total'] }}"
+              },
+              {
+                "id": "e3ff915f-2b1b-4083-b4fb-dbfb95a93e89",
+                "name": "Customer Order Confirmation Code",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Customer Order Confirmation Code'] }}"
+              },
+              {
+                "id": "1b7a0224-45da-46cc-b217-5fe25a8815f7",
+                "name": "Item % of Order",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Item % of Order'] }}"
+              },
+              {
+                "id": "836c87f4-5030-4c5f-b02b-e3bd7f5a3b8e",
+                "name": "Is Taxable",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Is Taxable'] }}"
+              },
+              {
+                "id": "87367482-cb39-4509-9976-99c7d3b86e60",
+                "name": "Shipping Phone",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Shipping Phone'] }}"
+              },
+              {
+                "id": "d7d8ecf1-8415-4204-bb9d-b74a89b782ff",
+                "name": "Admin GraphQL API ID",
+                "type": "string",
+                "value": "={{ $('Sheet ').item.json['Admin GraphQL API ID'] }}"
+              },
+              {
+                "id": "b425ae49-ffbf-45f0-8ff2-648875b2feba",
+                "name": "Order Status ",
+                "type": "string",
+                "value": "Pending "
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "053766a1-beb4-4eab-972f-7bdcfdcc562d",
+        "name": "Generating S No1",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2540,
+          700
+        ],
+        "parameters": {
+          "jsCode": "// Corrected Shopify Order Data Processor with Auto-Increment\n// Input: Receives data from previous node containing row_number and S No\n// Output: Increments both IDs while preserving all other data\n\n// 1. Get the input data from previous node\nconst inputData = items[0].json;\n\n// 2. Extract current row number and S No (handling string or number types)\nconst currentRowNumber = parseInt(inputData.row_number) || 0;\nconst currentSNo = parseInt(inputData[\"S No\"]) || 0;\n\n// 3. Increment both values\nconst newRowNumber = currentRowNumber + 1;\nconst newSNo = currentSNo + 1;\n\n// 4. Create new data object with incremented values\nconst outputData = {\n    ...inputData,  // Preserve all existing data\n    \n    // Update the incrementing fields (maintaining original field names)\n    row_number: newRowNumber.toString(), // Keep as string if original was string\n    \"S No\": newSNo.toString(), // Keep field name with space\n    \n    // Add processing metadata (optional)\n    _processed: {\n        previous_row: currentRowNumber,\n        previous_sno: currentSNo,\n        processed_at: new Date().toISOString()\n    }\n};\n\n// 5. Return the updated data\nreturn [{\n    json: outputData\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6d6b3cff-7abd-4f9b-9aa6-be9ebd32d6a6",
+        "name": "CustomerSheet",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          3320,
+          700
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appgGEef4Mw8vFS78",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78",
+            "cachedResultName": "IPM"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tbl2B5IiIhRwkVz1I",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78/tbl2B5IiIhRwkVz1I",
+            "cachedResultName": "Order Sheet"
+          },
+          "columns": {
+            "value": {
+              "SKU": "={{ $json.SKU }}",
+              "S No": "={{ $json['S No'] }}",
+              "Size": "={{ $json.Size }}",
+              "Color": "={{ $json.Color }}",
+              "Vendor": "={{ $json.Vendor }}",
+              "Currency": "={{ $json.Currency }}",
+              "Line Tax": "={{ $json['Line Tax'] }}",
+              "Material": "={{ $json.Material }}",
+              "Order ID": "={{ $json['Order ID'] }}",
+              "Quantity": "={{ $json.Quantity }}",
+              "Is Taxable": "={{ $json[\"Is Taxable\"] }}",
+              "Product ID": "={{ $json['Product ID'] }}",
+              "Unit Price": "={{ $json['Unit Price'] }}",
+              "Variant ID": "={{ $json['Variant ID'] }}",
+              "Grand Total": "={{ $json[\"Grand Total\"] }}",
+              "Order Number": "={{ $json['Order Number'] }}",
+              "Order Status": "={{ $json[\"Order Status \"] }}",
+              "Product Name": "={{ $json['Product Name'] }}",
+              "Customer Name": "={{ $json['Customer Name'] }}",
+              "Shipping City": "={{ $json[\"Shipping City\"] }}",
+              "Variant Title": "={{ $json['Variant Title'] }}",
+              "Customer Email": "={{ $json['Customer Email'] }}",
+              "Customer Phone": "={{ $json['Customer Phone Number'] }}",
+              "Discount Total": "={{ $json[\"Discount Total\"] }}",
+              "Shipping Phone": "={{ $json[\"Shipping Phone\"] }}",
+              "Billing Address": "={{ $json[\"Billing Address\"] }}",
+              "Item % of Order": "={{ $json[\"Item % of Order\"] }}",
+              "Payment Gateway": "={{ $json[\"Payment Gateway\"] }}",
+              "Financial Status": "={{ $json[\"Financial Status\"] }}",
+              "Order Created At": "={{ $json['Order Created At'] }}",
+              "Order Status URL": "={{ $json[\"Order Status URL\"] }}",
+              "Requires Shipping": "={{ $json['Requires Shipping'] }}",
+              "Admin GraphQL API ID": "={{ $json[\"Admin GraphQL API ID\"] }}",
+              "Line Shipping Charges": "={{ $json['Line Shipping Charges'] }}",
+              "Order Overall Total Tax": "={{ $json[\"Order Overall Total Tax\"] }}",
+              "Order Shipping Overall Total": "={{ $json[\"Order Shipping Overall Total\"] }}",
+              "Line Total (Price * Quantity)": "={{ $json['Line Total (Price * Quantity)'] }}",
+              "Order Products Total / Subtotal": "={{ $json[\"Order Products Total / Subtotal\"] }}",
+              "Customer Order Confirmation Code": "={{ $json[\"Customer Order Confirmation Code\"] }}"
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "S No",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "S No",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Number",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Created At",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Created At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Name",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Phone",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Email",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Product Name",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Product Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Variant Title",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Variant Title",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Color",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Color",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Size",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Size",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Material",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Material",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "SKU",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "SKU",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Quantity",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Quantity",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Unit Price",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Unit Price",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Line Total (Price * Quantity)",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Line Total (Price * Quantity)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Product ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Product ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Variant ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Variant ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Line Tax",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Line Tax",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Line Shipping Charges",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Line Shipping Charges",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Vendor",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Vendor",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Requires Shipping",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Requires Shipping",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Shipping City",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Shipping City",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Billing Address",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Billing Address",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Status URL",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Status URL",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Financial Status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Financial Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Payment Gateway",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Payment Gateway",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Currency",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Currency",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Products Total / Subtotal",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Products Total / Subtotal",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Overall Total Tax",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Overall Total Tax",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Is Taxable",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Is Taxable",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Discount Total",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Discount Total",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Order Shipping Overall Total",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Order Shipping Overall Total",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Grand Total",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Grand Total",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Order Confirmation Code",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Order Confirmation Code",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Item % of Order",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Item % of Order",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Shipping Phone",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Shipping Phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Admin GraphQL API ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Admin GraphQL API ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Record ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Record ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "Order ID"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "upsert"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "e296f347-80d9-4e94-8e47-08c94b373575",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -840,
+          340
+        ],
+        "parameters": {
+          "width": 340,
+          "height": 320,
+          "content": "## Webhook Trigger when the Customer create order\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5b3893ab-74b9-4a3d-b3f4-a92e7ca948ff",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -300,
+          -720
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 480,
+          "height": 1360,
+          "content": "## Code Extract Order Information\nReads the order from the incoming webhook or payload.\n\nPulls customer, shipping, billing, and line item details.\n\nFinancial Summary\nGrabs totals like:\n\nSubtotal\n\nShipping\n\nTax\n\nDiscounts\n\nGrand Total\n\nAlso collects the order currency.\n\nCalculate Line Totals\nComputes:\n\nTotal value of all products\n\nTotal value of only taxable products\n\nFormat the Billing Address\nCombines billing info into one clean string:\nName, Phone, Email, Address, City, State, Zip, Country.\n\nBase Order Info\nStores reusable order-level data:\n\nOrder ID, number, status\n\nCustomer name, email, phone\n\nFinancial and shipping info\n\nProduct-Level Breakdown\nFor each product (line item):\n\nCalculates:\n\nLine total (price × quantity)\n\nAllocated tax & shipping\n\n% of order value\n\nExtracts:\n\nColor, Size, Material (from variant title)\n\nSKU, Vendor, Variant ID, Product ID\n\nWhether the item is taxable or needs shipping\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4620fdcd-3a69-4040-9c3e-74c4a0994ce9",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          960,
+          360
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 320,
+          "height": 500,
+          "content": "# Airtable Customer Sheet\n\n## Listing out total rows of customer sheet\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0607336c-5d55-4329-85ad-6e53050691e8",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1460,
+          200
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 460,
+          "height": 660,
+          "content": "## Return Only Last Row\nPurpose: Get the last item from all incoming rows and pass it forward.\n\n📌 How it works:\n\n$input.all() → Fetches all incoming items.\n\nrows[rows.length - 1] → Picks the last item.\n\nreturn [lastRow]; → Sends only the last row to the next node.\n\n📦 Use Case:\nUse when you only want to process or forward the latest record"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f3e14e2b-1900-4af0-b597-e952ef802798",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2340,
+          120
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 540,
+          "height": 800,
+          "content": "# Auto-Increment \"S No\" from Previous Node\n## Take the serial number (S No) from previous node data, increment it by 1, and return the updated data.\n\n📌 How it works:\n\nReads the first item from the input.\n\nChecks for \"S No\"  field.\n\nIf missing or invalid, uses 0 as default.\n\nAdds +1 to generate the new serial number.\n\nReturns the full original data + updated \"S No\" field."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5d934d8e-573d-44ef-aace-b968bde029f6",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3120,
+          400
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 460,
+          "height": 500,
+          "content": "# Airtable Sheet\n## Appending data in Airtable of new Customer Sheet "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "671effcd-0f28-4eff-a49a-78779a712db7",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2420,
+          -720
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 1120,
+          "height": 2920,
+          "content": "## This automation is built in n8n (a no-code/low-code automation platform). It automatically updates order data into system every time when a customer places an order on your Shopify store.\n\nNo manual copy-pasting. No missing data. Everything gets updated in real time.\n\n### 🔧 What This Automation Does:\n\nThis flow listens for new Shopify orders, extracts detailed order data, and organizes it into customer sheets and sales record databases automatically — without any manual entry.\n\n\n---\n\n🔄 Step-by-Step Technical Flow\n\n1. Trigger: Shopify Webhook\n\nNode Type: Webhook (Trigger)\n\nFunction: Listens for new order events from Shopify whenever a customer places an order.\n\n\n\n2. Code Execution: Clean Order Data\n\nNode Type: Code (JavaScript)\n\nFunction:\n\nExtracts raw order and customer data.\n\nNormalizes and organizes:\n\nFinancials: subtotal, tax, shipping, grand total\n\nCustomer info: name, email, phone\n\nAddresses: billing/shipping in clean text\n\nLine items: price, quantity, SKU, vendor, variant breakdown\n\n\nAllocates tax and shipping per item.\n\n\n\n\n3. Airtable: Check for Existing Customer\n\nNode Type: Airtable (Search Records)\n\nFunction: Checks if the customer already exists in the Airtable \"Customer Sheet\" using email as a unique identifier.\n\n\n\n4. Route Based on Customer Status\n\nNode Type: IF Node\n\nFunction:\n\nIf customer exists, continue to update records.\n\nIf customer does not exist, add them as a new customer.\n\n\n\n\n5. Auto-Increment for Sales ID / Sales Row ID\n\nNode Type: Code\n\nFunction:\n\nAutomatically generates a new unique ID for the order entry (useful for Airtable).\n\nHelps with sorting, linking, and reporting.\n\n\n\n\n6. Airtable: Insert into Customer and Sales Tables\n\nNode Type: Airtable (Create Record)\n\nFunction:\n\nAdds the cleaned data (including per-item details) to the Sales Sheet.\n\nOptionally adds or updates the Customer Sheet.\n\n\n\n\n\n\n---\n\n📈 How This Helps You Grow\n\n✅ 1. Real-Time, Zero-Touch Order Sync\n\nNo more exporting Shopify orders manually. The moment someone buys, it’s logged and structured in your database.\n\n✅ 2. Clean & Structured Data for Every Order\n\nYou get detailed records with:\n\nCustomer insights\n\nProduct breakdowns (color, size, etc.)\n\nAllocated costs This is critical for sales reporting, analytics, and re-engagement campaigns.\n\n\n✅ 3. Scalable Customer Management\n\nBy syncing customer data automatically, you maintain a growing, accurate database that can power:\n\nEmail/SMS marketing tools\n\nLoyalty systems\n\nCRMs and dashboards\n\n\n✅ 4. Saves Time, Reduces Errors\n\nManual entry is not only time-consuming but also risky. This automation prevents human mistakes and saves you 10–20 hours a week.\n\n✅ 5. Smart Auto-Numbering System\n\nAutomatically assigns sales IDs or tracking numbers — no need to remember or create your own sequence.\n\n✅ 6. Ready for Advanced Automation\n\nThis system forms the foundation for future automations, such as:\n\nTriggering shipping workflows\n\nConnecting with accounting tools\n\nAdvanced profit/loss tracking\n\n\n\n---\n\n🧩 Summary\n\n> “This automation is like hiring a full-time assistant to process your orders, manage your customer list, and organize your sales data — but it works 24/7, never sleeps, and never makes a mistake.”\n\n\n\nYou can grow confidently, knowing your backend operations are running smoothly and ready to scale.\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {
+      "create order": [
+        {
+          "json": {
+            "body": {
+              "id": 820982911946154500,
+              "name": "#9999",
+              "note": null,
+              "tags": "tag1, tag2",
+              "test": true,
+              "email": "jon@example.com",
+              "phone": null,
+              "token": "123456abcd",
+              "app_id": null,
+              "number": 234,
+              "refunds": [],
+              "returns": [],
+              "user_id": null,
+              "currency": "INR",
+              "customer": {
+                "id": 115310627314723950,
+                "note": null,
+                "email": "john@example.com",
+                "phone": null,
+                "state": "disabled",
+                "currency": "INR",
+                "last_name": "Smith",
+                "created_at": null,
+                "first_name": "John",
+                "tax_exempt": false,
+                "updated_at": null,
+                "tax_exemptions": [],
+                "verified_email": true,
+                "default_address": {
+                  "id": 715243470612851200,
+                  "zip": "K2H7A8",
+                  "city": "Ottawa",
+                  "name": "John Smith",
+                  "phone": "123-123-1234",
+                  "company": null,
+                  "country": "Canada",
+                  "default": true,
+                  "address1": "123 Elm St.",
+                  "address2": null,
+                  "province": "Ontario",
+                  "last_name": "Smith",
+                  "first_name": "John",
+                  "customer_id": 115310627314723950,
+                  "country_code": "CA",
+                  "country_name": "Canada",
+                  "province_code": "ON"
+                },
+                "admin_graphql_api_id": "gid://shopify/Customer/115310627314723954",
+                "multipass_identifier": null
+              },
+              "closed_at": null,
+              "confirmed": false,
+              "device_id": null,
+              "po_number": null,
+              "reference": null,
+              "tax_lines": [],
+              "total_tax": "0.00",
+              "browser_ip": null,
+              "cart_token": null,
+              "created_at": "2025-06-24T18:40:12+05:30",
+              "line_items": [
+                {
+                  "id": 866550311766439000,
+                  "sku": "",
+                  "name": "Unisex Brushed‑Fleece Hoodie",
+                  "grams": 0,
+                  "price": "859.00",
+                  "title": "Unisex Brushed‑Fleece Hoodie",
+                  "duties": [],
+                  "vendor": null,
+                  "taxable": true,
+                  "quantity": 1,
+                  "gift_card": false,
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "859.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "859.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "product_id": 9784057299230,
+                  "properties": [],
+                  "variant_id": 49871285190942,
+                  "variant_title": null,
+                  "product_exists": true,
+                  "total_discount": "0.00",
+                  "current_quantity": 1,
+                  "attributed_staffs": [
+                    {
+                      "id": "gid://shopify/StaffMember/902541635",
+                      "quantity": 1
+                    }
+                  ],
+                  "requires_shipping": true,
+                  "fulfillment_status": null,
+                  "total_discount_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "fulfillment_service": "manual",
+                  "admin_graphql_api_id": "gid://shopify/LineItem/866550311766439020",
+                  "discount_allocations": [],
+                  "fulfillable_quantity": 1,
+                  "sales_line_item_group_id": null,
+                  "variant_inventory_management": "shopify"
+                },
+                {
+                  "id": 141249953214522980,
+                  "sku": "",
+                  "name": "Eco‑Friendly Organic Cotton T‑Shirt",
+                  "grams": 0,
+                  "price": "450.00",
+                  "title": "Eco‑Friendly Organic Cotton T‑Shirt",
+                  "duties": [],
+                  "vendor": null,
+                  "taxable": true,
+                  "quantity": 1,
+                  "gift_card": false,
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "450.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "450.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "product_id": 9784059330846,
+                  "properties": [],
+                  "variant_id": 49871297904926,
+                  "variant_title": null,
+                  "product_exists": true,
+                  "total_discount": "0.00",
+                  "current_quantity": 1,
+                  "attributed_staffs": [],
+                  "requires_shipping": true,
+                  "fulfillment_status": null,
+                  "total_discount_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "fulfillment_service": "manual",
+                  "admin_graphql_api_id": "gid://shopify/LineItem/141249953214522974",
+                  "discount_allocations": [],
+                  "fulfillable_quantity": 1,
+                  "sales_line_item_group_id": 142831562,
+                  "variant_inventory_management": "shopify"
+                },
+                {
+                  "id": 257004973105704600,
+                  "sku": "",
+                  "name": "RibPro Meridian Rib‑Knit Long‑Sleeve Tee",
+                  "grams": 0,
+                  "price": "899.00",
+                  "title": "RibPro Meridian Rib‑Knit Long‑Sleeve Tee",
+                  "duties": [],
+                  "vendor": null,
+                  "taxable": true,
+                  "quantity": 1,
+                  "gift_card": false,
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "899.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "899.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "product_id": 9784061002014,
+                  "properties": [],
+                  "variant_id": 49871311110430,
+                  "variant_title": null,
+                  "product_exists": true,
+                  "total_discount": "0.00",
+                  "current_quantity": 1,
+                  "attributed_staffs": [],
+                  "requires_shipping": true,
+                  "fulfillment_status": null,
+                  "total_discount_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "fulfillment_service": "manual",
+                  "admin_graphql_api_id": "gid://shopify/LineItem/257004973105704598",
+                  "discount_allocations": [],
+                  "fulfillable_quantity": 1,
+                  "sales_line_item_group_id": 142831562,
+                  "variant_inventory_management": "shopify"
+                }
+              ],
+              "source_url": null,
+              "tax_exempt": false,
+              "updated_at": "2025-06-24T18:40:12+05:30",
+              "checkout_id": null,
+              "location_id": null,
+              "source_name": "web",
+              "total_price": "2198.00",
+              "cancelled_at": "2025-06-24T18:40:12+05:30",
+              "fulfillments": [],
+              "landing_site": null,
+              "order_number": 1234,
+              "processed_at": "2025-06-24T18:40:12+05:30",
+              "total_weight": 0,
+              "cancel_reason": "customer",
+              "contact_email": "jon@example.com",
+              "payment_terms": null,
+              "total_tax_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "checkout_token": null,
+              "client_details": null,
+              "discount_codes": [],
+              "referring_site": null,
+              "shipping_lines": [
+                {
+                  "id": 271878346596884000,
+                  "code": null,
+                  "phone": null,
+                  "price": "10.00",
+                  "title": "Generic Shipping",
+                  "source": "shopify",
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "10.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "10.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "is_removed": false,
+                  "discounted_price": "0.00",
+                  "carrier_identifier": null,
+                  "discount_allocations": [],
+                  "discounted_price_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "current_discounted_price_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "requested_fulfillment_service_id": null
+                }
+              ],
+              "subtotal_price": "2198.00",
+              "taxes_included": false,
+              "billing_address": {
+                "zip": "40003",
+                "city": "Shippington",
+                "name": "Steve Shipper",
+                "phone": "555-555-SHIP",
+                "company": "Shipping Company",
+                "country": "United States",
+                "address1": "123 Shipping Street",
+                "address2": null,
+                "latitude": null,
+                "province": "Kentucky",
+                "last_name": "Shipper",
+                "longitude": null,
+                "first_name": "Steve",
+                "country_code": "US",
+                "province_code": "KY"
+              },
+              "customer_locale": "en",
+              "duties_included": false,
+              "estimated_taxes": false,
+              "note_attributes": [],
+              "total_discounts": "20.00",
+              "total_price_set": {
+                "shop_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                }
+              },
+              "financial_status": "voided",
+              "landing_site_ref": null,
+              "order_status_url": "https://usrnj8-ft.myshopify.com/93796040990/orders/123456abcd/authenticate?key=abcdefg",
+              "shipping_address": {
+                "zip": "40003",
+                "city": "Shippington",
+                "name": "Steve Shipper",
+                "phone": "555-555-SHIP",
+                "company": "Shipping Company",
+                "country": "United States",
+                "address1": "123 Shipping Street",
+                "address2": null,
+                "latitude": null,
+                "province": "Kentucky",
+                "last_name": "Shipper",
+                "longitude": null,
+                "first_name": "Steve",
+                "country_code": "US",
+                "province_code": "KY"
+              },
+              "current_total_tax": "0.00",
+              "source_identifier": null,
+              "total_outstanding": "2208.00",
+              "fulfillment_status": null,
+              "subtotal_price_set": {
+                "shop_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                }
+              },
+              "total_tip_received": "0.00",
+              "confirmation_number": null,
+              "current_total_price": "2208.00",
+              "total_discounts_set": {
+                "shop_money": {
+                  "amount": "20.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "20.00",
+                  "currency_code": "INR"
+                }
+              },
+              "admin_graphql_api_id": "gid://shopify/Order/820982911946154508",
+              "presentment_currency": "INR",
+              "current_total_tax_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "discount_applications": [],
+              "payment_gateway_names": [
+                "visa",
+                "bogus"
+              ],
+              "current_subtotal_price": "2208.00",
+              "total_line_items_price": "2208.00",
+              "buyer_accepts_marketing": true,
+              "current_total_discounts": "0.00",
+              "current_total_price_set": {
+                "shop_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                }
+              },
+              "current_total_duties_set": null,
+              "total_shipping_price_set": {
+                "shop_money": {
+                  "amount": "10.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "10.00",
+                  "currency_code": "INR"
+                }
+              },
+              "merchant_of_record_app_id": null,
+              "original_total_duties_set": null,
+              "current_shipping_price_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "current_subtotal_price_set": {
+                "shop_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                }
+              },
+              "total_line_items_price_set": {
+                "shop_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                }
+              },
+              "current_total_discounts_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "merchant_business_entity_id": "27044839710",
+              "current_total_additional_fees_set": null,
+              "original_total_additional_fees_set": null,
+              "total_cash_rounding_refund_adjustment_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "total_cash_rounding_payment_adjustment_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              }
+            },
+            "query": {},
+            "params": {},
+            "headers": {
+              "host": "ashu7859.app.n8n.cloud",
+              "accept": "*/*",
+              "cf-ray": "954c76cd61e71068-ORD",
+              "cdn-loop": "cloudflare; loops=1; subreqs=1",
+              "cf-ew-via": "15",
+              "cf-worker": "n8n.cloud",
+              "x-real-ip": "34.41.225.136",
+              "cf-visitor": "{\"scheme\":\"https\"}",
+              "user-agent": "Shopify-Captain-Hook",
+              "cf-ipcountry": "US",
+              "content-type": "application/json",
+              "x-is-trusted": "yes",
+              "content-length": "8971",
+              "x-shopify-test": "true",
+              "accept-encoding": "gzip, br",
+              "x-forwarded-for": "34.41.225.136, 172.71.1.138",
+              "x-shopify-topic": "orders/create",
+              "cf-connecting-ip": "34.41.225.136",
+              "x-forwarded-host": "ashu7859.app.n8n.cloud",
+              "x-forwarded-port": "443",
+              "x-forwarded-proto": "https",
+              "x-forwarded-server": "traefik-prod-users-gwc-55-69f456d475-rlss9",
+              "x-shopify-event-id": "abf3294f-af27-47f3-86ef-3cce8355e61f",
+              "x-shopify-webhook-id": "d4d27cd8-7671-4484-8cc5-a3a74d433ce6",
+              "x-shopify-api-version": "2025-04",
+              "x-shopify-hmac-sha256": "oSUFYglkcz5JlGtDV0lG8mpEufJ4y+X0Nmi/EH52U+k=",
+              "x-shopify-shop-domain": "usrnj8-ft.myshopify.com",
+              "x-shopify-triggered-at": "2025-06-24T13:10:12.769523556Z"
+            },
+            "webhookUrl": "https://ashu7859.app.n8n.cloud/webhook/createorder",
+            "executionMode": "production"
+          }
+        }
+      ]
+    },
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "c971738f-6bca-413a-8da6-c122f132dd03",
+    "connections": {
+      "Code": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code23": {
+        "main": [
+          [
+            {
+              "node": "Edit Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sheet ": {
+        "main": [
+          [
+            {
+              "node": "Order Sheeet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Edit Fields": {
+        "main": [
+          [
+            {
+              "node": "Generating S No1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Order Sheeet": {
+        "main": [
+          [
+            {
+              "node": "Code23",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "create order": {
+        "main": [
+          [
+            {
+              "node": "Code",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "CustomerSheet": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Sheet ",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generating S No1": {
+        "main": [
+          [
+            {
+              "node": "CustomerSheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 16,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 3
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.airtable": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Mohammed Abid",
+    "username": "mohammedabid",
+    "bio": "",
+    "verified": true,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/2e84c0f8ab62f06e98c837570ecf2f965316c2c2bc79cff7d34a2eda37234046?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 2,
+      "icon": "file:airtable.svg",
+      "name": "n8n-nodes-base.airtable",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-sms-the-low-code-way-with-airtable-twilio-programmable-sms-and-n8n/",
+                "icon": "📱",
+                "label": "Sending SMS the Low-Code Way with Airtable, Twilio Programmable SMS, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automating-conference-organization-processes-with-n8n/",
+                "icon": "🙋‍♀️",
+                "label": "Automating Conference Organization Processes with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.airtable/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/airtable/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Airtable"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMTcwIj48cGF0aCBmaWxsPSIjZmNiNDAwIiBkPSJNODkgNC44IDE2LjIgMzQuOWMtNC4xIDEuNy00IDcuNC4xIDkuMWw3My4yIDI5YzYuNCAyLjYgMTMuNiAyLjYgMjAgMGw3My4yLTI5YzQuMS0xLjYgNC4xLTcuNC4xLTkuMWwtNzMtMzAuMUMxMDMuMiAyIDk1LjcgMiA4OSA0LjgiLz48cGF0aCBmaWxsPSIjMThiZmZmIiBkPSJNMTA1LjkgODguOXY3Mi41YzAgMy40IDMuNSA1LjggNi43IDQuNWw4MS42LTMxLjdjMS45LS43IDMuMS0yLjUgMy4xLTQuNVY1Ny4yYzAtMy40LTMuNS01LjgtNi43LTQuNUwxMDkgODQuM2MtMS45LjgtMy4xIDIuNi0zLjEgNC42Ii8+PHBhdGggZmlsbD0iI2Y4MmI2MCIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctMi41IDEuMkw5LjEgMTMwYy0zLjIgMS42LTcuNC0uOC03LjQtNC40VjU3LjVjMC0xLjMuNy0yLjQgMS42LTMuM3EuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNSA0LjMgNy4xLjUgOC45Ii8+PHBhdGggZmlsbD0iI2JhMWU0NSIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctNTkuNC01MHEuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNCA0LjMgNyAuNSA4LjgiLz48L3N2Zz4="
+      },
+      "displayName": "Airtable",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 39,
+      "name": "CRM"
+    }
+  ],
+  "image": []
+}

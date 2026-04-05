@@ -1,0 +1,1349 @@
+{
+  "id": 11750,
+  "name": "Regional prospecting for registered companies in Germany",
+  "views": 123,
+  "recentViews": 0,
+  "totalViews": 123,
+  "createdAt": "2025-12-12T15:33:34.784Z",
+  "description": "# Regional Prospecting for registered Companies in Germany\n\nFind and qualify registered companies in specific regions using Implisense Search API (Handelsregister). This API provides all officially registered companies in Germany (about 2,5 million).\n\n**Input Parameters:**\n- `query`: Search terms (e.g., \"software OR it\")\n- `regionCode`: ZIP/postal code region (e.g., \"de-10\")\n- `industryCode`: NACE industry code (e.g., \"J62\")\n- `pageSize`: Max results (1-1000)\n\n**Quality Levels:**\n- **High:** Score ≥15 (active, website, full address)\n- **Medium:** Score &lt;15\n\n## How it works\n\nPhase 1: Init\nPhase 2: Search\nPhase 3: Vetting\n\n## Setup steps\n\n### 1.  **Configure Credentials**: Set up RapidAPI API credentials\n   - Create an account on RapidAPI  (free tier available)\n   - Insert your RapidAPI x-rapidapi-key as password\n\n### 2. Configure Search Parameters\nsee above.\n\n### 3. Connect CRM/Database\nAfter \"Merge & Log Results\" node, add:\n- HTTP Request node for REST API\n- Database node for direct insertion\n- Or CRM-specific integration node",
+  "workflow": {
+    "meta": {
+      "instanceId": "4ceda4926e528030b63d1e667414f37860970ebeb79b51bb0265d85b2e1b47dc"
+    },
+    "nodes": [
+      {
+        "id": "5c81e0ee-d2d7-46f9-99e8-2861efa92786",
+        "name": "Manual Trigger",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          -80,
+          -128
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "0b5f2983-31cf-49c5-9eec-9e05cf6dfc67",
+        "name": "Validate Input",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          640,
+          -128
+        ],
+        "parameters": {
+          "jsCode": "// Validate input parameters\nconst input = $input.first().json;\n\nif (!input.query || input.query.trim() === '') {\n  throw new Error('Search query is required');\n}\n\nif (!input.regionCode || input.regionCode.trim() === '') {\n  throw new Error('Region code is required');\n}\n\nif (input.pageSize < 1 || input.pageSize > 1000) {\n  throw new Error('Page size must be between 1 and 1000');\n}\n\nconsole.log('✅ Input validation passed');\nconsole.log('Query: ' + input.query);\nconsole.log('Region: ' + input.regionCode);\nconsole.log('Industry: ' + (input.industryCode || 'None'));\nconsole.log('Page size: ' + input.pageSize);\n\nreturn [{ json: input }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "846dbd75-4471-45bf-b1b9-2da595edf01d",
+        "name": "Search Success?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1088,
+          -128
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "has_body",
+                "operator": {
+                  "type": "array",
+                  "operation": "exists",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.companies }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ec7aeb15-a6f7-4e18-9b95-9c4e444726bc",
+        "name": "Normalize & Score Results",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          144,
+          224
+        ],
+        "parameters": {
+          "jsCode": "// Process and normalize search results\nconst response = $input.first().json;\n\n// Implisense /search returns a SearchResult object.\n// In deinem Beispiel ist das Ergebnis zusätzlich in einem Array gekapselt.\n// Wir holen uns robust den eigentlichen Body:\nlet body;\n\nif (Array.isArray(response)) {\n  // Fall: HTTP Node liefert direkt das Array wie im Beispiel\n  body = response[0] || {};\n} else if (response && typeof response === 'object' && response.body) {\n  // Fall: Response ist { body: SearchResult, ... }\n  body = response.body;\n} else {\n  // Fall: Response ist direkt das SearchResult-Objekt\n  body = response || {};\n}\n\nconst companies = body.companies || body.results || [];\n// Implisense SearchResult hat das Feld \"size\" = total number of matches\n// https://docs.implisense.com/api/ :contentReference[oaicite:0]{index=0}\nconst total = (typeof body.size === 'number')\n  ? body.size\n  : (body.total || companies.length);\n\nconsole.log('✅ Search API Success: ' + companies.length + ' companies found (total: ' + total + ')');\n\nif (companies.length === 0) {\n  console.warn('⚠️ No companies found for the given criteria');\n  return [{\n    json: {\n      workflow_run_id: $('Prepare Search Input').first().json.workflow_run_id,\n      warning: 'No companies found',\n      query: $('Prepare Search Input').first().json.query,\n      regionCode: $('Prepare Search Input').first().json.regionCode,\n      timestamp: new Date().toISOString(),\n      total: total,\n    }\n  }];\n}\n\n// Normalize and enrich company data\nconst normalized = companies.map(function(company, idx) {\n  // Calculate relevance score based on multiple factors\n  let relevanceScore = company.score || 0;\n  \n  // Boost score if company is active\n  if (company.active === true) {\n    relevanceScore += 10;\n  }\n  \n  // Boost score if website exists\n  if (company.url && company.url.trim() !== '') {\n    relevanceScore += 5;\n  }\n  \n  // Boost score if full address available\n  if (company.street && company.zip && company.city) {\n    relevanceScore += 3;\n  }\n  \n  return {\n    idx: idx,\n    implisenseId: company.id,\n    name: company.name || '',\n    street: company.street || '',\n    zip: company.zip || '',\n    city: company.city || '',\n    url: company.url || '',\n    active: company.active !== false,\n    rawScore: company.score || 0,\n    relevanceScore: relevanceScore,\n    targetRegion: $('Prepare Search Input').first().json.regionCode,\n    industryCode: $('Prepare Search Input').first().json.industryCode,\n    source: 'search_api',\n    workflow_run_id: $('Prepare Search Input').first().json.workflow_run_id,\n    processed_at: new Date().toISOString(),\n    // Optional: total result size aus Implisense-Search (für spätere Steps hilfreich)\n    search_total: total,\n  };\n});\n\nconsole.log('📊 Normalized ' + normalized.length + ' companies with relevance scoring');\n\nreturn normalized.map(function(c) { return { json: c }; });\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e4b78b13-2c9b-4f79-909e-1344de81476e",
+        "name": "Sort by Relevance",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          368,
+          224
+        ],
+        "parameters": {
+          "jsCode": "// Sort by relevance score (descending)\nconst items = $input.all();\n\nconst sorted = items.sort(function(a, b) {\n  const scoreA = a.json.relevanceScore || 0;\n  const scoreB = b.json.relevanceScore || 0;\n  return scoreB - scoreA;\n});\n\nconsole.log('🔄 Sorted ' + sorted.length + ' companies by relevance score');\nif (sorted.length > 0) {\n  console.log('   Top company: ' + sorted[0].json.name + ' (score: ' + sorted[0].json.relevanceScore + ')');\n}\n\nreturn sorted;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "bbd15aab-8ba1-4d87-b243-64bebc7d620f",
+        "name": "High Quality Leads?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          640,
+          224
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "high_relevance",
+                "operator": {
+                  "type": "number",
+                  "operation": "gte"
+                },
+                "leftValue": "={{ $json.relevanceScore }}",
+                "rightValue": 15
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9e74d70d-2e9e-43d5-95d7-e27d36fc67ba",
+        "name": "Prepare High Quality Payload",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          864,
+          128
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "company_name",
+                "name": "companyName",
+                "type": "string",
+                "value": "={{ $json.name }}"
+              },
+              {
+                "id": "website",
+                "name": "website",
+                "type": "string",
+                "value": "={{ $json.url }}"
+              },
+              {
+                "id": "full_address",
+                "name": "fullAddress",
+                "type": "string",
+                "value": "={{ $json.street ? ($json.street + ', ' + $json.zip + ' ' + $json.city) : ($json.zip + ' ' + $json.city) }}"
+              },
+              {
+                "id": "zip_region",
+                "name": "zipRegion",
+                "type": "string",
+                "value": "={{ $json.targetRegion }}"
+              },
+              {
+                "id": "industry",
+                "name": "industryCode",
+                "type": "string",
+                "value": "={{ $json.industryCode }}"
+              },
+              {
+                "id": "implisense_id",
+                "name": "implisenseId",
+                "type": "string",
+                "value": "={{ $json.implisenseId }}"
+              },
+              {
+                "id": "relevance_score",
+                "name": "relevanceScore",
+                "type": "number",
+                "value": "={{ $json.relevanceScore }}"
+              },
+              {
+                "id": "lead_quality",
+                "name": "leadQuality",
+                "type": "string",
+                "value": "high"
+              },
+              {
+                "id": "is_active",
+                "name": "isActive",
+                "type": "boolean",
+                "value": "={{ $json.active }}"
+              },
+              {
+                "id": "source_system",
+                "name": "sourceSystem",
+                "type": "string",
+                "value": "implisense_geotargeting"
+              },
+              {
+                "id": "enriched_at",
+                "name": "enrichedAt",
+                "type": "string",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.3
+      },
+      {
+        "id": "0d691397-b02d-4062-bb1d-954582d0fb82",
+        "name": "Prepare Medium Quality Payload",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          864,
+          320
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "company_name",
+                "name": "companyName",
+                "type": "string",
+                "value": "={{ $json.name }}"
+              },
+              {
+                "id": "website",
+                "name": "website",
+                "type": "string",
+                "value": "={{ $json.url }}"
+              },
+              {
+                "id": "full_address",
+                "name": "fullAddress",
+                "type": "string",
+                "value": "={{ $json.street ? ($json.street + ', ' + $json.zip + ' ' + $json.city) : ($json.zip + ' ' + $json.city) }}"
+              },
+              {
+                "id": "zip_region",
+                "name": "zipRegion",
+                "type": "string",
+                "value": "={{ $json.targetRegion }}"
+              },
+              {
+                "id": "industry",
+                "name": "industryCode",
+                "type": "string",
+                "value": "={{ $json.industryCode }}"
+              },
+              {
+                "id": "implisense_id",
+                "name": "implisenseId",
+                "type": "string",
+                "value": "={{ $json.implisenseId }}"
+              },
+              {
+                "id": "relevance_score",
+                "name": "relevanceScore",
+                "type": "number",
+                "value": "={{ $json.relevanceScore }}"
+              },
+              {
+                "id": "lead_quality",
+                "name": "leadQuality",
+                "type": "string",
+                "value": "medium"
+              },
+              {
+                "id": "is_active",
+                "name": "isActive",
+                "type": "boolean",
+                "value": "={{ $json.active }}"
+              },
+              {
+                "id": "source_system",
+                "name": "sourceSystem",
+                "type": "string",
+                "value": "implisense_geotargeting"
+              },
+              {
+                "id": "enriched_at",
+                "name": "enrichedAt",
+                "type": "string",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.3,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "77d5ddae-690c-4822-a66f-e0a64f60ae55",
+        "name": "Merge & Log Results",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1088,
+          224
+        ],
+        "parameters": {
+          "jsCode": "// Merge and prepare final output\nconst items = $input.all();\n\nconsole.log('✅ Total qualified leads: ' + items.length);\n\nconst highQuality = items.filter(function(item) {\n  return item.json.leadQuality === 'high';\n}).length;\n\nconst mediumQuality = items.filter(function(item) {\n  return item.json.leadQuality === 'medium';\n}).length;\n\nconsole.log('   High quality: ' + highQuality);\nconsole.log('   Medium quality: ' + mediumQuality);\n\nreturn items;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f75de453-9a23-4a6c-aacf-a9f7af87ad0f",
+        "name": "Generate Summary Report",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          1328,
+          224
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "summary",
+                "name": "summary",
+                "type": "object",
+                "value": "={{ {\n  workflow_run_id: $('Prepare Search Input').first().json.workflow_run_id,\n  started_at: $('Prepare Search Input').first().json.started_at,\n  completed_at: $now.toISO(),\n  input: {\n    query: $('Prepare Search Input').first().json.query,\n    regionCode: $('Prepare Search Input').first().json.regionCode,\n    industryCode: $('Prepare Search Input').first().json.industryCode,\n    pageSize: $('Prepare Search Input').first().json.pageSize\n  },\n  results: {\n    totalFound: $('Normalize & Score Results').all().length || 0,\n    highQualityLeads: $('Prepare High Quality Payload').all().length || 0,\n    // mediumQualityLeads: $('Prepare Medium Quality Payload').all().length || 0,\n    totalQualified: $('Merge & Log Results').all().length || 0\n  }\n} }}"
+              },
+              {
+                "id": "leads",
+                "name": "leads",
+                "type": "array",
+                "value": "={{ $('Merge & Log Results').all().map(function(item) { return item.json; }) }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.3
+      },
+      {
+        "id": "2f9c851f-932f-42a7-a071-2c43cbf77e73",
+        "name": "🏗️ Architecture Notes",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -704,
+          -192
+        ],
+        "parameters": {
+          "width": 544,
+          "height": 1008,
+          "content": "# Regional Prospecting for registered Companies in Germany\n\nFind and qualify registered companies in specific regions using Implisense Search API (Handelsregister). This API provides all officially registered companies in Germany (about 2,5 million).\n\n**Input Parameters:**\n- `query`: Search terms (e.g., \"software OR it\")\n- `regionCode`: ZIP/postal code region (e.g., \"de-10\")\n- `industryCode`: NACE industry code (e.g., \"J62\")\n- `pageSize`: Max results (1-1000)\n\n**Quality Levels:**\n- **High:** Score ≥15 (active, website, full address)\n- **Medium:** Score <15\n\n## How it works\n\nPhase 1: Init\nPhase 2: Search\nPhase 3: Vetting\n\n## Setup steps\n\n### 1.  **Configure Credentials**: Set up RapidAPI API credentials\n   - Create an account on RapidAPI  (free tier available)\n   - Insert your RapidAPI x-rapidapi-key as password\n\n### 2. Configure Search Parameters\nsee above.\n\n### 3. Connect CRM/Database\nAfter \"Merge & Log Results\" node, add:\n- HTTP Request node for REST API\n- Database node for direct insertion\n- Or CRM-specific integration node"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "506eb039-8030-4b54-b5e3-7b0627f757d8",
+        "name": "Implisense Search",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          864,
+          -128
+        ],
+        "parameters": {
+          "url": "https://german-company-data.p.rapidapi.com/search",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={{ {\n  \"query\": $json.query,\n  \"from\": 0,\n  \"size\": $json.pageSize,\n  \"explain\": false\n} }}",
+          "sendBody": true,
+          "sendQuery": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "explain",
+                "value": "true"
+              },
+              {
+                "name": "from",
+                "value": "0"
+              },
+              {
+                "name": "size",
+                "value": "3"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              },
+              {
+                "name": "x-rapidapi-host",
+                "value": "german-company-data.p.rapidapi.com"
+              },
+              {
+                "name": "x-rapidapi-key",
+                "value": "={{ $('Authorization').item.json['x-rapidapi-key'] }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "55cd99e5-efc0-4cd4-91c5-dc3017a7ac17",
+        "name": "Authorization",
+        "type": "n8n-nodes-base.set",
+        "notes": "Get API key here:\n\nhttps://rapidapi.com/Implisense/api/german-company-data/playground",
+        "position": [
+          144,
+          -128
+        ],
+        "parameters": {
+          "values": {
+            "string": [
+              {
+                "name": "x-rapidapi-key",
+                "value": "XXXX"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "f5f0a2aa-1925-4ed7-b1b0-f924bdb4d6d1",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 672,
+          "height": 256,
+          "content": "## Init\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1efcd31d-27e1-4181-9137-1f87ab56493c",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          560,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 944,
+          "height": 256,
+          "content": "## Search\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a136c8fa-71a9-4dc7-a52e-a97ed46318da",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1344,
+          "height": 432,
+          "content": "## Vetting\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b259d5d7-d6dc-40ee-bc67-5e1b34d5da33",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1232,
+          80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 272,
+          "height": 432,
+          "content": "## Output\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1080cd5a-eb6d-4530-826a-00bef910d5a3",
+        "name": "Prepare Search Input",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          368,
+          -128
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "workflow_run_id",
+                "name": "workflow_run_id",
+                "type": "string",
+                "value": "={{ $execution.id }}"
+              },
+              {
+                "id": "started_at",
+                "name": "started_at",
+                "type": "string",
+                "value": "={{ $now.toISO() }}"
+              },
+              {
+                "id": "search_query",
+                "name": "query",
+                "type": "string",
+                "value": "={{ $json.query || 'hubspot AND chat' }}"
+              },
+              {
+                "id": "region_code",
+                "name": "regionCode",
+                "type": "string",
+                "value": "={{ $json.regionCode || 'de-10' }}"
+              },
+              {
+                "id": "industry_code",
+                "name": "industryCode",
+                "type": "string",
+                "value": "={{ $json.industryCode || 'J62' }}"
+              },
+              {
+                "id": "page_size",
+                "name": "pageSize",
+                "type": "number",
+                "value": "={{ $json.pageSize || 100 }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.3
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Authorization": {
+        "main": [
+          [
+            {
+              "node": "Prepare Search Input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Manual Trigger": {
+        "main": [
+          [
+            {
+              "node": "Authorization",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Input": {
+        "main": [
+          [
+            {
+              "node": "Implisense Search",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search Success?": {
+        "main": [
+          [
+            {
+              "node": "Normalize & Score Results",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      },
+      "Implisense Search": {
+        "main": [
+          [
+            {
+              "node": "Search Success?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sort by Relevance": {
+        "main": [
+          [
+            {
+              "node": "High Quality Leads?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "High Quality Leads?": {
+        "main": [
+          [
+            {
+              "node": "Prepare High Quality Payload",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Prepare Medium Quality Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge & Log Results": {
+        "main": [
+          [
+            {
+              "node": "Generate Summary Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Search Input": {
+        "main": [
+          [
+            {
+              "node": "Validate Input",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize & Score Results": {
+        "main": [
+          [
+            {
+              "node": "Sort by Relevance",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare High Quality Payload": {
+        "main": [
+          [
+            {
+              "node": "Merge & Log Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Medium Quality Payload": {
+        "main": [
+          [
+            {
+              "node": "Merge & Log Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 18,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.set": {
+        "count": 5
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 5
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "as311",
+    "username": "implisense",
+    "bio": "Been building in n8n since 2020, now 500+ workflows deep. My zone: B2B marketing/sales data —moving, shaping, deduping, enriching, and making systems talk nicely to each other. If it’s repetitive, it should be automated.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/aschaefer311/"
+    ],
+    "avatar": "https://gravatar.com/avatar/44df1d2ecc07ecfabbd248ee960fe4db760a4200b7961c0121dd922dee347227?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 37,
+      "name": "Lead Generation"
+    }
+  ],
+  "image": []
+}

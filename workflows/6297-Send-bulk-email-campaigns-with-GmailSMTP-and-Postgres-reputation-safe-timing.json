@@ -1,0 +1,2404 @@
+{
+  "id": 14275,
+  "name": "Send bulk email campaigns with Gmail/SMTP and Postgres reputation-safe timing",
+  "views": 31,
+  "recentViews": 62,
+  "totalViews": 31,
+  "createdAt": "2026-03-23T16:44:51.655Z",
+  "description": "\n\n## Overview\nThis workflow automates bulk email campaigns with built-in validation, deliverability protection, and smart send-time optimization.\n\nIt processes CSV leads, validates emails, enriches data, and schedules campaigns intelligently. Emails are sent using controlled inbox rotation, while engagement tracking and analytics continuously improve performance.\n\n---\n\n## How It Works\n\n1. **Campaign Input**\n   Receives campaign data and CSV leads via webhook.\n\n2. **Lead Processing**\n   Extracts CSV data, splits leads, and validates email format.\n\n3. **Domain & Quality Checks**\n   Verifies domains using MX records and filters invalid leads.\n\n4. **Lead Enrichment**\n   Adds timezone, domain type, and engagement score for better targeting.\n\n5. **Lead Storage**\n   Stores valid leads and separates invalid ones for tracking.\n\n6. **Campaign Execution**\n   Scheduler fetches active campaigns and selects top leads.\n\n7. **Send Optimization**\n   Calculates best send time per lead based on timezone and historical performance, while selecting inboxes within sending limits.\n\n8. **Email Delivery**\n   Waits until optimal time and sends emails using selected inbox.\n\n9. **Tracking & Logging**\n   Logs sent emails and updates inbox usage statistics.\n\n10. **Event Tracking**\n   Captures opens, clicks, replies, and bounces via webhook.\n\n11. **Performance Analytics**\n   Updates campaign stats and analyzes engagement trends.\n\n12. **Continuous Optimization**\n   Updates send-time rules to improve future campaign performance.\n\n---\n\n## Setup Instructions\n\n- Connect webhook for campaign and CSV upload  \n- Configure send limits, delays, and MX API  \n- Set up Postgres with required tables  \n- Connect Gmail or SMTP for sending  \n- Configure event webhook for tracking  \n- Enable campaign and analytics schedulers  \n- Test with sample campaign before activating  \n\n---\n\n## Use Cases\n\n- Running cold email campaigns at scale  \n- Improving email deliverability and sender reputation  \n- Automating lead validation and enrichment  \n- Optimizing send times based on engagement data  \n- Managing multi-inbox outbound systems  \n\n---\n\n## Requirements\n\n- n8n instance with webhook support  \n- Postgres database  \n- Gmail or SMTP email account(s)  \n- MX record lookup API (e.g., Google DNS)  \n- Email tracking system or webhook integration  \n\n---\n\n## Notes\n\n- Inbox rotation and throttling help prevent spam and protect reputation.\n- Engagement-based lead scoring improves campaign performance.\n- Send-time optimization is continuously refined using real data.\n- You can extend this workflow with personalization or AI-generated emails.",
+  "workflow": {
+    "meta": {
+      "instanceId": "48aac30adfc5487a33ef16e0e958096f27cef40df3ed0febcbe1ca199e789786"
+    },
+    "nodes": [
+      {
+        "id": "cd37d46a-f769-458d-b7f5-7019f777ea06",
+        "name": "Campaign Upload Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -1344,
+          96
+        ],
+        "webhookId": "2aa3038e-de02-4cb6-9222-027f03fbeeb7",
+        "parameters": {
+          "path": "campaign-upload",
+          "options": {},
+          "httpMethod": "POST",
+          "responseMode": "lastNode"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "9fc5e2b2-6dab-4abe-bd8c-a62462f5a72e",
+        "name": "Workflow Configuration",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -1168,
+          96
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "id-1",
+                "name": "maxEmailsPerInboxPerHour",
+                "type": "number",
+                "value": 50
+              },
+              {
+                "id": "id-2",
+                "name": "maxEmailsPerInboxPerDay",
+                "type": "number",
+                "value": 500
+              },
+              {
+                "id": "id-3",
+                "name": "minDelayBetweenEmailsMinutes",
+                "type": "number",
+                "value": 2
+              },
+              {
+                "id": "id-4",
+                "name": "mxRecordCheckApiUrl",
+                "type": "string",
+                "value": "https://dns.google/resolve"
+              },
+              {
+                "id": "id-5",
+                "name": "defaultTimezone",
+                "type": "string",
+                "value": "UTC"
+              }
+            ]
+          },
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "3952be89-1a72-4ec4-832e-af07b5116b2c",
+        "name": "Extract CSV Leads",
+        "type": "n8n-nodes-base.extractFromFile",
+        "position": [
+          -896,
+          96
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "5808ce88-41d3-421b-a8ca-64345c6cdcd5",
+        "name": "Split Leads",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          -672,
+          96
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1ac2e8a4-ca32-4fe6-b0ae-3e31787a4d11",
+        "name": "Validate Email & Extract Domain",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -496,
+          96
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Validate email syntax and extract domain information\nconst email = $input.item.json.email;\n\n// Email validation regex (RFC 5322 simplified)\nconst emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;\n\nconst isValid = emailRegex.test(email);\n\nlet domain = null;\nif (isValid && email) {\n  const parts = email.split('@');\n  if (parts.length === 2) {\n    domain = parts[1].toLowerCase();\n  }\n}\n\n// Return the original data plus validation results\nreturn {\n  ...($input.item.json),\n  isValid: isValid,\n  domain: domain,\n  validatedAt: new Date().toISOString()\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c1868399-326e-4b25-8885-7e0361716bd3",
+        "name": "Is Email Valid?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -224,
+          96
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "leftValue": "",
+              "caseSensitive": false,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "id-1",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true"
+                },
+                "leftValue": "={{ $('Validate Email & Extract Domain').item.json.isValid }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "8f9fff06-c9ec-4231-b7fc-9fe49848da31",
+        "name": "Check Domain MX Records",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          96,
+          0
+        ],
+        "parameters": {
+          "url": "={{ $('Workflow Configuration').first().json.mxRecordCheckApiUrl }}?name={{ $json.domain }}&type=MX",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "0cd57923-f1a2-48ec-af11-1a9ab4bfa27c",
+        "name": "Enrich Lead Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          448,
+          0
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Extract timezone from email domain, determine domain type, calculate engagement score\nconst item = $input.item.json;\n\n// Extract domain from email\nconst email = item.email || '';\nconst domain = email.split('@')[1] || '';\n\n// Determine domain type\nlet domainType = 'corporate';\nconst freeEmailProviders = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'aol.com', 'icloud.com', 'protonmail.com', 'mail.com'];\n\nif (freeEmailProviders.includes(domain.toLowerCase())) {\n  if (domain.toLowerCase().includes('gmail')) {\n    domainType = 'gmail';\n  } else if (domain.toLowerCase().includes('outlook') || domain.toLowerCase().includes('hotmail')) {\n    domainType = 'outlook';\n  } else {\n    domainType = 'free';\n  }\n}\n\n// Extract timezone (simplified - based on domain TLD or default to UTC)\n// In production, you'd use a GeoIP service or domain lookup\nlet timezone = 'UTC';\nconst tld = domain.split('.').pop();\n\n// Simple TLD to timezone mapping\nconst tldTimezones = {\n  'us': 'America/New_York',\n  'uk': 'Europe/London',\n  'ca': 'America/Toronto',\n  'au': 'Australia/Sydney',\n  'de': 'Europe/Berlin',\n  'fr': 'Europe/Paris',\n  'jp': 'Asia/Tokyo',\n  'in': 'Asia/Kolkata',\n  'br': 'America/Sao_Paulo'\n};\n\ntimezone = tldTimezones[tld] || 'UTC';\n\n// Calculate engagement score (0-100)\n// Factors: domain type, MX records validity, domain age estimate\nlet engagementScore = 50; // Base score\n\n// Domain type scoring\nif (domainType === 'corporate') {\n  engagementScore += 20; // Corporate emails tend to have higher engagement\n} else if (domainType === 'gmail') {\n  engagementScore += 10;\n} else if (domainType === 'outlook') {\n  engagementScore += 5;\n}\n\n// MX records validity (if available from previous node)\nif (item.mxValid === true || item.hasMxRecords === true) {\n  engagementScore += 15;\n}\n\n// Domain length (shorter corporate domains often indicate established companies)\nif (domainType === 'corporate' && domain.length < 15) {\n  engagementScore += 10;\n}\n\n// Ensure score is within 0-100 range\nengagementScore = Math.min(100, Math.max(0, engagementScore));\n\n// Merge with original lead data\nconst enrichedLead = {\n  ...item,\n  domain: domain,\n  domainType: domainType,\n  timezone: timezone,\n  engagementScore: engagementScore,\n  enrichedAt: new Date().toISOString(),\n  isEnriched: true\n};\n\nreturn enrichedLead;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "30771931-e4b9-446c-8fd4-9168fb388209",
+        "name": "Store Valid Lead",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          672,
+          0
+        ],
+        "parameters": {
+          "table": {
+            "__rl": true,
+            "mode": "name",
+            "value": "leads"
+          },
+          "schema": {
+            "__rl": true,
+            "mode": "list",
+            "value": "public"
+          },
+          "columns": {
+            "value": {
+              "email": "={{ $json.email }}",
+              "domain": "={{ $json.domain }}",
+              "status": "pending",
+              "timezone": "={{ $json.timezone }}",
+              "campaign_id": "={{ $json.campaign_id }}",
+              "domain_type": "={{ $json.domain_type }}",
+              "engagement_score": "={{ $json.engagement_score }}"
+            },
+            "mappingMode": "defineBelow"
+          },
+          "options": {}
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "be00b299-c935-4b8a-a08d-b3d6e09eacef",
+        "name": "Store Invalid Lead",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          96,
+          208
+        ],
+        "parameters": {
+          "table": {
+            "__rl": true,
+            "mode": "name",
+            "value": "invalid_leads"
+          },
+          "schema": {
+            "__rl": true,
+            "mode": "list",
+            "value": "public"
+          },
+          "columns": {
+            "value": {
+              "email": "={{ $json.email }}",
+              "reason": "invalid_syntax_or_domain",
+              "campaign_id": "={{ $json.campaign_id }}"
+            },
+            "mappingMode": "defineBelow"
+          },
+          "options": {}
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "5efbf8aa-2368-452d-911c-2fc5504be140",
+        "name": "Campaign Scheduler",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1344,
+          688
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "f431a43a-4712-4436-9c43-e31f6cfdd3dc",
+        "name": "Get Pending Campaigns",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -1152,
+          688
+        ],
+        "parameters": {
+          "query": "SELECT * FROM campaigns WHERE status = 'active' AND scheduled_time <= NOW()",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "1913e611-eae0-4555-9750-3b33b86413d6",
+        "name": "Split Campaigns",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          -896,
+          688
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3b96f62b-f494-45ed-a286-f6f520bf9413",
+        "name": "Get Campaign Leads",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -672,
+          688
+        ],
+        "parameters": {
+          "query": "SELECT l.*, st.best_send_hour FROM leads l LEFT JOIN send_time_rules st ON l.timezone = st.timezone WHERE l.campaign_id = {{ $json.id }} AND l.status = 'pending' ORDER BY l.engagement_score DESC LIMIT 100",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "bc92f362-f8a6-4372-ae89-2860bd776c9c",
+        "name": "Split Campaign Leads",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          -464,
+          688
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7a980288-ec94-4bd1-8e58-4c2b0134e1a1",
+        "name": "Calculate Send Time & Select Inbox",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -288,
+          688
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Calculate optimal send time and select inbox with round-robin and throttle limits\n\nconst item = $input.item.json;\n\n// Extract lead and campaign data\nconst leadTimezone = item.timezone || 'America/New_York';\nconst bestSendHour = item.best_send_hour || 10; // Default to 10 AM\nconst campaignId = item.campaign_id;\n\n// Calculate optimal send time based on timezone and best send hour\nconst now = new Date();\nconst sendTime = new Date();\n\n// Convert to lead's timezone and set to best send hour\ntry {\n  const luxon = require('luxon');\n  const dt = luxon.DateTime.now().setZone(leadTimezone);\n  \n  // Set to best send hour today\n  let targetTime = dt.set({ hour: bestSendHour, minute: 0, second: 0, millisecond: 0 });\n  \n  // If the time has passed today, schedule for tomorrow\n  if (targetTime < dt) {\n    targetTime = targetTime.plus({ days: 1 });\n  }\n  \n  sendTime.setTime(targetTime.toMillis());\n} catch (error) {\n  // Fallback: schedule for next occurrence of best send hour\n  sendTime.setHours(bestSendHour, 0, 0, 0);\n  if (sendTime <= now) {\n    sendTime.setDate(sendTime.getDate() + 1);\n  }\n}\n\n// Get available inboxes (this would typically come from a database query)\n// For now, we'll use a placeholder that should be replaced with actual inbox data\nconst inboxes = item.available_inboxes || [];\n\nif (!inboxes || inboxes.length === 0) {\n  throw new Error('No available inboxes found for campaign');\n}\n\n// Round-robin inbox selection with throttle limit checking\nlet selectedInbox = null;\nconst currentHour = now.getHours();\nconst currentDate = now.toISOString().split('T')[0];\n\nfor (let i = 0; i < inboxes.length; i++) {\n  const inbox = inboxes[i];\n  \n  // Check daily limit\n  const dailySent = inbox.daily_sent || 0;\n  const dailyLimit = inbox.daily_limit || 500;\n  \n  // Check hourly limit\n  const hourlySent = inbox.hourly_sent || 0;\n  const hourlyLimit = inbox.hourly_limit || 50;\n  \n  // Check if inbox is within limits\n  if (dailySent < dailyLimit && hourlySent < hourlyLimit) {\n    selectedInbox = inbox;\n    break;\n  }\n}\n\nif (!selectedInbox) {\n  throw new Error('All inboxes have reached their throttle limits');\n}\n\n// Return the calculated data\nreturn {\n  ...item,\n  sendTime: sendTime.toISOString(),\n  selectedInbox: {\n    id: selectedInbox.id,\n    email: selectedInbox.email,\n    daily_sent: selectedInbox.daily_sent || 0,\n    daily_limit: selectedInbox.daily_limit || 500,\n    hourly_sent: selectedInbox.hourly_sent || 0,\n    hourly_limit: selectedInbox.hourly_limit || 50\n  },\n  calculatedAt: now.toISOString()\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c2ed8ee4-96e1-4867-961a-31c1f22d2310",
+        "name": "Wait Until Send Time",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          0,
+          688
+        ],
+        "webhookId": "716ccc9f-9e9c-4c3f-94b8-218687d41796",
+        "parameters": {
+          "resume": "specificTime",
+          "dateTime": "={{ $json.sendTime }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "40b97f6f-7e1a-45c3-8fb7-9435014d0d76",
+        "name": "Send Email",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          224,
+          688
+        ],
+        "webhookId": "82f31619-0f9a-4f5f-9b22-b52ac4cd8034",
+        "parameters": {
+          "sendTo": "={{ $json.email }}",
+          "message": "={{ $json.emailBody }}",
+          "options": {
+            "senderName": "={{ $json.selectedInbox }}"
+          },
+          "subject": "={{ $json.subject }}"
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "c3e86c12-f430-4149-8e8d-ed7cc09f6c08",
+        "name": "Log Send Event",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          464,
+          688
+        ],
+        "parameters": {
+          "table": {
+            "__rl": true,
+            "mode": "name",
+            "value": "email_events"
+          },
+          "schema": {
+            "__rl": true,
+            "mode": "list",
+            "value": "public"
+          },
+          "columns": {
+            "value": {
+              "lead_id": "={{ $json.lead_id }}",
+              "sent_at": "={{ $now.toISO() }}",
+              "event_type": "sent",
+              "inbox_used": "={{ $json.inbox_used }}",
+              "campaign_id": "={{ $json.campaign_id }}"
+            },
+            "schema": [
+              {
+                "id": "lead_id",
+                "required": false,
+                "displayName": "lead_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "campaign_id",
+                "required": false,
+                "displayName": "campaign_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "event_type",
+                "required": false,
+                "displayName": "event_type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "inbox_used",
+                "required": false,
+                "displayName": "inbox_used",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sent_at",
+                "required": false,
+                "displayName": "sent_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": []
+          },
+          "options": {}
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "6abae748-9768-426a-ad65-38dff04ffb12",
+        "name": "Update Inbox Stats",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          688,
+          688
+        ],
+        "parameters": {
+          "query": "UPDATE inbox_stats SET emails_sent_today = emails_sent_today + 1, emails_sent_this_hour = emails_sent_this_hour + 1, last_send_time = NOW() WHERE inbox_email = '={{ $json.selectedInbox }}'",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "48e31d93-c6bd-4905-aa79-fac9540f1cf8",
+        "name": "Email Event Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -1392,
+          1040
+        ],
+        "webhookId": "6e4acaba-c102-4f8c-99ad-10da58402e6c",
+        "parameters": {
+          "path": "email-events",
+          "options": {},
+          "httpMethod": "POST"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "1901961d-dc62-4ef3-ab2d-03b773f0bf73",
+        "name": "Parse Event Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1088,
+          1040
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Parse webhook payload for email events\nconst payload = $input.item.json;\n\n// Extract event data from webhook payload\nconst eventType = payload.event_type || payload.eventType || payload.type || 'unknown';\nconst emailIdentifier = payload.email_id || payload.emailId || payload.message_id || payload.messageId || '';\nconst timestamp = payload.timestamp || payload.event_time || payload.eventTime || new Date().toISOString();\n\n// Extract additional event details\nconst recipientEmail = payload.recipient || payload.to || payload.email || '';\nconst campaignId = payload.campaign_id || payload.campaignId || '';\nconst leadId = payload.lead_id || payload.leadId || '';\n\n// Extract event-specific data\nlet eventDetails = {};\n\nswitch(eventType.toLowerCase()) {\n  case 'open':\n    eventDetails = {\n      userAgent: payload.user_agent || payload.userAgent || '',\n      ipAddress: payload.ip_address || payload.ipAddress || '',\n      location: payload.location || ''\n    };\n    break;\n  \n  case 'click':\n    eventDetails = {\n      clickedUrl: payload.url || payload.link || '',\n      userAgent: payload.user_agent || payload.userAgent || '',\n      ipAddress: payload.ip_address || payload.ipAddress || ''\n    };\n    break;\n  \n  case 'reply':\n    eventDetails = {\n      replyContent: payload.reply_content || payload.content || '',\n      replySubject: payload.subject || ''\n    };\n    break;\n  \n  case 'bounce':\n    eventDetails = {\n      bounceType: payload.bounce_type || payload.bounceType || 'hard',\n      bounceReason: payload.reason || payload.bounce_reason || '',\n      diagnosticCode: payload.diagnostic_code || ''\n    };\n    break;\n  \n  default:\n    eventDetails = payload;\n}\n\n// Return structured event data\nreturn {\n  eventType: eventType.toLowerCase(),\n  emailIdentifier,\n  timestamp,\n  recipientEmail,\n  campaignId,\n  leadId,\n  eventDetails,\n  rawPayload: payload\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "3266e902-d2ca-4edb-bc64-8cc7a985b9ba",
+        "name": "Log Email Event",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -800,
+          1040
+        ],
+        "parameters": {
+          "table": {
+            "__rl": true,
+            "mode": "name",
+            "value": "email_events"
+          },
+          "schema": {
+            "__rl": true,
+            "mode": "list",
+            "value": "public"
+          },
+          "columns": {
+            "value": {
+              "lead_id": "={{ $json.lead_id }}",
+              "event_type": "={{ $json.event_type }}",
+              "inbox_used": "={{ $json.inbox_used }}",
+              "campaign_id": "={{ $json.campaign_id }}",
+              "event_timestamp": "={{ $json.event_timestamp }}"
+            },
+            "schema": [
+              {
+                "id": "lead_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "lead_id",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "campaign_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "campaign_id",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "event_type",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "event_type",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "event_timestamp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "event_timestamp",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "inbox_used",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "inbox_used",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "lead_id",
+              "campaign_id",
+              "event_type",
+              "event_timestamp",
+              "inbox_used"
+            ]
+          },
+          "options": {}
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "2854d08a-fb91-4fe8-9ab6-a1ececaadc8d",
+        "name": "Update Performance Stats",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -528,
+          1040
+        ],
+        "parameters": {
+          "query": "UPDATE campaign_stats SET total_opens = total_opens + CASE WHEN '{{ $json.event_type }}' = 'open' THEN 1 ELSE 0 END, total_clicks = total_clicks + CASE WHEN '{{ $json.event_type }}' = 'click' THEN 1 ELSE 0 END, total_replies = total_replies + CASE WHEN '{{ $json.event_type }}' = 'reply' THEN 1 ELSE 0 END WHERE campaign_id = {{ $json.campaign_id }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "fef6b1e5-9d82-4cc0-9b01-42abcc49ef88",
+        "name": "Analytics Scheduler",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1408,
+          1392
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {}
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "48403e27-7aa8-4f3d-987f-8d317489d3e9",
+        "name": "Get Performance Data",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -1024,
+          1392
+        ],
+        "parameters": {
+          "query": "SELECT EXTRACT(HOUR FROM event_timestamp) as hour, l.timezone, COUNT(*) as open_count FROM email_events e JOIN leads l ON e.lead_id = l.id WHERE e.event_type = 'open' AND e.event_timestamp > NOW() - INTERVAL '30 days' GROUP BY hour, l.timezone ORDER BY l.timezone, open_count DESC",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "25dd805e-0568-473e-b84d-2c2b3b071fa9",
+        "name": "Calculate Best Send Times",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -800,
+          1392
+        ],
+        "parameters": {
+          "jsCode": "// Analyze performance data to find optimal send times by timezone\nconst items = $input.all();\n\n// Group data by timezone and hour\nconst timezoneHourStats = {};\n\nfor (const item of items) {\n  const timezone = item.json.timezone || 'UTC';\n  const sendHour = item.json.send_hour;\n  const openRate = parseFloat(item.json.open_rate) || 0;\n  const totalSent = parseInt(item.json.total_sent) || 0;\n  const totalOpened = parseInt(item.json.total_opened) || 0;\n  \n  if (!timezoneHourStats[timezone]) {\n    timezoneHourStats[timezone] = {};\n  }\n  \n  if (!timezoneHourStats[timezone][sendHour]) {\n    timezoneHourStats[timezone][sendHour] = {\n      totalSent: 0,\n      totalOpened: 0,\n      openRate: 0,\n      count: 0\n    };\n  }\n  \n  timezoneHourStats[timezone][sendHour].totalSent += totalSent;\n  timezoneHourStats[timezone][sendHour].totalOpened += totalOpened;\n  timezoneHourStats[timezone][sendHour].count += 1;\n}\n\n// Calculate average open rates and find best send times\nconst results = [];\n\nfor (const timezone in timezoneHourStats) {\n  let bestHour = null;\n  let bestOpenRate = 0;\n  \n  for (const hour in timezoneHourStats[timezone]) {\n    const stats = timezoneHourStats[timezone][hour];\n    \n    // Calculate weighted open rate\n    if (stats.totalSent > 0) {\n      stats.openRate = (stats.totalOpened / stats.totalSent) * 100;\n      \n      // Track best performing hour\n      if (stats.openRate > bestOpenRate) {\n        bestOpenRate = stats.openRate;\n        bestHour = parseInt(hour);\n      }\n    }\n  }\n  \n  // Create result for this timezone\n  if (bestHour !== null) {\n    results.push({\n      json: {\n        timezone: timezone,\n        optimal_send_hour: bestHour,\n        best_open_rate: bestOpenRate.toFixed(2),\n        hour_stats: timezoneHourStats[timezone],\n        analyzed_at: new Date().toISOString()\n      }\n    });\n  }\n}\n\n// Sort by timezone for consistent output\nresults.sort((a, b) => a.json.timezone.localeCompare(b.json.timezone));\n\nreturn results;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "925458ce-cb95-47d4-ab87-8ba2589088a0",
+        "name": "Update Send Time Rules",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -496,
+          1392
+        ],
+        "parameters": {
+          "table": {
+            "__rl": true,
+            "mode": "name",
+            "value": "send_time_rules"
+          },
+          "schema": {
+            "__rl": true,
+            "mode": "list",
+            "value": "public"
+          },
+          "columns": {
+            "value": {
+              "timezone": "={{ $json.timezone }}",
+              "last_updated": "={{ $now.toISO() }}",
+              "best_send_hour": "={{ $json.best_send_hour }}"
+            },
+            "schema": [
+              {
+                "id": "timezone",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timezone",
+                "defaultMatch": true,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "best_send_hour",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "best_send_hour",
+                "defaultMatch": false,
+                "canBeUsedToMatch": false
+              },
+              {
+                "id": "last_updated",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "last_updated",
+                "defaultMatch": false,
+                "canBeUsedToMatch": false
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "timezone"
+            ]
+          },
+          "options": {},
+          "operation": "upsert"
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "d362c82d-f245-403e-9f97-01fa0c52c328",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2528,
+          272
+        ],
+        "parameters": {
+          "width": 448,
+          "height": 560,
+          "content": "\n## How it works\nThis workflow automates end-to-end email campaigns with built-in deliverability protection and smart optimization. It ingests campaign data and CSV leads, validates emails, checks domains via MX records, and enriches leads with timezone and engagement scores.\n\nCampaigns are executed using a scheduler that selects top leads and calculates optimal send times based on timezone and past performance. Emails are sent through rotating inboxes with strict limits, while all events are tracked to continuously improve performance.\n\n## Setup\n\n- Connect webhook for campaign and CSV upload  \n- Configure send limits, delays, and MX API  \n- Set up Postgres with required tables  \n- Connect Gmail or SMTP for sending  \n- Configure event webhook for tracking  \n- Enable campaign and analytics schedulers  \n- Test with sample campaign before activating  \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "21b3c85d-68a7-407a-899f-309f08d14f5f",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1424,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 416,
+          "height": 432,
+          "content": "## Campaign Setup\nReceives campaign data and CSV leads. Configures limits, delays, and validation settings."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "eb10cf7a-9949-4308-ba8f-4f0ac24fcc5f",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -944,
+          -48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 352,
+          "content": "## Lead Extraction\nParses uploaded CSV and splits leads into individual records for processing."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bcf907e7-b88a-4786-928b-130239652069",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -544,
+          -48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 256,
+          "height": 352,
+          "content": "## Lead Extraction\nParses uploaded CSV and splits leads into individual records for processing."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "aa32dd2f-5e13-45a6-8ed4-4c15a5658c75",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -256,
+          -112
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 560,
+          "height": 416,
+          "content": "## Validation Routing\nValid leads continue to processing. Invalid ones are stored separately."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6d0d02fc-f7df-4675-b684-6baed29b6dde",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          368,
+          -144
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 352,
+          "content": "## Lead Enrichment\nVerifies domain via MX records, assigns timezone, and calculates engagement score before storing."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "92a3d87a-763c-4f05-b445-a6c5fac489e1",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          416,
+          512
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 352,
+          "content": "## Send Tracking\nLogs sent emails and updates inbox usage statistics."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bd5ca422-1ff4-42d6-b015-a893e8928097",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1152,
+          1280
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 304,
+          "content": "## Performance Analysis\nAnalyzes historical data to identify best-performing send times."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0ff46a9d-5be8-4a98-b27d-2c16b1e96056",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -608,
+          1264
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 272,
+          "height": 304,
+          "content": "## Continuous Optimization\nUpdates send-time rules to improve future campaign performance."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7cc7a2d5-c41f-461e-a27f-133e057e1f92",
+        "name": "Sticky Note10",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -848,
+          928
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 304,
+          "content": "## Performance Update\nUpdates campaign performance metrics based on user interactions."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "97438aba-43b1-4203-8509-40e5a2555922",
+        "name": "Sticky Note11",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -16,
+          560
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 272,
+          "content": "## Email Delivery\nWaits until optimal time and sends emails using selected inbox."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e6618eba-0b36-4a9e-a02d-1ffe6085375d",
+        "name": "Sticky Note12",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -912,
+          544
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 304,
+          "content": "## Lead Selection\nPulls top leads sorted by engagement score and readiness."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f89bd8ae-8836-4930-9401-58515cb0569e",
+        "name": "Sticky Note13",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1200,
+          944
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 304,
+          "height": 272,
+          "content": "## Event Processing\nParses event data and logs it for tracking and analytics."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "825e50a6-af56-48ce-99d4-a70acadb566d",
+        "name": "Sticky Note14",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1472,
+          592
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 512,
+          "height": 288,
+          "content": "## Campaign Execution\nFetches active campaigns and prepares them for email sending."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d8d560eb-e0e8-4a76-a982-0d150fda641d",
+        "name": "Sticky Note15",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -496,
+          544
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 304,
+          "content": "## Send Optimization\nCalculates best send time per lead and selects inbox using rotation and limits."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c982d118-1ec4-4b85-b2a1-bdc0a80a985c",
+        "name": "Sticky Note16",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1504,
+          944
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 272,
+          "height": 272,
+          "content": "## Event Intake\nReceives email events like opens, clicks, replies, and bounces."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1f2fef7b-bb6c-45b9-b697-eb99635d4c84",
+        "name": "Sticky Note17",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1520,
+          1280
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 336,
+          "height": 304,
+          "content": "## Analytics Trigger\nRuns periodically to analyze campaign performance."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Send Email": {
+        "main": [
+          [
+            {
+              "node": "Log Send Event",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Leads": {
+        "main": [
+          [
+            {
+              "node": "Validate Email & Extract Domain",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log Send Event": {
+        "main": [
+          [
+            {
+              "node": "Update Inbox Stats",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Email Valid?": {
+        "main": [
+          [
+            {
+              "node": "Check Domain MX Records",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Store Invalid Lead",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log Email Event": {
+        "main": [
+          [
+            {
+              "node": "Update Performance Stats",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Campaigns": {
+        "main": [
+          [
+            {
+              "node": "Get Campaign Leads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Enrich Lead Data": {
+        "main": [
+          [
+            {
+              "node": "Store Valid Lead",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Event Data": {
+        "main": [
+          [
+            {
+              "node": "Log Email Event",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract CSV Leads": {
+        "main": [
+          [
+            {
+              "node": "Split Leads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Campaign Scheduler": {
+        "main": [
+          [
+            {
+              "node": "Get Pending Campaigns",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Campaign Leads": {
+        "main": [
+          [
+            {
+              "node": "Split Campaign Leads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Analytics Scheduler": {
+        "main": [
+          [
+            {
+              "node": "Get Performance Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Email Event Webhook": {
+        "main": [
+          [
+            {
+              "node": "Parse Event Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Performance Data": {
+        "main": [
+          [
+            {
+              "node": "Calculate Best Send Times",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Campaign Leads": {
+        "main": [
+          [
+            {
+              "node": "Calculate Send Time & Select Inbox",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Wait Until Send Time": {
+        "main": [
+          [
+            {
+              "node": "Send Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Pending Campaigns": {
+        "main": [
+          [
+            {
+              "node": "Split Campaigns",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Workflow Configuration": {
+        "main": [
+          [
+            {
+              "node": "Extract CSV Leads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Campaign Upload Webhook": {
+        "main": [
+          [
+            {
+              "node": "Workflow Configuration",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Domain MX Records": {
+        "main": [
+          [
+            {
+              "node": "Enrich Lead Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Calculate Best Send Times": {
+        "main": [
+          [
+            {
+              "node": "Update Send Time Rules",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Email & Extract Domain": {
+        "main": [
+          [
+            {
+              "node": "Is Email Valid?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Calculate Send Time & Select Inbox": {
+        "main": [
+          [
+            {
+              "node": "Wait Until Send Time",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 45,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 5
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 2
+      },
+      "n8n-nodes-base.postgres": {
+        "count": 10
+      },
+      "n8n-nodes-base.splitOut": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 17
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.extractFromFile": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 2
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "ResilNext",
+    "username": "rnair1996",
+    "bio": "",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/c20bc6c3bcdf260fac3c28c556a8db661ee93670037a3ceb857e047851f6f438?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "icon": "file:postgres.svg",
+      "name": "n8n-nodes-base.postgres",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/postgres/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Postgres"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzkgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwMCIgZD0iTTc3LjM5MSA0Ny45MjJjLS40NjYtMS40MTItMS42ODgtMi4zOTYtMy4yNjgtMi42MzItLjc0NS0uMTExLTEuNTk4LS4wNjQtMi42MDguMTQ0LTEuNzYuMzYzLTMuMDY1LjUwMS00LjAxOC41MjggMy41OTYtNi4wNzIgNi41MjEtMTIuOTk3IDguMjA0LTE5LjUxNSAyLjcyMi0xMC41NCAxLjI2OC0xNS4zNDEtLjQzMi0xNy41MTNDNzAuNzcgMy4xODUgNjQuMjA2LjA5NyA1Ni4yODcuMDAyYy00LjIyNC0uMDUyLTcuOTMzLjc4Mi05Ljg2NyAxLjM4MmEzNyAzNyAwIDAgMC01Ljc3LS41MjhjLTMuODA5LS4wNjEtNy4xNzQuNzctMTAuMDUgMi40NzZhNDYgNDYgMCAwIDAtNy4wOTgtMS43ODJDMTYuNTYxLjQxMSAxMC45NjggMS4yOTkgNi44NzYgNC4xOSAxLjkyMiA3LjY4OS0uMzc1IDEzLjc3LjA1IDIyLjI2MmMuMTM1IDIuNjk2IDEuNjQzIDEwLjkgNC4wMTggMTguNjggMS4zNjUgNC40NzIgMi44MiA4LjE4NSA0LjMyNiAxMS4wMzggMi4xMzUgNC4wNDYgNC40MTkgNi40MjggNi45ODQgNy4yODQgMS40MzguNDc5IDQuMDQ5LjgxNCA2Ljc5Ny0xLjQ3M2E2IDYgMCAwIDAgMS40MjkgMS4yM2MuNzgzLjQ5NCAxLjc0Ljg5NyAyLjY5NiAxLjEzNiAzLjQ0Ni44NjIgNi42NzQuNjQ2IDkuNDI3LS41NjFsLjA0MSAxLjM2Mi4wNiAxLjg5OWMuMTYzIDQuMDY0LjQ0IDcuMjIzIDEuMjU5IDkuNDM0LjA0NS4xMjIuMTA1LjMwNy4xNjkuNTAzLjQwOSAxLjI1MSAxLjA5MiAzLjM0NiAyLjgzIDQuOTg3IDEuOCAxLjY5OSAzLjk3OCAyLjIyIDUuOTcyIDIuMjIgMSAwIDEuOTU1LS4xMzEgMi43OTItLjMxMSAyLjk4NC0uNjM5IDYuMzczLTEuNjE0IDguODI0LTUuMTA0IDIuMzE4LTMuMyAzLjQ0NC04LjI3IDMuNjQ4LTE2LjEwMWwuMDc0LS42MzQuMDQ4LS40MTQuNTQ2LjA0OC4xNDEuMDFjMy4wMzkuMTM4IDYuNzU1LS41MDYgOS4wMzctMS41NjYgMS44MDMtLjgzNyA3LjU4Mi0zLjg4OCA2LjIyMS04LjAwNyIvPjxwYXRoIGZpbGw9IiMzMzY3OTEiIGQ9Ik03Mi4xOTUgNDguNzIzYy05LjAzNiAxLjg2NC05LjY1Ny0xLjE5NS05LjY1Ny0xLjE5NSA5LjU0MS0xNC4xNTcgMTMuNTI5LTMyLjEyNyAxMC4wODctMzYuNTI1QzYzLjIzNS0uOTk0IDQ2Ljk4MSA0LjY4IDQ2LjcxIDQuODI3bC0uMDg3LjAxNmMtMS43ODUtLjM3MS0zLjc4My0uNTkxLTYuMDI5LS42MjgtNC4wODktLjA2Ny03LjE5IDEuMDcyLTkuNTQ0IDIuODU3IDAgMC0yOC45OTUtMTEuOTQ1LTI3LjY0NyAxNS4wMjMuMjg3IDUuNzM3IDguMjIzIDQzLjQxIDE3LjY4OSAzMi4wMzEgMy40Ni00LjE2MSA2LjgwMy03LjY3OSA2LjgwMy03LjY3OSAxLjY2IDEuMTAzIDMuNjQ4IDEuNjY2IDUuNzMyIDEuNDYzbC4xNjItLjEzN2E2LjMgNi4zIDAgMCAwIC4wNjUgMS42MmMtMi40MzkgMi43MjUtMS43MjIgMy4yMDMtNi41OTcgNC4yMDYtNC45MzMgMS4wMTctMi4wMzUgMi44MjYtLjE0MyAzLjI5OSAyLjI5NC41NzQgNy42IDEuMzg2IDExLjE4NS0zLjYzM2wtLjE0My41NzNjLjk1Ni43NjUgMS42MjYgNC45NzggMS41MTQgOC43OTdzLS4xODggNi40NDEuNTY1IDguNDg5IDEuNTAzIDYuNjU2IDcuOTEyIDUuMjgyYzUuMzU1LTEuMTQ4IDguMTMtNC4xMjEgOC41MTYtOS4wODEuMjc0LTMuNTI2Ljg5NC0zLjAwNS45MzMtNi4xNThsLjQ5Ny0xLjQ5M2MuNTczLTQuNzguMDkxLTYuMzIyIDMuMzktNS42MDVsLjgwMi4wN2MyLjQyOC4xMSA1LjYwNi0uMzkxIDcuNDcxLTEuMjU3IDQuMDE2LTEuODY0IDYuMzk4LTQuOTc2IDIuNDM4LTQuMTU4Ii8+PHBhdGggZD0iTTMyLjc0NyAyNC42NmMtLjgxNC0uMTEzLTEuNTUyLS4wMDgtMS45MjUuMjc0YS43LjcgMCAwIDAtLjI5Mi40N2MtLjA0Ny4zMzYuMTg4LjcwNy4zMzMuODk4LjQwOS41NDIgMS4wMDYuOTE1IDEuNTk4Ljk5N2EyIDIgMCAwIDAgLjI1Ni4wMThjLjk4NiAwIDEuODgzLS43NjggMS45NjItMS4zMzUuMDk5LS43MS0uOTMyLTEuMTgzLTEuOTMxLTEuMzIybTI2Ljk3NS4wMjJjLS4wNzgtLjU1Ni0xLjA2OC0uNzE1LTIuMDA3LS41ODRzLTEuODQ4LjU1NC0xLjc3MiAxLjExMmMuMDYxLjQzNC44NDQgMS4xNzQgMS43NzEgMS4xNzRxLjExNyAwIC4yMzctLjAxNmMuNjE5LS4wODYgMS4wNzMtLjQ3OSAxLjI4OC0uNzA1LjMyOS0uMzQ1LjUxOC0uNzMuNDg0LS45OG0xNS40NzcgMjMuODI4Yy0uMzQ1LTEuMDQyLTEuNDUzLTEuMzc3LTMuMjk2LS45OTctNS40NzEgMS4xMjktNy40My4zNDctOC4wNzMtLjEyNyA0LjI1Mi02LjQ3OCA3Ljc1LTE0LjMwOCA5LjYzNy0yMS42MTQuODk0LTMuNDYxIDEuMzg4LTYuNjc1IDEuNDI4LTkuMjk0LjA0NS0yLjg3Ni0uNDQ1LTQuOTg4LTEuNDU1LTYuMjc5LTQuMDcyLTUuMjAzLTEwLjA0OC03Ljk5NC0xNy4yODMtOC4wNy00Ljk3My0uMDU2LTkuMTc1IDEuMjE3LTkuOTkgMS41NzVhMjUgMjUgMCAwIDAtNS42MjItLjcyMmMtMy43MzQtLjA2LTYuOTYxLjgzNC05LjYzMyAyLjY1NWE0MyA0MyAwIDAgMC03LjgyOC0yLjA1MmMtNi4zNDItMS4wMjEtMTEuMzgxLS4yNDgtMTQuOTc4IDIuMy00LjI5MSAzLjA0LTYuMjcyIDguNDc1LTUuODg4IDE2LjE1Mi4xMjkgMi41ODMgMS42MDEgMTAuNTI5IDMuOTIzIDE4LjEzOSAzLjA1NyAxMC4wMTYgNi4zOCAxNS42ODYgOS44NzcgMTYuODUyYTQuNCA0LjQgMCAwIDAgMS40MDIuMjMyYzEuMjc2IDAgMi44MzktLjU3NSA0LjQ2Ni0yLjUzMWExNjEgMTYxIDAgMCAxIDYuMTU2LTYuOTY2IDkuOSA5LjkgMCAwIDAgNC40MjkgMS4xOTFsLjAxLjEyMWMtLjMxLjM2OC0uNTY0LjY5LS43ODEuOTY1LTEuMDcgMS4zNTgtMS4yOTMgMS42NDEtNC43MzggMi4zNTEtLjk4LjIwMi0zLjU4Mi43MzgtMy42MiAyLjU2My0uMDQxIDEuOTkzIDMuMDc2IDIuODMgMy40MzEgMi45MTkgMS4yMzguMzEgMi40My40NjMgMy41NjguNDYzIDIuNzY2IDAgNS4yLS45MDkgNy4xNDUtMi42NjgtLjA2IDcuMTA2LjIzNiAxNC4xMDcgMS4wODkgMTYuMjQxLjY5OSAxLjc0NiAyLjQwNiA2LjAxNCA3Ljc5OCA2LjAxNC43OTEgMCAxLjY2Mi0uMDkyIDIuNjItLjI5NyA1LjYyNy0xLjIwNyA4LjA3MS0zLjY5NCA5LjAxNi05LjE3Ny41MDYtMi45MyAxLjM3NC05LjkyOCAxLjc4Mi0xMy42ODIuODYyLjI2OSAxLjk3MS4zOTIgMy4xNy4zOTIgMi41MDEgMCA1LjM4Ny0uNTMxIDcuMTk3LTEuMzcyIDIuMDMzLS45NDQgNS43MDItMy4yNjEgNS4wMzctNS4yNzR6TTYxLjggMjMuMTQ3Yy0uMDE5IDEuMTA4LS4xNzEgMi4xMTQtLjMzMyAzLjE2NC0uMTc0IDEuMTI5LS4zNTQgMi4yOTctLjM5OSAzLjcxNS0uMDQ1IDEuMzc5LjEyOCAyLjgxNC4yOTQgNC4yLjMzNyAyLjgwMS42ODIgNS42ODUtLjY1NSA4LjUzMWExMSAxMSAwIDAgMS0uNTkyLTEuMjE4Yy0uMTY2LS40MDMtLjUyNy0xLjA1LTEuMDI3LTEuOTQ2LTEuOTQ0LTMuNDg3LTYuNDk3LTExLjY1Mi00LjE2Ny0xNC45ODQuNjk0LS45OTIgMi40NTYtMi4wMTEgNi44NzktMS40NjN6TTU2LjQzOSA0LjM3NGM2LjQ4Mi4xNDMgMTEuNjA5IDIuNTY4IDE1LjI0IDcuMjA3IDIuNzg0IDMuNTU4LS4yODIgMTkuNzQ5LTkuMTU4IDMzLjcxNmwtLjI2OS0uMzM5LS4xMTItLjE0YzIuMjk0LTMuNzg4IDEuODQ1LTcuNTM2IDEuNDQ2LTEwLjg1OS0uMTY0LTEuMzY0LS4zMTktMi42NTItLjI4LTMuODYxLjA0MS0xLjI4My4yMS0yLjM4Mi4zNzQtMy40NDYuMjAyLTEuMzExLjQwNy0yLjY2Ny4zNS00LjI2NWExLjggMS44IDAgMCAwIC4wMzctLjYwMWMtLjE0NC0xLjUzMy0xLjg5NC02LjEyLTUuNDYyLTEwLjI3My0xLjk1MS0yLjI3MS00Ljc5Ny00LjgxMy04LjY4Mi02LjUyN2EyOS4zIDI5LjMgMCAwIDEgNi41MTUtLjYxMnpNMjAuMTY3IDUzLjI5OGMtMS43OTMgMi4xNTUtMy4wMzEgMS43NDItMy40MzggMS42MDctMi42NTMtLjg4NS01LjczLTYuNDkxLTguNDQ0LTE1LjM4Mi0yLjM0OC03LjY5My0zLjcyLTE1LjQyOC0zLjgyOS0xNy41OTctLjM0My02Ljg2IDEuMzItMTEuNjQxIDQuOTQzLTE0LjIxIDUuODk2LTQuMTgxIDE1LjU4OS0xLjY3OSAxOS40ODQtLjQwOWwtLjE3LjE2M2MtNi4zOTEgNi40NTUtNi4yNCAxNy40ODMtNi4yMjQgMTguMTU3YTIyIDIyIDAgMCAwIC4wNTEgMS4xMzVjLjExIDEuODU1LjMxNSA1LjMwNy0uMjMyIDkuMjE3LS41MDggMy42MzMuNjEyIDcuMTg5IDMuMDcyIDkuNzU2cS4zODMuMzk4Ljc5NS43NWExNjQgMTY0IDAgMCAwLTYuMDA4IDYuODE0em02LjgzLTkuMTEzYy0xLjk4My0yLjA2OS0yLjg4NC00Ljk0Ny0yLjQ3MS03Ljg5Ni41NzctNC4xMy4zNjQtNy43MjcuMjUtOS42NTlsLS4wMzktLjY5NGMuOTM0LS44MjggNS4yNjEtMy4xNDYgOC4zNDYtMi40MzkgMS40MDguMzIzIDIuMjY2IDEuMjgxIDIuNjIzIDIuOTMxIDEuODQ2IDguNTM5LjI0NCAxMi4wOTgtMS4wNDMgMTQuOTU3LS4yNjUuNTg5LS41MTYgMS4xNDYtLjczIDEuNzIybC0uMTY2LjQ0NWMtLjQyIDEuMTI2LS44MTEgMi4xNzMtMS4wNTMgMy4xNjctMi4xMDgtLjAwNi00LjE1OS0uOTA3LTUuNzE4LTIuNTM0em0uMzI0IDExLjUxNmE1IDUgMCAwIDEtMS40OTQtLjY0MmMuMjcxLS4xMjguNzU0LS4zMDEgMS41OTEtLjQ3NCA0LjA1Mi0uODM0IDQuNjc4LTEuNDIzIDYuMDQ1LTMuMTU4LjMxMy0uMzk4LjY2OS0uODQ5IDEuMTYtMS4zOTguNzMzLS44MjEgMS4wNjgtLjY4MiAxLjY3Ni0uNDMuNDkzLjIwNC45NzIuODIxIDEuMTY3IDEuNTAxLjA5Mi4zMjEuMTk1LjkzLS4xNDMgMS40MDQtMi44NTUgMy45OTctNy4wMTUgMy45NDYtMTAuMDAzIDMuMTk4em0yMS4yMDcgMTkuNzM1Yy00Ljk1NyAxLjA2Mi02LjcxMy0xLjQ2Ny03Ljg2OS00LjM1OS0uNzQ3LTEuODY3LTEuMTEzLTEwLjI4NS0uODUzLTE5LjU4MmExLjEgMS4xIDAgMCAwLS4wNDgtLjM1NiA1IDUgMCAwIDAtLjEzOS0uNjU3Yy0uMzg3LTEuMzUzLTEuMzMxLTIuNDg0LTIuNDYyLTIuOTUzLS40NS0uMTg2LTEuMjc1LS41MjgtMi4yNjctLjI3NC4yMTItLjg3MS41NzgtMS44NTUuOTc2LTIuOTIxbC4xNjctLjQ0OGMuMTg4LS41MDUuNDIzLTEuMDI5LjY3My0xLjU4MyAxLjM0Ny0yLjk5MiAzLjE5Mi03LjA5MSAxLjE5LTE2LjM1LS43NS0zLjQ2OC0zLjI1NC01LjE2MS03LjA1LTQuNzY4LTIuMjc2LjIzNS00LjM1OCAxLjE1NC01LjM5NiAxLjY4cS0uMzM0LjE2OS0uNjE4LjMyOWMuMjktMy40OTQgMS4zODUtMTAuMDI0IDUuNDgxLTE0LjE1NiAyLjU3OS0yLjYwMSA2LjAxNC0zLjg4NiAxMC4xOTktMy44MTcgOC4yNDYuMTM1IDEzLjUzNCA0LjM2NyAxNi41MTggNy44OTMgMi41NzEgMy4wMzkgMy45NjQgNi4xIDQuNTIgNy43NTEtNC4xNzktLjQyNS03LjAyMi40LTguNDYzIDIuNDYtMy4xMzUgNC40ODEgMS43MTUgMTMuMTc4IDQuMDQ2IDE3LjM1OC40MjcuNzY2Ljc5NiAxLjQyOC45MTIgMS43MDkuNzU5IDEuODM5IDEuNzQyIDMuMDY3IDIuNDU5IDMuOTY0LjIyLjI3NS40MzMuNTQxLjU5Ni43NzQtMS4yNjYuMzY1LTMuNTM5IDEuMjA4LTMuMzMyIDUuNDIyLS4xNjcgMi4xMTUtMS4zNTYgMTIuMDE2LTEuOTU5IDE1LjUxNC0uNzk3IDQuNjIxLTIuNDk3IDYuMzQzLTcuMjc5IDcuMzY4em0yMC42OTMtMjMuNjhjLTEuMjk0LjYwMS0zLjQ2IDEuMDUyLTUuNTE4IDEuMTQ4LTIuMjczLjEwNy0zLjQzLS4yNTUtMy43MDItLjQ3Ny0uMTI4LTIuNjI2Ljg1LTIuOTAxIDEuODg0LTMuMTkxLjE2My0uMDQ2LjMyMS0uMDkuNDc0LS4xNDRhNCA0IDAgMCAwIC4zMTMuMjNjMS44MjcgMS4yMDYgNS4wODUgMS4zMzYgOS42ODUuMzg2bC4wNS0uMDFjLS42Mi41OC0xLjY4MiAxLjM1OS0zLjE4NyAyLjA1OHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Postgres",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1235,
+      "icon": "file:extractFromFile.svg",
+      "name": "n8n-nodes-base.extractFromFile",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Spreadsheet",
+            "Excel",
+            "xls",
+            "xlsx",
+            "ods",
+            "tabular",
+            "decode",
+            "decoding",
+            "Move Binary Data",
+            "Binary",
+            "File",
+            "PDF",
+            "JSON",
+            "HTML",
+            "ICS",
+            "iCal",
+            "txt",
+            "Text",
+            "RTF",
+            "XML",
+            "64",
+            "Base64",
+            "Convert"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.extractfromfile/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Files",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Extract from File"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTAuOTM3NSAyQzAuNDE5NzMzIDIgMCAyLjQxOTczIDAgMi45Mzc1VjM3LjMyMjFDMCAzNy44Mzk5IDAuNDE5NzMzIDM4LjI1OTYgMC45Mzc1IDM4LjI1OTZIMjYuMjE1NEMyNi43MzMyIDM4LjI1OTYgMjcuMTUyOSAzNy44Mzk5IDI3LjE1MjkgMzcuMzIyMUwyNy4xNTI5IDMwLjY3MTlMMTYuNzk2OSAzMC42NzE5QzE0Ljg5ODQgMzAuNjcxOSAxMy4zNTk0IDI5LjEzMjkgMTMuMzU5NCAyNy4yMzQ0VjI1LjM1OTRDMTMuMzU5NCAyMy40NjA5IDE0Ljg5ODQgMjEuOTIxOSAxNi43OTY5IDIxLjkyMTlIMjcuMTUyOUwyNy4xNTI5IDE1Ljc4MjFIMTQuMzA4M0MxMy43OTA2IDE1Ljc4MjEgMTMuMzcwOCAxNS4zNjI0IDEzLjM3MDggMTQuODQ0NlYySDAuOTM3NVoiIGZpbGw9IiMzNTNGNkUiLz4KPHBhdGggZD0iTTE2LjAyNzEgMkMxNS45NDA4IDIgMTUuODcwOCAyLjA2OTk2IDE1Ljg3MDggMi4xNTYyNVYxMi44MTM0QzE1Ljg3MDggMTMuMDcyMyAxNi4wODA3IDEzLjI4MjEgMTYuMzM5NiAxMy4yODIxSDI2Ljk5NjdDMjcuMDgzIDEzLjI4MjEgMjcuMTUyOSAxMy4yMTIyIDI3LjE1MjkgMTMuMTI1OUwyNy4xNTI5IDEyLjYxNzFDMjcuMTUyOSAxMi4zNjg4IDI3LjA1NDUgMTIuMTMwNyAyNi44NzkxIDExLjk1NUwxNy4yMjI1IDIuMjc1MzhDMTcuMDQ2NiAyLjA5OTA4IDE2LjgwNzkgMiAxNi41NTg4IDJIMTYuMDI3MVoiIGZpbGw9IiMzNTNGNkUiLz4KPHBhdGggZD0iTTI5Ljc2NDIgMzQuNjUwM0MyOS4wMzQgMzMuOTE2IDI5LjAzNzQgMzIuNzI4OCAyOS43NzE2IDMxLjk5ODZMMzMuNjE5NyAyOC4xNzE5TDE2Ljc5NjkgMjguMTcxOUMxNi4yNzkxIDI4LjE3MTkgMTUuODU5NCAyNy43NTIxIDE1Ljg1OTQgMjcuMjM0NFYyNS4zNTk0QzE1Ljg1OTQgMjQuODQxNiAxNi4yNzkxIDI0LjQyMTkgMTYuNzk2OSAyNC40MjE5TDMzLjU0MTIgMjQuNDIxOUwyOS43NzE2IDIwLjY3MzNDMjkuMDM3NCAxOS45NDMxIDI5LjAzNCAxOC43NTU5IDI5Ljc2NDIgMTguMDIxNkMzMC40OTQ0IDE3LjI4NzQgMzEuNjgxNiAxNy4yODQgMzIuNDE1OSAxOC4wMTQyTDM5LjQ0NzEgMjUuMDA2NEMzOS44MDEgMjUuMzU4MyA0MCAyNS44MzY4IDQwIDI2LjMzNTlDNDAgMjYuODM1IDM5LjgwMSAyNy4zMTM1IDM5LjQ0NzEgMjcuNjY1NUwzMi40MTU5IDM0LjY1NzZDMzEuNjgxNiAzNS4zODc4IDMwLjQ5NDQgMzUuMzg0NSAyOS43NjQyIDM0LjY1MDNaIiBmaWxsPSIjMzUzRjZFIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Extract from File",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1239,
+      "icon": "file:splitOut.svg",
+      "name": "n8n-nodes-base.splitOut",
+      "codex": {
+        "data": {
+          "alias": [
+            "Split",
+            "Nested",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitout/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Split Out"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjOUI2REQ1IiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTQ4MCAxNDhjMC02LjYyNy01LjM3My0xMi0xMi0xMkgzMjJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxNDZjNi42MjcgMCAxMi01LjM3MyAxMi0xMnptMCA5NmMwLTYuNjI3LTUuMzczLTEyLTEyLTEySDMyMmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDE0NmM2LjYyNyAwIDEyLTUuMzczIDEyLTEyem0wIDk2YzAtNi42MjctNS4zNzMtMTItMTItMTJIMzIyYy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTQ2YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48cGF0aCBkPSJNNDM4IDc2YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtMTcuNjczIDAtMzIgMTQuMzI3LTMyIDMydjU2YzAgMjYuOTc4LTEwLjI3MiA1MS41NTctMjcuMTE5IDcwLjAzOS01LjA1NSA1LjU0NS01LjA1NSAxNC4zNzcgMCAxOS45MjIgMTYuODQ3IDE4LjQ4MiAyNy4xMTkgNDMuMDYxIDI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMySDQyNmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtNDQuMTgzIDAtODAtMzUuODE3LTgwLTgwdi01NmMwLTMwLjkyOC0yNS4wNzItNTYtNTYtNTZhNS43ODMgNS43ODMgMCAwIDEtNS43ODMtNS43ODN2LTM2LjQzNGE1Ljc4MyA1Ljc4MyAwIDAgMSA1Ljc4My01Ljc4M2MzMC45MjggMCA1Ni0yNS4wNzIgNTYtNTZ2LTU2YzAtNDQuMTgzIDM1LjgxNy04MCA4MC04MEg0MjZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMzYgMjQ0YzAtNi42MjctNS4zNzMtMTItMTItMTJIMTJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxMTJjNi42MjcgMCAxMi01LjM3MyAxMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik01MTIgMEgwdjUxMmg1MTJ6Ii8+PC9jbGlwUGF0aD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Split Out",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 33,
+      "name": "Social Media"
+    }
+  ],
+  "image": []
+}

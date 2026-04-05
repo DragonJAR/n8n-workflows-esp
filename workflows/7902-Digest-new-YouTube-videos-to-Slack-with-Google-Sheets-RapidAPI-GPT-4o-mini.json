@@ -1,0 +1,2666 @@
+{
+  "id": 4801,
+  "name": "Digest new YouTube videos to Slack with Google Sheets, RapidAPI & GPT-4o-mini",
+  "views": 1084,
+  "recentViews": 0,
+  "totalViews": 1084,
+  "createdAt": "2025-06-08T19:11:14.172Z",
+  "description": "## Who is this for?\n\nMarketing, content, and enablement teams that need a **quick, human-readable summary of every new video** published by the YouTube channels they care about—without leaving Slack.\n\n## What problem does this workflow solve?\n\nManually checking multiple channels, skimming long videos, and pasting the highlights into Slack wastes time. This template **automates the whole loop**: detect a fresh upload from your selected channels → pull subtitles → distill the key take-aways with GPT-4o-mini → drop a neatly-formatted digest in Slack.\n\n## What this workflow does\n\n1. **Schedule Trigger** fires every 10 min, then grabs a list of YouTube RSS feeds from a Google Sheet.\n2. **HTTP + XML** fetch & parse each feed; only brand-new videos continue.\n3. **YouTube API** fetches title/description, **RapidAPI** grabs English subtitles.\n4. Code nodes build an AI payload; **OpenAI** returns a JSON summary + article.\n5. A formatter turns that JSON into Slack Block Kit, and **Slack** posts it.\n6. Processed links are appended back to the “Video Links” sheet to prevent dupes.\n\n## Setup\n\n1. **Make a copy** of this [Google Sheet](https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=sharing) and connect a **Google Sheets OAuth2** credential with edit rights.\n2. **Slack App**: create → add `chat:write`, `channels:read`, `app_mention`; enable Event Subscriptions; install and store the **Bot OAuth token** in an n8n Slack credential.\n3. **RapidAPI key** for `https://yt-api.p.rapidapi.com/subtitles` (300 free calls/mo) → save as HTTP Header Auth.\n4. **OpenAI key** → save in an OpenAI credential.\n5. Add your RSS feed URLs to the “RSS Feed URLs” tab; press *Execute Workflow*.\n\n## How to customise\n\n* Adjust the schedule interval or freshness window in **“If newly published”**.\n* Swap the OpenAI model or prompt for shorter/longer digests.\n* Point the Slack node at a different channel or DM.\n* Extend the AI payload to include thumbnails or engagement stats.\n\n## Use-case ideas\n\n* **Product marketing**: Instantly brief sales & CS teams when a competitor uploads a feature demo.\n* **Internal learning hub**: Auto-summarise conference talks and share bullet-point notes with engineers.\n* **Social media managers**: Get ready-to-post captions and key moments for re-purposing across platforms.\n",
+  "workflow": {
+    "id": "Dgu2JgEFyzKDyHqc",
+    "meta": {
+      "instanceId": "8d41476c63702cd0f2be55363b48153c5d4820bb18197ca147e7be50ef236112",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "YouTube RSS to Slack DIgest",
+    "tags": [
+      {
+        "id": "U7yroZQpInqB6NdO",
+        "name": "slack",
+        "createdAt": "2025-06-07T04:12:43.394Z",
+        "updatedAt": "2025-06-07T04:12:43.394Z"
+      },
+      {
+        "id": "wrN9xw9yHvFfa0YA",
+        "name": "rapidapi",
+        "createdAt": "2025-06-07T04:12:49.808Z",
+        "updatedAt": "2025-06-07T04:12:49.808Z"
+      },
+      {
+        "id": "HN4QoMZjexklpkRv",
+        "name": "youtube",
+        "createdAt": "2025-06-07T04:12:54.514Z",
+        "updatedAt": "2025-06-07T04:12:54.514Z"
+      },
+      {
+        "id": "FpF0WUxxGoK09fhl",
+        "name": "openai",
+        "createdAt": "2025-06-07T04:12:57.942Z",
+        "updatedAt": "2025-06-07T04:12:57.942Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "f539cbde-f850-4d48-b1b9-40b764452b06",
+        "name": "Get Subtitles",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -660,
+          100
+        ],
+        "parameters": {
+          "url": "={{ $json.url }}",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "4a38af14-faf0-40f4-a467-e97328c001a1",
+        "name": "Get Timestamps",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -440,
+          100
+        ],
+        "parameters": {
+          "jsCode": "const description = $('Fetch Video Details').first().json.snippet.description\nconst pattern = /(\\d{1,2}:\\d{2})\\s+(.*)/g;\nlet match;\nconst chapters = [];\n\nwhile ((match = pattern.exec(description)) !== null) {\n  chapters.push({\n    time: match[1],\n    title: match[2].replace(/[\\s:]/g, '_')\n  });\n}\n\nreturn chapters.map((chapter, index) => {\n  return {\n    json: {\n      start_time: chapter.time,\n      title: chapter.title,\n      end_time: chapters[index + 1] ? chapters[index + 1].time : null\n    }\n  };\n});\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "92df3a24-985d-48e0-89eb-74beb147b190",
+        "name": "Formatted Chapter Text",
+        "type": "n8n-nodes-base.code",
+        "notes": "Map timestamps to the xml transcript for a merged version to pass into OpenAI API",
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "jsCode": "// Retrieve the XML data from the HTTP Request node\nconst transcriptXml = $node[\"Get Subtitles\"].json.data;  // Access the 'data' field\n\n// Clean the XML to ensure proper parsing\nlet cleanXml = transcriptXml.replace(/\\r?\\n|\\r/g, '');  // Remove newlines\ncleanXml = cleanXml.replace(/\\s+/g, ' ');  // Collapse whitespace\ncleanXml = cleanXml.replace(/&amp;/g, '&');  // Convert any encoded ampersands\ncleanXml = cleanXml.replace(/&amp;#39;/g, \"'\");  // Convert encoded apostrophe\ncleanXml = cleanXml.replace(/&#39;/g, \"'\");  // Convert encoded apostrophe\n\n\n// Define the regex to parse the XML content\nconst textRegex = /<text start=\"([\\d.]+)\" dur=\"[\\d.]+\">([^<]+)<\\/text>/g;\nconst transcriptData = [];\nlet match;\n\n// Parse the XML and extract the transcript data\nwhile ((match = textRegex.exec(cleanXml)) !== null) {\n  transcriptData.push({\n    start: parseFloat(match[1]),  // The start time is already in seconds\n    text: match[2]\n  });\n}\n\n// Function to convert minutes to seconds\nfunction minutesToSeconds(time) {\n  const parts = time.split(':');\n  if (parts.length === 2) {\n    return parseInt(parts[0]) * 60 + parseFloat(parts[1]);\n  } else {\n    return parseFloat(parts[0]);\n  }\n}\n\n// Combine chapters and subtitles (assuming chapters are provided by previous step)\nconst chapters = $input.all();\nconst tolerance = 2;  // Allowable tolerance in seconds for nearest match\nconst results = chapters.map((chapter, index) => {\n  const startTime = minutesToSeconds(chapter.json.start_time);  // Convert chapter start time to seconds\n  const endTime = chapter.json.end_time ? minutesToSeconds(chapter.json.end_time) : null;\n  let chapterText = '';\n\n  for (let i = 0; i < transcriptData.length; i++) {\n    const textStart = transcriptData[i].start;\n    \n    // Check if the transcript start time is within the chapter's time range, allowing for tolerance\n    if (textStart >= startTime - tolerance && (!endTime || textStart < endTime + tolerance)) {\n      chapterText += transcriptData[i].text + ' ';\n    } else if (textStart >= endTime) {\n      // Once we reach the start time of the next chapter, break out of the loop\n      break;\n    }\n  }\n\n  // Log the chapter text for each chapter\n  console.log(`Chapter ${index + 1} (${chapter.json.title}):`, chapterText.trim());\n\n  return {\n    chapter_no: index + 1,\n    chapter_name: chapter.json.title,\n    chapter_text: chapterText.trim()\n  };\n});\n\n// Log the final results\nconsole.log('Final Results:', results);\n\nreturn results;\n"
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "8b713190-5fb5-4aaf-bf93-3ac0b8c9e561",
+        "name": "Generate Slack Blocks - Detailed Summary",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          816,
+          100
+        ],
+        "parameters": {
+          "jsCode": "const openAIResponse = $('Generate Summary').item.json.message.content;\n\n// Remove the leading and trailing backticks and \"json\\n\" if present\nconst contentString = openAIResponse.replace(/```json\\n|```/g, '').trim();\n\nlet content;\ntry {\n  content = JSON.parse(contentString);\n  console.log('Parsed JSON:', content);\n\n} catch (error) {\n  console.error('JSON Parsing Error:', error);\n  return [{ json: { error: 'Failed to parse JSON content.' } }];\n}\n\n// Extract the Quick Rundown Summary, Video Title, and Video Description\nconst quickRundownSummary = content.detailed_quick_rundown_summary;\nconst videoTitle = content.video_title;\nconst videoDescription = content.video_description;\n\n// Format the title and description for Slack\nconst titleAndDescription = `*${videoTitle}*\\n${videoDescription}\\n\\n`;\n\n// Join the bullet points into a single string, separated by new lines\nconst slackFormattedMessage = titleAndDescription + quickRundownSummary.join('\\n');\n\n// Log or return the formatted message\nconsole.log(slackFormattedMessage);\n\n// Create a simple text fallback for the Slack message\nconst fallbackText = `${videoTitle}\\n${videoDescription}\\nQuick Rundown:\\n${quickRundownSummary.join('\\n')}`;\n\n// Return the payload with blocks and fallback text\nreturn [\n  {\n    json: {\n      text: fallbackText,\n      blocks: slackFormattedMessage,\n    }\n  }\n];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6ef98839-1592-407d-a3d7-c91edbff2f4f",
+        "name": "Formatted Transcript w/o Chapters",
+        "type": "n8n-nodes-base.code",
+        "notes": "Map timestamps to the xml transcript for a merged version to pass into OpenAI API",
+        "position": [
+          220,
+          200
+        ],
+        "parameters": {
+          "jsCode": "// Retrieve the XML data from the HTTP Request node\nconst transcriptXml = $node[\"Get Subtitles\"].json.data;  // Access the 'data' field\n\n// Clean the XML to ensure proper parsing\nlet cleanXml = transcriptXml.replace(/\\r?\\n|\\r/g, '');  // Remove newlines\ncleanXml = cleanXml.replace(/\\s+/g, ' ');  // Collapse whitespace\ncleanXml = cleanXml.replace(/&amp;/g, '&');  // Convert any encoded ampersands\ncleanXml = cleanXml.replace(/&amp;#39;/g, \"'\");  // Convert encoded apostrophe\ncleanXml = cleanXml.replace(/&#39;/g, \"'\");  // Convert encoded apostrophe\n\n// Define the regex to parse the XML content\nconst textRegex = /<text start=\"([\\d.]+)\" dur=\"[\\d.]+\">([^<]+)<\\/text>/g;\nlet mergedText = '';\nlet match;\n\n// Parse the XML and extract the transcript data\nwhile ((match = textRegex.exec(cleanXml)) !== null) {\n  mergedText += match[2] + ' ';  // Append the text to the merged string\n}\n\n// Trim any extra whitespace\nmergedText = mergedText.trim();\n\n// Create the final JSON structure\nconst finalJson = {\n  video_title: $('Fetch Video Details').first().json.snippet.title,  // Replace with actual video title\n  video_description: $('Fetch Video Details').first().json.snippet.description,  // Replace with actual video description\n  merged_text: mergedText\n};\n\n// Return the final JSON structure\nreturn [\n  {\n    json: finalJson\n  }\n];\n"
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "6570c170-cd9f-444f-b033-d9417f435967",
+        "name": "Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -3520,
+          500
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 10
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "3ea53e09-b01f-47d4-83ca-e82f918e37ca",
+        "name": "If newly published",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2420,
+          200
+        ],
+        "parameters": {
+          "jsCode": "// Set the interval (in minutes) during which a video is considered \"new\"\nconst runIntervalMinutes = 1000;\n\n// Get the current date/time\nconst currentTime = new Date();\n\n// Calculate the cutoff time by subtracting the run interval\nconst cutoffTime = new Date(currentTime.getTime() - runIntervalMinutes * 60 * 1000);\n\n// Access the feed entries from the first input item\nconst feedEntries = items[0].json.feed.entry || [];\n\n// Process each item passed from the previous node\n// Assumes each item has a `published` field in ISO 8601 format (e.g., \"2025-03-24T12:34:56Z\")\nconst newItems = feedEntries.map(item => {\n  const publishedDate = new Date(item.published);\n  \n  // Check if the video was published after the cutoff time\n  // If so, mark it as new by adding a `newVideo` property set to true\n  item.newVideo = publishedDate >= cutoffTime;\n  \n  // Optionally, attach some time info for debugging\n  item.cutoffTime = cutoffTime.toISOString();\n  item.publishedDateISO = publishedDate.toISOString();\n  \n  // Wrap each item in { json: ... } for n8n output format\n  return { json: item };\n});\n\nreturn newItems[0];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "dab0151c-c337-41eb-86b3-21e0f6a4ac4f",
+        "name": "Check for new videos",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -2200,
+          200
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "bffc7ab0-0cf5-47c9-b772-826da21f8b22",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.newVideo }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "18d40ceb-bf64-4d44-8ec9-8d27e2b721ab",
+        "name": "Get RSS Links",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -3300,
+          500
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 1930937118,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit#gid=1930937118",
+            "cachedResultName": "RSS Feed URLs"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=drivesdk",
+            "cachedResultName": "YouTube RSS Tracker"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "8da2db10-d478-42a2-b20b-91c439860d5c",
+        "name": "Filter for New Video",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -1980,
+          200
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ $json.link.href }}",
+                "lookupColumn": "YouTube Link"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit#gid=0",
+            "cachedResultName": "Video Links"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=drivesdk",
+            "cachedResultName": "YouTube RSS Tracker"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "executeOnce": false,
+        "typeVersion": 4.4,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "54539bf9-cdf9-49b4-970f-512931619787",
+        "name": "Check if the Video Exists",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -1760,
+          200
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "030ada47-5a56-41dd-8d2a-ff1669a5f310",
+                "operator": {
+                  "type": "object",
+                  "operation": "empty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2eb43d7a-4c7b-4ed0-8039-3c111d25499d",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3780,
+          280
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 620,
+          "content": "## 1. Trigger & Source\n- **Kick-off every 10 min**  \n  Starts the workflow on a timer so you’re always working with fresh data.\n\n- **Grab feed list from Google Sheet**  \n  Pulls the latest RSS URLs so you can add or remove sources without touching the flow.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "142c3e97-4ad4-4851-acd9-a4dc6dd93d79",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2840,
+          520
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 700,
+          "content": "## 2. Fetch & Batch\n- **Process one feed at a time**  \n  Keeps memory low and makes retry logic straightforward.\n\n- **HTTP GET to download each RSS**  \n  Grabs raw XML content for the next step.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d037bd15-0f67-4e71-8154-f24ccc3022f6",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2300,
+          -20
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 640,
+          "content": "## 3. Parse & Filter\n- **Convert XML → JSON**  \n  Translates RSS into clean JSON objects the rest of the flow can read.\n\n- **Keep only brand-new items**  \n  Drops anything older than your freshness window so you never double-post.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5c1f7a6d-79c9-4895-921f-825276728637",
+        "name": "Batch RSS Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -3080,
+          500
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "c5aeea13-b7ce-47a8-b96f-c2ed5293d216",
+        "name": "Fetch RSS Feed",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -2860,
+          200
+        ],
+        "parameters": {
+          "url": "={{ $json['RSS URL'] }}",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "bfdc95a2-cd13-40e5-9602-d22a7910589d",
+        "name": "Parse RSS XML",
+        "type": "n8n-nodes-base.xml",
+        "position": [
+          -2640,
+          200
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "e75818ea-f59e-4331-b4fd-700cb28fc925",
+        "name": "Fetch Video Details",
+        "type": "n8n-nodes-base.youTube",
+        "position": [
+          -1320,
+          100
+        ],
+        "parameters": {
+          "options": {},
+          "videoId": "={{ $('Check for new videos').first().json.link.href.split(\"=\")[1] }}",
+          "resource": "video",
+          "operation": "get"
+        },
+        "credentials": {
+          "youTubeOAuth2Api": {
+            "id": "credential-id",
+            "name": "youTubeOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0e35710d-69a5-4f7c-8405-9fef774d8df8",
+        "name": "Log New Videos",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -1540,
+          100
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "YouTube Link": "={{ $('Check for new videos').item.json.link.href }}"
+            },
+            "schema": [
+              {
+                "id": "YouTube Link",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "YouTube Link",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "YouTube Link"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit#gid=0",
+            "cachedResultName": "Video Links"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=drivesdk",
+            "cachedResultName": "YouTube RSS Tracker"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.4
+      },
+      {
+        "id": "20e47927-ec86-456e-b26a-c96fda7715e3",
+        "name": "Generate Summary",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          440,
+          100
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4o-mini",
+            "cachedResultName": "GPT-4O-MINI"
+          },
+          "options": {},
+          "messages": {
+            "values": [
+              {
+                "content": "=You are an expert writer tasked with summarizing and elaborating on the following content extracted from a YouTube video. Your goal is to create two outputs:\n\nYou are an expert writer tasked with summarizing and elaborating on the following content extracted from a YouTube video. Your goal is to create two outputs in JSON format:\n\n1. A **Detailed Quick Rundown Summary**: This should be a detailed summary of the entire video content, capturing the key points and important excerpts from each chapter. The summary should be structured with bullet points, highlighting the most critical information and providing a comprehensive overview.\n\n2. A **Detailed Article**: This should be a more comprehensive article that expands on each section of the video, providing detailed explanations, insights, and structured content. The article should include titles, descriptions, and bullet points where appropriate.\n\n\n---\n\n### Context:\n- **Video Title**: {{ $json.video_title }}\n- **Video Description**: {{ $json.video_description }}\n\n\n### Segmented Content:\n{{ $json.merged_text }}\n\n\n---\n\n### Task:\n\n1. **Quick Rundown Summary**: Create a concise summary of the entire video content, highlighting the most important points in bullet form or short paragraphs.\n\n2. **Detailed Article**: Write a detailed article based on the segmented content, using proper titles, descriptions, and bullet points where necessary. The article should flow logically from one chapter to the next, providing a comprehensive view of the entire video.\n\n---\n\n**Generate both the Quick Rundown Summary and Detailed Article in the response.**\n\n### Example JSON Structure\n\nHere’s an example of what the output might look like:\n\n```json\n{\n  \"video_title\": \"[Insert Video Title Here]\",\n  \"video_description\": \"[Insert Video Description Here]\",\n  \"detailed_quick_rundown_summary\": [\n    \"• [Bullet point summarizing key information or an important excerpt from the video]\",\n    \"• [Another bullet point with critical content]\",\n    \"• [Continue with detailed points summarizing the entire video content]\"\n  ],\n  \"detailed_article\": {\n    \"chapters\": [\n      {\n        \"chapter_no\": 1,\n        \"chapter_title\": \"[Insert Chapter 1 Title Here]\",\n        \"chapter_summary\": \"[Provide a brief summary of this chapter]\",\n        \"chapter_content\": \"[Insert Chapter 1 Text Here with proper formatting and explanations]\"\n      },\n      {\n        \"chapter_no\": 2,\n        \"chapter_title\": \"[Insert Chapter 2 Title Here]\",\n        \"chapter_summary\": \"[Provide a brief summary of this chapter]\",\n        \"chapter_content\": \"[Insert Chapter 2 Text Here with proper formatting and explanations]\"\n      }\n      // Add more chapters as needed\n    ]\n  }\n}\n"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "9c0c4eeb-7c96-4d48-a4b0-d74e8282c103",
+        "name": "Build AI Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          220,
+          0
+        ],
+        "parameters": {
+          "jsCode": "// Assuming the input contains all 29 JSON objects in the `items` array\nconst items = $input.all(); // Get all incoming JSON objects\n\n// Extract the chapter data from each item and combine them\nconst chapters = items.map((item, index) => {\n  return {\n    chapter_no: index + 1,\n    chapter_name: item.json.chapter_name || `Chapter ${index + 1}`,\n    chapter_text: item.json.chapter_text\n  };\n});\n\n// Create the final JSON structure\nconst finalJson = {\n  video_title: $('Fetch Video Details').first().json.snippet.title,  // Replace with actual video title\n  video_description: $('Fetch Video Details').first().json.snippet.description,  // Replace with actual video description\n  merged_text: chapters\n};\n\n// Return the final JSON structure\nreturn [\n  {\n    json: finalJson\n  }\n];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d527709b-9664-448d-9437-e75872fb1e29",
+        "name": "Post to Slack",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          1036,
+          275
+        ],
+        "webhookId": "97a2ae1f-9ef8-488d-abb0-4cc4739d34fd",
+        "parameters": {
+          "text": "={{ $json.blocks }}\n\n\nYou can check the full video here 👉 {{ $('Check for new videos').first().json.link.href }}\n",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "C0914FVFTDE",
+            "cachedResultName": "yt-rss-test-naveen"
+          },
+          "otherOptions": {},
+          "authentication": "oAuth2"
+        },
+        "credentials": {
+          "slackOAuth2Api": {
+            "id": "credential-id",
+            "name": "slackOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "0024e377-40da-452d-a320-99378c63cc43",
+        "name": "Check for Timestamps",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -220,
+          100
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "d7b2e3b9-2190-4038-876d-9ccefa85718a",
+                "operator": {
+                  "type": "object",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "59551f76-42f6-4d61-acd5-c046646fa7be",
+        "name": "Fetch Subtitles URL",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -1100,
+          100
+        ],
+        "parameters": {
+          "url": "https://yt-api.p.rapidapi.com/subtitles",
+          "options": {},
+          "sendQuery": true,
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "id",
+                "value": "={{ $json.id }}"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "x-rapidapi-host",
+                "value": "yt-api.p.rapidapi.com"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "a0ac6aba-fdd6-491c-a50b-11b3c32619ba",
+        "name": "Format Response",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -880,
+          100
+        ],
+        "parameters": {
+          "jsCode": "// Retrieve items from the previous node\nconst items = $input.all();\nlet finalUrl = '';\n\nfor (const item of items) {\n  const subtitles = item.json.subtitles;\n\n  // Prioritize \"English (auto-generated)\"\n  let subtitle = subtitles.find(\n    sub => sub.languageName === 'English (auto-generated)' && sub.languageCode === 'en'\n  );\n\n  // If \"English (auto-generated)\" is not found, fall back to \"English\"\n  if (!subtitle) {\n    subtitle = subtitles.find(\n      sub => sub.languageName === 'English' && sub.languageCode === 'en'\n    );\n  }\n\n  if (subtitle) {\n    // Ensure the URL contains 'fmt=srv1'\n    let url = subtitle.url;\n\n    if (!url.includes('fmt=srv1')) {\n      // If 'fmt=srv1' is not in the URL, add or replace the fmt parameter\n      if (url.includes('fmt=')) {\n        url = url.replace(/fmt=[^&]*/, 'fmt=srv1');\n      } else {\n        url += '&fmt=srv1';\n      }\n    }\n    // Set the final URL\n    finalUrl = url;\n    break; // Stop after finding the first match\n  }\n}\n\n// Return only the final URL\nreturn [{ json: { url: finalUrl } }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "91206cd9-4968-4ecc-a973-9588d15bdb50",
+        "name": "Link is Processed",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -1540,
+          300
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "a5950b6a-29fd-4f56-94a9-4706535730cb",
+                "name": "Output",
+                "type": "string",
+                "value": "Link is already processed"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "dbb63f27-9e24-4873-81df-547b56c798cf",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1220,
+          -100
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 860,
+          "content": "## 4. Enrich & Summarize\n- **Pull video details + subtitles**  \n  Adds title, description, and transcript data for richer context.\n\n- **Send to AI for short summary**  \n  Generates a concise, readable recap ready for sharing.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f65d7246-c4b9-4784-a172-09280b0597f1",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          160,
+          500
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 620,
+          "content": "## 5. Log & Notify\n- **Append new videos to sheet**  \n  Records what’s already been handled to prevent duplicates.\n\n- **Post summary to Slack**  \n  Drops the final digest into your channel so the team sees updates in real time.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c09c61a3-298d-40bc-bf7d-39cbbbf54fe6",
+        "name": "Slack Trigger",
+        "type": "n8n-nodes-base.slackTrigger",
+        "position": [
+          -3500,
+          1260
+        ],
+        "webhookId": "84634578-172b-496b-91fc-17605a878885",
+        "parameters": {
+          "options": {},
+          "trigger": [
+            "app_mention"
+          ],
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "C0914FVFTDE"
+          }
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "credential-id",
+            "name": "slackApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "112a34af-2e8a-41dd-9e22-cb02f9ffae1f",
+        "name": "AI Agent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          -2760,
+          1260
+        ],
+        "parameters": {
+          "text": "=Check if {{ $json.rss_feed_url }} is already available in the sheets using `Get Rows` Google Sheets tool. If it's there, do nothing. If it's not in the sheet, then based on the user message {{ $('Slack Trigger').item.json.text }} \"add\" or \"remove\" it to the sheets using `Append Row` and `Delete Row` Google Sheets tools accordingly.",
+          "options": {
+            "systemMessage": "You are an automation assistant managing RSS feed entries in a Google Sheet.\n\n1. First, check if `{{ $json.rss_feed_url }}` exists in the sheet using the `Get Rows` node.\n2. If the URL **already exists**:\n   - Do **nothing** unless the Slack message contains \"remove\", in which case delete the corresponding row using `Delete Row`.\n3. If the URL **does not exist**:\n   - If the Slack message (`{{ $('Slack Trigger').item.json.text }}`) contains \"add\", use `Append Row` to insert the URL.\n   - If the message contains \"remove\", do **nothing**.\n\nOnly act if the intent (\"add\" or \"remove\") is clearly mentioned in the Slack message.\n"
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "8fbe1750-c207-47f3-9a0c-2197febf4558",
+        "name": "Get Rows",
+        "type": "n8n-nodes-base.googleSheetsTool",
+        "position": [
+          -2720,
+          1480
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ $('RSS Feed URL').item.json.rss_feed_url }}",
+                "lookupColumn": "RSS URL"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 1930937118,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit#gid=1930937118",
+            "cachedResultName": "RSS Feed URLs"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=drivesdk",
+            "cachedResultName": "YouTube RSS Tracker"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "1338c910-b227-4172-bb05-870603d3f57d",
+        "name": "Delete Row",
+        "type": "n8n-nodes-base.googleSheetsTool",
+        "position": [
+          -2600,
+          1480
+        ],
+        "parameters": {
+          "operation": "delete",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 1930937118,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit#gid=1930937118",
+            "cachedResultName": "RSS Feed URLs"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=drivesdk",
+            "cachedResultName": "YouTube RSS Tracker"
+          },
+          "startIndex": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Start_Row_Number', \"Get `row_number` from `Get Rows` to determine which row to delete\", 'number') }}"
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "267d813b-2bb7-43ce-acd3-9089d4e92d2c",
+        "name": "Append Row",
+        "type": "n8n-nodes-base.googleSheetsTool",
+        "position": [
+          -2480,
+          1480
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "RSS URL": "={{ $('RSS Feed URL').item.json.rss_feed_url }}",
+              "YouTube Channel": "={{ $('Slack Trigger').item.json.attachments[0].from_url }}"
+            },
+            "schema": [
+              {
+                "id": "YouTube Channel",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "YouTube Channel",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "RSS URL",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "RSS URL",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 1930937118,
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit#gid=1930937118",
+            "cachedResultName": "RSS Feed URLs"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=drivesdk",
+            "cachedResultName": "YouTube RSS Tracker"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "86560901-b68c-4d67-9ebd-3294a4ea42f6",
+        "name": "Get Channel ID",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -3280,
+          1260
+        ],
+        "parameters": {
+          "url": "https://youtube138.p.rapidapi.com/channel/details",
+          "options": {},
+          "sendQuery": true,
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "id",
+                "value": "={{ $json.blocks[0].elements[0].elements[2].url || $json.attachments[0].from_url }}"
+              },
+              {
+                "name": "hl",
+                "value": "en"
+              },
+              {
+                "name": "gl",
+                "value": "US"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "x-rapidapi-host",
+                "value": "youtube138.p.rapidapi.com"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "4abd10d8-e68e-4729-928d-0e466a00be8b",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          -2840,
+          1480
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4o-mini"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "4941f63a-3560-4175-9e97-86f9c051ca5c",
+        "name": "RSS Feed URL",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -3060,
+          1260
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "81c9584a-4113-4b60-97e3-dcd8cf39882c",
+                "name": "rss_feed_url",
+                "type": "string",
+                "value": "=https://www.youtube.com/feeds/videos.xml?channel_id={{ $json.channelId }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "8901e407-973c-4c25-87ff-61c653448f3a",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3740,
+          960
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 440,
+          "height": 280,
+          "content": "## 1. Slack Event Trigger\n- Kicks off whenever someone @mentions the bot in a channel, capturing the message text and channel context.\n\n### Example:\n\"@yourbotname, add this  `https://www.youtube.com/@mreflow`\"\n\n\"@yourbotname, delete/remove this  `https://www.youtube.com/@mreflow`\""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4b0e9642-6db1-4b91-8706-f7b5f2d6ba72",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3200,
+          1080
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 800,
+          "height": 140,
+          "content": "## 2. Build RSS & Decide Action\n- Extracts the YouTube channel link from the message, converts it into a channel-specific RSS URL, and lets an AI step read the text to decide whether the user wants to **add** or **remove** that feed."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "347b8f85-700e-4638-a1ce-3d96c754b22a",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -4520,
+          860
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 620,
+          "height": 420,
+          "content": "## Setting up Slack OAuth for Posting & Event Listening\n\n1. **Create a Slack App**: `api.slack.com/apps` → **Create New App** → “From scratch.”  \n2. **Add Bot Token Scopes**:  \n   - `chat:write` (post messages)  \n   - `channels:read` & `groups:read` (find channel IDs)  \n3. **Enable Event Subscriptions**:  \n   - Turn on **Event Subscriptions** → set your n8n public webhook URL.  \n   - Subscribe to the **`app_mention`** event so the bot fires when mentioned.  \n4. **Install the App**: Click **Install App**, authorize, and copy the **Bot User OAuth Token** (`xoxb-...`) into an n8n Slack credential.  \n5. **Invite Bot to Channel**: `/invite @YourBot` in the target channel.  \n6. **Test**: Send “`@YourBot add/remove {YouTube Channel link}`” and watch the workflow update the sheet.\n\n*(If you change scopes later, reinstall the app so the token picks up new permissions.)*\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "838fdb84-cbac-4a0f-860a-ea25f1459e58",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -4500,
+          340
+        ],
+        "parameters": {
+          "width": 600,
+          "height": 420,
+          "content": "## 🔑 Setup & Credentials\n- **Google Sheets Template**  \n  > Make a copy of the master sheet here:  \n  > `https://docs.google.com/spreadsheets/d/1i3jZ_0npsEVtrMUSzGPV3Lbta3q7sArHHeNomlAuSMg/edit?usp=sharing`  \n  > Connect the copy with a **Google Sheets OAuth2** credential that has **edit** access so the workflow can read/write rows.\n\n- **RapidAPI – Subtitles Endpoint**  \n  > Sign up at `https://yt-api.p.rapidapi.com/subtitles` (free 300 calls / month).  \n  > Store your **X-RapidAPI-Key** in an n8n **Header Auth** credential—never hard-code it in the node.\n\n- **OpenAI API Key**  \n  > Create a key at `https://platform.openai.com/account/api-keys` and save it in an n8n **OpenAI** credential.  \n  > Monitor usage; long transcripts can eat tokens quickly.\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": true,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "897c96d2-bbec-4446-8150-268049be132c",
+    "connections": {
+      "Get Rows": {
+        "ai_tool": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Append Row": {
+        "ai_tool": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Delete Row": {
+        "ai_tool": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "RSS Feed URL": {
+        "main": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get RSS Links": {
+        "main": [
+          [
+            {
+              "node": "Batch RSS Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Subtitles": {
+        "main": [
+          [
+            {
+              "node": "Get Timestamps",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse RSS XML": {
+        "main": [
+          [
+            {
+              "node": "If newly published",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Post to Slack": {
+        "main": [
+          [
+            {
+              "node": "Batch RSS Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Slack Trigger": {
+        "main": [
+          [
+            {
+              "node": "Get Channel ID",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch RSS Feed": {
+        "main": [
+          [
+            {
+              "node": "Parse RSS XML",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Channel ID": {
+        "main": [
+          [
+            {
+              "node": "RSS Feed URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Timestamps": {
+        "main": [
+          [
+            {
+              "node": "Check for Timestamps",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log New Videos": {
+        "main": [
+          [
+            {
+              "node": "Fetch Video Details",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Batch RSS Items": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Fetch RSS Feed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format Response": {
+        "main": [
+          [
+            {
+              "node": "Get Subtitles",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build AI Payload": {
+        "main": [
+          [
+            {
+              "node": "Generate Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Summary": {
+        "main": [
+          [
+            {
+              "node": "Generate Slack Blocks - Detailed Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Get RSS Links",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Link is Processed": {
+        "main": [
+          [
+            {
+              "node": "Batch RSS Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "If newly published": {
+        "main": [
+          [
+            {
+              "node": "Check for new videos",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Subtitles URL": {
+        "main": [
+          [
+            {
+              "node": "Format Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Video Details": {
+        "main": [
+          [
+            {
+              "node": "Fetch Subtitles URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check for Timestamps": {
+        "main": [
+          [
+            {
+              "node": "Formatted Chapter Text",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Formatted Transcript w/o Chapters",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check for new videos": {
+        "main": [
+          [
+            {
+              "node": "Filter for New Video",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Batch RSS Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter for New Video": {
+        "main": [
+          [
+            {
+              "node": "Check if the Video Exists",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Formatted Chapter Text": {
+        "main": [
+          [
+            {
+              "node": "Build AI Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check if the Video Exists": {
+        "main": [
+          [
+            {
+              "node": "Log New Videos",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Link is Processed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Formatted Transcript w/o Chapters": {
+        "main": [
+          [
+            {
+              "node": "Generate Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Slack Blocks - Detailed Summary": {
+        "main": [
+          [
+            {
+              "node": "Post to Slack",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 40,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 3
+      },
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.xml": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 7
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.youTube": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 9
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 4
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 3
+      },
+      "n8n-nodes-base.slackTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheetsTool": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Naveen Choudhary",
+    "username": "n8nstein",
+    "bio": "I create AI-driven n8n workflows that turn repetitive tasks into smooth, hands-off automations. Want to explore an idea? Book a quick consult: https://cal.com/nickchoudhary/30min",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/naveen-choudhary/"
+    ],
+    "avatar": "https://gravatar.com/avatar/6d9ee4873c6912965622290c866bbb3edf795dd73d3c8b16b7c5886db7e59070?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "icon": "fa:file-code",
+      "name": "n8n-nodes-base.xml",
+      "codex": {
+        "data": {
+          "alias": [
+            "Parse"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.xml/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "XML",
+        "color": "#333377"
+      },
+      "iconData": {
+        "icon": "file-code",
+        "type": "icon"
+      },
+      "displayName": "XML",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 357,
+      "icon": "file:youTube.png",
+      "name": "n8n-nodes-base.youTube",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.youtube/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Marketing"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "YouTube"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEYAAABGCAYAAABxLuKEAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAewQAAHsEBw2lUUwAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAOLSURBVHic7ZrNSltBFMf/kdAmtiER/CQUXBVqIC5aaBH0CVqQgkv1FQpdxPYJ3JQiheo2a7d5AoOUSt0IEZcuWhK1ojbfJeR0MQRFc5oz00kT2/ODIbnkMHPmd+/k3rkzAQIIyg0Gep1Av6JiGFQMg4phUDEMKoZBxTCoGAYVw6BiGFQMg4phUDEMKoZBxTCoGIag9xpjMSASAe7dMyUWM5/hMBCNXsYFAua333F+DtCV92gXF0C1CpTL5rdy2ZRi0Rx7xF3M0BCwsAA8eQIkEsCDB8DYGHDnjsf0LPj5EygUgK9fgVwO+PIF2NwEzs7c6iNzTuQlECB6+5aoUqG+p1IhSqVMzpb9tBezvt7r7tqzsdFlMfPzve6iOy9fWomxuyu9fu02XvuBV6+swgPi5ZNIxNwVAgGXtHoPkbkL/vghCpdfMcnk7ZUCmNwTCXG4XMz0tEs6/UUyKQ6Vi3n0yCWV/mJqShwqFzMx4ZJKexoNIJv1V5+U8XFxqFzMyIhLKu1pNIC5OeDFC+Dw0F+9nRgdFYfKxQwPu6TyezIZc3mvrAClkv/6r2NzcsUPPfm8v4etavVm/fE4UTpN1Gz6a+c6+XwXHvAGBx1OkQXfvgHLy8CzZ8Dnz91pIxwWh8rF3L3rkoo9OzvAzAywtAQcHfmt26YP4hm1z0u83VBqV2IxotVVolrNT7vNpnimLRMTCvlJrIVUTKs8fEiUyfhpOxTqwiTyf+JWDKV63U+73ocS4G+cE3UWMzBAtLhIVCj4a1PS7pUif+dbr/+dO9PTp8Damvn0Tb0uDpX/x1QqLqnIiceBdBr49Kk7UgCzwiBELub01CWVzoTDQCoFHByYZ5duvvP5/l0cKh9KFpWKef4c+PABmJz0X3c7Tk7EoXIxFpV2bjUIbG0Bs7P+6pRwfCwOlQ+lQsEllfYEg39fCmA1xZCLyeVcUukvLPogF7O355JKf2HRB10+YZBfMcUisL3tmlbvyWbFUgDb/THv39um0z+8e2cXbzX9B27nov7Hj3Z9tJpEXp1pp1JE5XKvu9uZSoXozRunbSDyP9/rtDYOPX5slj7jcbNuEwo5VffH1GqXG4f294Hd3T/aOOQuhiMaBe7fN9vLIpHLY59bzUol871YNFvNWsce8S/mH0FfbTKoGAYVw6BiGFQMg4phUDEMKoZBxTCoGAYVw6BiGFQMg4phUDEMKobhF0xEbb6Jqe94AAAAAElFTkSuQmCC"
+      },
+      "displayName": "YouTube",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 27,
+          "name": "Marketing"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1264,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slackTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.slacktrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Slack Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 31,
+      "name": "Content Creation"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

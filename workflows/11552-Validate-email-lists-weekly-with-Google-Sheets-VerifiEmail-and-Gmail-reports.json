@@ -1,0 +1,1403 @@
+{
+  "id": 9252,
+  "name": "Validate email lists weekly with Google Sheets, VerifiEmail and Gmail reports",
+  "views": 167,
+  "recentViews": 0,
+  "totalViews": 167,
+  "createdAt": "2025-10-03T20:30:19.139Z",
+  "description": "# Email List Hygiene - Automated Weekly Validator\n\n## Overview\n\nValidates email lists through automated checks, categorizes results as Valid/Invalid/Risky, updates Google Sheets in real-time, and delivers HTML reports. Runs every Friday at 5 PM via cron scheduling.\n\n---\n\n## Workflow Architecture\n\n```\nSchedule Trigger → Read Google Sheets → Loop (Process Each Email)\n    → Validate API → IF Branch (Valid/Invalid)\n    → Update Google Sheets → Merge → Loop Back\n    → Calculate Statistics → Send Email Report\n```\n\n### Loop Mechanism\n- Split in Batches processes one email at a time\n- Each email: validate → branch → update sheet → merge → continue\n- Loop accumulates all results internally\n- \"Done\" output triggers statistics calculation after all emails processed\n\n### Health Score Formula\n```\nScore = (Valid% × 100) - (Invalid% × 20) - (Risky% × 10)\nBounded: 0-100\n```\n\n**Ranges:**\n- 80-100: Excellent (green)\n- 60-79: Good (orange)  \n- 0-59: Needs Attention (red)\n\n---\n\n## Prerequisites\n\n**Required:**\n- Google account with Sheets access\n- Email validation API (VerifiEmail)\n- n8n v1.0+\n\n## Google Sheet Structure\n\n| Column | Type | Filled By |\n|--------|------|-----------|\n| row_number | Number | Auto-generated |\n| name | Text | You |\n| email | Text | You |\n| status | Text | Workflow |\n| checked_at | Text | Workflow |\n| notes | Text | Workflow |\n\nOnly populate first three columns.\n\n---\n\n## Setup\n\n### 1. Import Template\nImport JSON file to n8n via Workflows → Add workflow → Import from File\n\n### 2. Configure Credentials\n\n**Google Sheets OAuth2** (used by 3 nodes):\n- Create credential via any Google Sheets node\n- Grant spreadsheet permissions\n- Apply same credential to all Google Sheets nodes\n\n**Validation API:**\n- Get API key from https://verifi.email\n- Add credential to \"Validate Email Address\" node\n\n**Gmail OAuth2:**\n- Add credential to \"Send Weekly Report\" node\n- Grant email sending permissions\n\n### 3. Connect Google Sheet\n\nIn all three Google Sheets nodes:\n- Select your spreadsheet from Document dropdown\n- Select sheet tab\n- Verify \"Column to Match On\" = row_number (for Update nodes)\n\n### 4. Set Email Recipient\n\nIn \"Send Weekly Report\" node:\n- Change \"Send To\" from placeholder to your email\n- Optional: Add CC/BCC for multiple recipients\n\n### 5. Test\n\n- Add 3-5 test emails (mix of valid/invalid)\n- Click \"Execute Workflow\"\n- Verify sheet updates and email arrives\n\n### 6. Activate\n\nToggle \"Active\" switch. Workflow runs automatically every Friday at 5 PM.\n\n---\n\n## Customization\n\n**Change Schedule:**\nEdit \"Weekly Schedule\" node cron expression:\n- Daily 9 AM: `0 9 * * *`\n- Monday 5 PM: `0 17 * * 1`\n- First of month: `0 9 1 * *`\n\n**Email Design:**\nEdit HTML in \"Send Weekly Report\" message field. Modify colors (search hex codes), text, or add branding.\n\n**Archive Invalid Emails:**\nAdd Google Sheets Append node after \"Update Invalid Status\" → create \"Invalid_Archive\" tab → append email, name, reason, date\n\n**Slack Notifications:**\nAdd Slack node after email report → configure channel → use summary text from statistics\n\n**Rate Limiting:**\nAdd Wait node (1-2 seconds) after validation for large lists to prevent API throttling\n\n---\n\n## Troubleshooting\n\n**\"Column not found\":**\nVerify exact column names in sheet: `row_number`, `name`, `email`, `status`, `checked_at`, `notes` (case-sensitive)\n\n**Only processes 1 email:**\nCheck Google Sheets node Range field is empty or set to include all rows. Verify \"Use Header Row\" enabled.\n\n**Wrong statistics:**\nEnable \"Execute Once\" in Calculate Statistics node settings (gear icon)\n\n**Email not arriving:**\nCheck spam/promotions folder, verify Gmail credential authorized, confirm recipient address correct\n\n**API errors:**\nVerify API key valid, check quota not exceeded, test with simple email like test@gmail.com\n\n**Merge node error:**\nConfirm both Update nodes connect to Merge inputs (top and bottom). Check both branches execute successfully.\n\n---\n\n## Validation Checks\n\nEach email undergoes:\n- RFC 5322 format compliance\n- MX record existence (domain has mail servers)\n- SMTP verification (mailbox exists)\n- Disposable email service detection\n- Catch-all domain detection\n\n**Categories:**\n- Valid: All checks passed\n- Invalid: Critical checks failed\n- Risky: Disposable or catch-all domain\n\n---\n\n## Support\n\nCheck execution logs in n8n Executions tab for errors. Use \"Execute Node\" on individual nodes to isolate issues. Visit n8n community forum for additional help.\n\n---\n\n## Tags\n`email-validation` `marketing-automation` `data-cleaning` `google-sheets` `scheduled-workflow` `deliverability` `list-hygiene`",
+  "workflow": {
+    "id": "ZquoLLFP4qaudR5P",
+    "meta": {
+      "instanceId": "",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Email List Hygiene Automation",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "8a19fa06-c280-4907-a551-3b34ca0f993c",
+        "name": "Calculate Statistics",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          656,
+          -320
+        ],
+        "parameters": {
+          "jsCode": "// Get all processed items from the loop\nconst items = $input.all();\n\n// Log for debugging\nconsole.log(`Processing ${items.length} items for statistics`);\n\n// Initialize counters\nconst stats = {\n  total: items.length,\n  valid: 0,\n  invalid: 0,\n  risky: 0,\n  unknown: 0,\n  processed_at: new Date().toLocaleString('en-IN', {\n    dateStyle: 'full',\n    timeStyle: 'short'\n  }),\n  sheet_url: $('Read Email List').params?.documentId?.__rl?.cachedResultUrl || 'YOUR_GOOGLE_SHEET_URL'\n};\n\n// Count each category\nitems.forEach(item => {\n  const status = item.json.status;\n  \n  if (status === 'valid') {\n    stats.valid++;\n  } else if (status === 'invalid') {\n    stats.invalid++;\n  } else if (status === 'risky') {\n    stats.risky++;\n  } else {\n    stats.unknown++;\n  }\n});\n\n// Calculate percentages (handle division by zero)\nif (stats.total > 0) {\n  stats.valid_percentage = ((stats.valid / stats.total) * 100).toFixed(1);\n  stats.invalid_percentage = ((stats.invalid / stats.total) * 100).toFixed(1);\n  stats.risky_percentage = ((stats.risky / stats.total) * 100).toFixed(1);\n  stats.unknown_percentage = ((stats.unknown / stats.total) * 100).toFixed(1);\n} else {\n  stats.valid_percentage = '0.0';\n  stats.invalid_percentage = '0.0';\n  stats.risky_percentage = '0.0';\n  stats.unknown_percentage = '0.0';\n}\n\n// Calculate list health score (0-100)\n// Formula: \n// - Valid emails: +100 points per email (percentage of total)\n// - Invalid emails: -20 points per email (penalty)\n// - Risky emails: -10 points per email (smaller penalty)\nstats.health_score = Math.max(0, Math.min(100, Math.round(\n  (stats.valid / stats.total) * 100 - \n  (stats.invalid / stats.total) * 20 - \n  (stats.risky / stats.total) * 10\n)));\n\n// Determine health status\nif (stats.health_score >= 80) {\n  stats.health_status = 'Excellent ✅';\n  stats.health_color = '#4CAF50';\n} else if (stats.health_score >= 60) {\n  stats.health_status = 'Good ⚠️';\n  stats.health_color = '#ff9800';\n} else {\n  stats.health_status = 'Needs Attention ❌';\n  stats.health_color = '#f44336';\n}\n\n// Create summary text for notifications\nstats.summary = `📊 Email List Validation Complete\n\n✅ Valid: ${stats.valid} (${stats.valid_percentage}%)\n❌ Invalid: ${stats.invalid} (${stats.invalid_percentage}%)\n⚠️ Risky: ${stats.risky} (${stats.risky_percentage}%)\n❓ Unknown: ${stats.unknown} (${stats.unknown_percentage}%)\n\n📈 List Health Score: ${stats.health_score}/100 - ${stats.health_status}\n📧 Total Processed: ${stats.total} emails\n🕐 Completed: ${stats.processed_at}`;\n\n// Create detailed lists for the report\nstats.email_details = {\n  valid_emails: items\n    .filter(item => item.json.status === 'valid')\n    .map(item => item.json.email),\n  \n  invalid_emails: items\n    .filter(item => item.json.status === 'invalid')\n    .map(item => ({\n      email: item.json.email,\n      reason: item.json.notes\n    })),\n  \n  risky_emails: items\n    .filter(item => item.json.status === 'risky')\n    .map(item => ({\n      email: item.json.email,\n      reason: item.json.notes\n    }))\n};\n\n// Log summary for debugging\nconsole.log(stats.summary);\n\n// Return the complete statistics object\nreturn stats;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d6827158-4e8d-4806-a04b-7f9f35384532",
+        "name": "Weekly Schedule (Friday 5PM)",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 17 * * 5"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "0084d5ab-cdf7-4f5e-969e-711eee3bbcd7",
+        "name": "Read Email List",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          208,
+          0
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HjIuSDqm2e8k0TUZuFqOdm4MZ4vzvnLtKRSFsiKVtYk/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "6d5bacd8-88cc-4979-a445-eba35f7b60f6",
+        "name": "Process Each Email",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          416,
+          0
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "e2bf73b2-46f6-4661-8c74-5297b37318ad",
+        "name": "Validate Email Address",
+        "type": "n8n-nodes-verifiemail.verifiEmail",
+        "position": [
+          672,
+          -96
+        ],
+        "parameters": {
+          "email": "={{ $json.email }}"
+        },
+        "credentials": {
+          "verifiEmailApi": {
+            "id": "credential-id",
+            "name": "verifiEmailApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "63fdab5f-ce90-4700-a343-f5823f17a236",
+        "name": "Check Validation Result",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          896,
+          -96
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "a3f7a8d6-9219-44b7-be4b-0f8d5d5aa5c5",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.valid }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "e71190c0-fdc1-49ac-ae76-742dbea0782d",
+        "name": "Process Valid Email",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1248,
+          -240
+        ],
+        "parameters": {
+          "jsCode": "// Get the validation result from current input\nconst validation = $input.first().json;\n\n// Get the ORIGINAL data from Loop Over Items node\nconst loopData = $('Process Each Email').item.json;\n\n// Process valid email\nlet status = 'valid';\nlet notes = 'Email verified successfully';\n\n// Check for any warnings even if valid\nif (validation.details?.disposable === true) {\n  status = 'risky';\n  notes = 'Valid but disposable email address';\n}\n\nconst checkedAt = new Date().toLocaleString('en-IN', { \n  year: 'numeric',\n  month: '2-digit',\n  day: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit',\n  hour12: true\n});\n\n// Return merged data - combining Loop data + validation results\nreturn {\n  row_number: loopData.row_number,\n  name: loopData.name,\n  email: loopData.email,\n  status: status,\n  checked_at: checkedAt,\n  notes: notes,\n  is_valid: true\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "08f26195-97eb-4cf0-989e-2b686c7e4bd7",
+        "name": "Process Invalid Email",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1232,
+          -48
+        ],
+        "parameters": {
+          "jsCode": "// Get the validation result\nconst validation = $input.first().json;\n\n// Get original data from Loop Over Items\nconst loopData = $('Process Each Email').item.json;\n\n// Process invalid email\nlet status = 'invalid';\nlet notes = 'Email validation failed';\n\n// Get more specific reason from validation details\nif (validation.details) {\n  if (validation.details.validMxRecord === false) {\n    notes = 'Invalid - No mail server found';\n  } else if (validation.details.rfcCompliant === false) {\n    notes = 'Invalid - Incorrect email format';\n  } else if (validation.details.spoofFree === false) {\n    notes = 'Invalid - Possible spoof/fake email';\n  }\n}\n\nconst checkedAt = new Date().toLocaleString('en-IN', { \n  year: 'numeric',\n  month: '2-digit',\n  day: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit',\n  hour12: true\n});\n\n// Return merged data\nreturn {\n  row_number: loopData.row_number,\n  name: loopData.name,\n  email: loopData.email,\n  status: status,\n  checked_at: checkedAt,\n  notes: notes,\n  is_valid: false\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5e98a36d-31c7-446b-a1ed-9988d3cb3ef3",
+        "name": "Update Valid Status",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1520,
+          -240
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "name": "={{ $json.name }}",
+              "email": "={{ $json.email }}",
+              "notes": "={{ $json.notes }}",
+              "status": "={{ $json.status }}",
+              "checked_at": "={{ $json.checked_at }}",
+              "row_number": "={{ $json.row_number }}"
+            },
+            "schema": [
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "email",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "checked_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "checked_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "notes",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "notes",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "row_number"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HjIuSDqm2e8k0TUZuFqOdm4MZ4vzvnLtKRSFsiKVtYk/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "790a9728-2083-402d-8334-8254924c2e29",
+        "name": "Update Invalid Status",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1520,
+          -48
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "name": "={{ $json.name }}",
+              "email": "={{ $json.email }}",
+              "notes": "={{ $json.notes }}",
+              "status": "={{ $json.status }}",
+              "checked_at": "={{ $json.checked_at }}",
+              "row_number": "={{ $json.row_number }}"
+            },
+            "schema": [
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "email",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "checked_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "checked_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "notes",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "notes",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "row_number"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HjIuSDqm2e8k0TUZuFqOdm4MZ4vzvnLtKRSFsiKVtYk/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "11a7ea29-2e24-4f9c-91dc-27afa0ca46f7",
+        "name": "Send Weekly Report",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          928,
+          -320
+        ],
+        "webhookId": "",
+        "parameters": {
+          "sendTo": "user@example.com",
+          "message": "=<!DOCTYPE html>\n<html>\n<head>\n  <meta charset=\"UTF-8\">\n  <style>\n    body { \n      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;\n      line-height: 1.6; \n      color: #333;\n      margin: 0;\n      padding: 0;\n      background-color: #f5f5f5;\n    }\n    .container { \n      max-width: 650px; \n      margin: 20px auto; \n      background: white;\n      border-radius: 12px;\n      overflow: hidden;\n      box-shadow: 0 4px 6px rgba(0,0,0,0.1);\n    }\n    .header { \n      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n      color: white; \n      padding: 40px 30px; \n      text-align: center;\n    }\n    .header h1 {\n      margin: 0 0 10px 0;\n      font-size: 28px;\n      font-weight: 600;\n    }\n    .header p {\n      margin: 0;\n      opacity: 0.9;\n      font-size: 16px;\n    }\n    .content { \n      padding: 30px;\n    }\n    .health-score {\n      background: {{ $json.health_color }};\n      color: white;\n      padding: 30px;\n      border-radius: 12px;\n      text-align: center;\n      margin: 0 0 30px 0;\n      box-shadow: 0 4px 12px rgba(0,0,0,0.15);\n    }\n    .health-score-label {\n      font-size: 14px;\n      text-transform: uppercase;\n      letter-spacing: 1px;\n      opacity: 0.9;\n      margin-bottom: 10px;\n    }\n    .health-score-number {\n      font-size: 56px;\n      font-weight: bold;\n      margin: 15px 0;\n      line-height: 1;\n    }\n    .health-score-status {\n      font-size: 18px;\n      font-weight: 500;\n      opacity: 0.95;\n    }\n    .stats-grid {\n      display: grid;\n      grid-template-columns: repeat(2, 1fr);\n      gap: 15px;\n      margin: 30px 0;\n    }\n    .stat-card {\n      background: #f8f9fa;\n      padding: 20px;\n      border-radius: 10px;\n      text-align: center;\n      border: 2px solid #e9ecef;\n      transition: transform 0.2s;\n    }\n    .stat-card:hover {\n      transform: translateY(-2px);\n      box-shadow: 0 4px 8px rgba(0,0,0,0.1);\n    }\n    .stat-label {\n      color: #6c757d;\n      font-size: 13px;\n      text-transform: uppercase;\n      letter-spacing: 0.5px;\n      margin-bottom: 8px;\n      font-weight: 600;\n    }\n    .stat-number {\n      font-size: 32px;\n      font-weight: bold;\n      margin: 8px 0;\n      line-height: 1;\n    }\n    .stat-percentage {\n      color: #6c757d;\n      font-size: 14px;\n    }\n    .valid { color: #28a745; }\n    .invalid { color: #dc3545; }\n    .risky { color: #fd7e14; }\n    .action-section {\n      background: #fff3cd;\n      border-left: 4px solid #ffc107;\n      padding: 20px;\n      margin: 25px 0;\n      border-radius: 8px;\n    }\n    .action-section h3 {\n      margin: 0 0 15px 0;\n      color: #856404;\n      font-size: 18px;\n    }\n    .action-section ul {\n      margin: 10px 0;\n      padding-left: 20px;\n    }\n    .action-section li {\n      margin: 8px 0;\n      color: #856404;\n    }\n    .btn {\n      display: inline-block;\n      background: #667eea;\n      color: white !important;\n      padding: 14px 32px;\n      text-decoration: none;\n      border-radius: 8px;\n      margin: 20px 0;\n      font-weight: 600;\n      font-size: 16px;\n      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);\n      transition: all 0.3s;\n    }\n    .btn:hover {\n      background: #5568d3;\n      transform: translateY(-2px);\n      box-shadow: 0 6px 16px rgba(102, 126, 234, 0.5);\n    }\n    .summary-box {\n      background: white;\n      padding: 20px;\n      border-radius: 10px;\n      margin: 20px 0;\n      border: 2px solid #e9ecef;\n    }\n    .summary-box h3 {\n      margin: 0 0 15px 0;\n      font-size: 18px;\n      color: #495057;\n    }\n    .summary-box pre {\n      white-space: pre-wrap;\n      font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;\n      font-size: 14px;\n      line-height: 1.8;\n      margin: 0;\n      color: #495057;\n    }\n    .insights-box {\n      background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);\n      padding: 25px;\n      border-radius: 10px;\n      margin: 25px 0;\n    }\n    .insights-box h3 {\n      margin: 0 0 15px 0;\n      color: #1976d2;\n      font-size: 18px;\n    }\n    .insight-item {\n      margin: 12px 0;\n      padding-left: 25px;\n      position: relative;\n    }\n    .insight-item:before {\n      content: '✓';\n      position: absolute;\n      left: 0;\n      color: #1976d2;\n      font-weight: bold;\n      font-size: 18px;\n    }\n    .email-list {\n      background: #f8f9fa;\n      padding: 15px;\n      border-radius: 8px;\n      margin: 15px 0;\n      max-height: 200px;\n      overflow-y: auto;\n    }\n    .email-list h4 {\n      margin: 0 0 10px 0;\n      font-size: 14px;\n      color: #495057;\n      text-transform: uppercase;\n      letter-spacing: 0.5px;\n    }\n    .email-item {\n      padding: 8px 12px;\n      margin: 5px 0;\n      background: white;\n      border-radius: 6px;\n      font-size: 13px;\n      border-left: 3px solid #dee2e6;\n    }\n    .email-item.invalid {\n      border-left-color: #dc3545;\n    }\n    .email-reason {\n      color: #6c757d;\n      font-size: 12px;\n      margin-top: 4px;\n    }\n    .footer {\n      background: #f8f9fa;\n      text-align: center;\n      color: #6c757d;\n      font-size: 13px;\n      padding: 25px;\n      border-top: 1px solid #dee2e6;\n    }\n    .footer p {\n      margin: 5px 0;\n    }\n    @media only screen and (max-width: 600px) {\n      .stats-grid {\n        grid-template-columns: 1fr;\n      }\n      .container {\n        margin: 10px;\n      }\n      .content {\n        padding: 20px;\n      }\n    }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <h1>🧹 Email List Hygiene Report</h1>\n      <p>Automated Weekly Validation Results</p>\n    </div>\n    \n    <div class=\"content\">\n      <!-- Health Score Section -->\n      <div class=\"health-score\">\n        <div class=\"health-score-label\">List Health Score</div>\n        <div class=\"health-score-number\">{{ $json.health_score }}/100</div>\n        <div class=\"health-score-status\">{{ $json.health_status }}</div>\n      </div>\n\n      <!-- Statistics Grid -->\n      <div class=\"stats-grid\">\n        <div class=\"stat-card\">\n          <div class=\"stat-label\">Valid Emails</div>\n          <div class=\"stat-number valid\">{{ $json.valid }}</div>\n          <div class=\"stat-percentage\">{{ $json.valid_percentage }}%</div>\n        </div>\n        \n        <div class=\"stat-card\">\n          <div class=\"stat-label\">Invalid Emails</div>\n          <div class=\"stat-number invalid\">{{ $json.invalid }}</div>\n          <div class=\"stat-percentage\">{{ $json.invalid_percentage }}%</div>\n        </div>\n        \n        <div class=\"stat-card\">\n          <div class=\"stat-label\">Risky Emails</div>\n          <div class=\"stat-number risky\">{{ $json.risky }}</div>\n          <div class=\"stat-percentage\">{{ $json.risky_percentage }}%</div>\n        </div>\n        \n        <div class=\"stat-card\">\n          <div class=\"stat-label\">Total Processed</div>\n          <div class=\"stat-number\">{{ $json.total }}</div>\n          <div class=\"stat-percentage\">100%</div>\n        </div>\n      </div>\n\n      <!-- Action Required Section -->\n      <div class=\"action-section\">\n        <h3>⚡ Action Required</h3>\n        <ul>\n          <li><strong>{{ $json.invalid }}</strong> invalid email(s) detected and flagged</li>\n          <li><strong>{{ $json.risky }}</strong> risky email(s) found (disposable/catch-all)</li>\n          <li>All email statuses have been automatically updated in your sheet</li>\n          <li>Review flagged emails and consider removal from active campaigns</li>\n        </ul>\n      </div>\n\n      <!-- Invalid Emails List -->\n      {{ $json.invalid > 0 ? '<div class=\"email-list\"><h4>❌ Invalid Emails Detected</h4>' : '' }}\n      {{ $json.email_details.invalid_emails.map(e => `<div class=\"email-item invalid\"><strong>${e.email}</strong><div class=\"email-reason\">${e.reason}</div></div>`).join('') }}\n      {{ $json.invalid > 0 ? '</div>' : '' }}\n\n      <!-- CTA Button -->\n      <div style=\"text-align: center;\">\n        <a href=\"{{ $json.sheet_url }}\" class=\"btn\">📊 View Full Report in Google Sheets</a>\n      </div>\n\n      <!-- Text Summary -->\n      <div class=\"summary-box\">\n        <h3>📋 Quick Summary</h3>\n        <pre>{{ $json.summary }}</pre>\n      </div>\n\n      <!-- Insights Section -->\n      <div class=\"insights-box\">\n        <h3>💡 What This Means for Your Campaigns</h3>\n        <div class=\"insight-item\">\n          <strong>Improved Deliverability:</strong> Valid emails ensure better inbox placement and sender reputation\n        </div>\n        <div class=\"insight-item\">\n          <strong>Cost Savings:</strong> Reduced bounces mean lower email service costs and fewer blacklist risks\n        </div>\n        <div class=\"insight-item\">\n          <strong>Better Metrics:</strong> Clean lists lead to higher open rates, click rates, and engagement\n        </div>\n        <div class=\"insight-item\">\n          <strong>Compliance Ready:</strong> Maintain GDPR/CAN-SPAM compliance with verified contacts\n        </div>\n      </div>\n    </div>\n\n    <!-- Footer -->\n    <div class=\"footer\">\n      <p>🤖 <strong>Automated by n8n Email Hygiene System</strong></p>\n      <p>Report generated: {{ $json.processed_at }}</p>\n      <p style=\"margin-top: 15px; opacity: 0.7;\">This report runs automatically every Friday at 5:00 PM</p>\n    </div>\n  </div>\n</body>\n</html>",
+          "options": {},
+          "subject": "=📧 Email Hygiene Report - {{ $now.format(\"MMM DD, YYYY\") }}"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "d30f5ad6-778c-4891-90fc-c58fa49612e9",
+        "name": "Merge1",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          1776,
+          -64
+        ],
+        "parameters": {},
+        "typeVersion": 3.2
+      },
+      {
+        "id": "f48744cc-7449-43fa-8fbd-dfda525f22b8",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          -560
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 336,
+          "height": 576,
+          "content": "## EMAIL LIST HYGIENE AUTOMATION\n\nAutomatically validates your email list **every Friday at 5 PM**.\n\n✅ What it does:\n- **Reads emails** from **Google Sheets**\n- Validates each email (format, MX records, deliverability)\n- Categorizes as **Valid**, **Invalid**, or **Risky**\n- Updates sheet with **validation status** and **timestamp**\n- Generates **health score** and **statistics**\n- Sends **professional HTML report** via **email**\n\n📈 Benefits:\n- Improved **deliverability**(reduce 15%+ bounce rates to <2%)\n- Better sender reputation with **ISPs**\n- Higher campaign **ROI and engagement**\n- **GDPR/CAN-SPAM compliance** ready\n\n⏱️ Runs: **Every Friday at 5:00 PM**\n📧 Processes: **Unlimited emails**(loops through all)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "071eceb8-e834-45ee-926e-cbab44953cfd",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 320,
+          "height": 736,
+          "content": "## SETUP REQUIRED (5 minutes)\n\nBefore activating this workflow:\n\n1. **Google Sheets** Setup:\n   Create sheet with these exact columns:\n   • row_number (auto-generated by Sheets)\n   • name\n   • email\n   • status **(leave blank - auto-filled)**\n   • checked_at **(leave blank - auto-filled)**\n   • notes **(leave blank - auto-filled)**\n\n2. Credentials Needed:\n   • Google Sheets OAuth2\n   • Email validation API **(VerifiEmail)** at **https://verifi.email**\n   • Gmail OAuth2 (for sending reports)\n\n3. Configure Email Recipient:\n   • Open **\"Send Email Report\"** node\n   • Change **\"sendTo\"** from **\"marketing.manager@company.com\"**\n   • Use: **your-email@company.com** or **team@company.com**\n   • Optional: Add CC/BCC for multiple recipients\n\n4. Test Before Activating:\n   • Add **3-5 test emails** to your **sheet**\n   • Click \"Execute Workflow\" button\n   • Verify sheet updates correctly\n   • Check **email report arrives**\n   • Then toggle **\"Active\"** switch"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2517b984-ed20-4930-85b1-33d303e0b714",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          368,
+          160
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 608,
+          "content": "## EMAIL VALIDATION PROCESS\n\nProcesses each email **individually** in a **loop**:\n\n**STEP 1**: Loop starts\n   → Takes one email from sheet\n\n**STEP 2**: Validation checks\n   ✓ Email format (RFC 5322 compliance)\n   ✓ Domain has mail server (MX records)\n   ✓ Mailbox exists (SMTP verification)\n   ✓ Not disposable email service\n   ✓ Not catch-all domain\n\n**STEP 3**: Categorization\n   ✅ VALID - Passes all checks, safe to use\n   ❌ INVALID - Failed checks, remove from list\n   ⚠️ RISKY - Disposable or catch-all, review\n\n**STEP 4**: Update sheet\n   • Writes status to row\n   • Adds timestamp\n   • Includes reason/notes\n\n**STEP 5**: Loop continues\n   → Processes next email\n   → Repeats until all done\n\n**Speed**: ~1-2 emails per second\nHandles: **1000+ emails ** automatically"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7c8c9273-b54f-4a3f-8131-7031cf23c806",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          992,
+          160
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 368,
+          "height": 688,
+          "content": "## TRUE/FALSE BRANCHING\n\n**IF node splits workflow** based on **validation**:\n\n✅ TRUE BRANCH (Valid Emails):\n   Condition: validation.valid === true\n   ↓\n   Process Valid Email code:\n   • Status: \"valid\"\n   • Note: **\"Email verified successfully\"**\n   • Check for disposable flag\n   ↓\n   Update Valid Status:\n   • Updates Google Sheet row\n   • Writes status, timestamp, notes\n   ↓\n   **Merge Input 1**:\n   • Collects valid email data\n\n❌ FALSE BRANCH **(Invalid Emails)**:\n   Condition: validation.valid === false\n   ↓\n   Process Invalid Email code:\n   • Status: \"invalid\"\n   • Note: Specific reason (no MX, bad format, etc.)\n   ↓\n   Update Invalid Status:\n   • Updates Google Sheet row\n   • Writes status, timestamp, notes\n   ↓\n   **Merge Input 2**:\n   • Collects invalid email data\n\n🔗 Merge combines both branches → loops back"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f30a760a-0560-443c-a352-4ae7e16733a8",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1984,
+          -112
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 368,
+          "height": 576,
+          "content": "## MERGE & LOOP COMPLETION\n\nThe **Merge node** is critical for data flow:\n\n**INPUT 1**: Valid emails from **TRUE** branch\n**INPUT 2**: Invalid emails from **FALSE** branch\n\nWhat Merge does:\n- Combines both data streams\n- Creates single unified output\n- Feeds back to **Loop Over Items**\n- Loop accumulates all processed emails internally\n\nLoop Behavior:\n- Continues processing next email\n- Repeats **validation → branch → merge → loop**\n- Tracks all items internally\n- When complete, \"done\" output fires\n\n**DONE** Output:\n- Triggers only after ALL emails processed\n- Sends accumulated data to Calculate Statistics\n- Contains complete results from all iterations\n\nThis ensures every email is validated and collected\nbefore generating the final report."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dc616d16-1e8d-49e7-9ef8-0bc7234a7ea0",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          656,
+          -1056
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 720,
+          "content": "## ANALYTICS & REPORTING\n\nAfter all emails processed:\n\n1️⃣ **Calculate Statistics**:\n   Receives all accumulated emails from loop\n   \n   **Calculates**:\n   • **Total emails** processed\n   • **Valid count** & **percentage** \n   • **Invalid count** & **percentage** \n   • **Risky count** & **percentage**\n   \n   **Health Score Formula** (0-100):\n   = **(Valid% × 100) - (Invalid% × 20) - (Risky% × 10)**\n   \n   **Scoring**:\n   • **80-100: Excellent ✅ (Green)**\n   • **60-79: Good ⚠️ (Orange)**\n   • **0-59: Needs Attention ❌ (Red)**\n   \n   **Creates**:\n   • Summary text\n   • Email lists by category\n   • Invalid emails with reasons\n\n2️⃣ **Send Email Report**:\n   Beautiful **HTML email** with:\n   • **Color-coded health score badge**\n   • **4 stat cards (valid/invalid/risky/total)**\n   • **Action items list**\n   • **Invalid emails with detailed reasons**\n   • **Direct link to Google Sheet**\n   • Campaign impact insights\n   • Professional branding\n\n**Sent to**: Configurable recipients\n📅 Frequency: **Every Friday at 5:00 PM**"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dc73ce02-5bfb-4d98-9f18-3d8753f5acf1",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1568,
+          -1152
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 832,
+          "content": "## CUSTOMIZATION OPTIONS\n\nEasy modifications:\n\n⏰ Change Schedule:\n   • **Edit \"Weekly Schedule\" node**\n   • Current: 0 17 * * 5 (Friday 5PM)\n   • Examples:\n     - Daily 9AM: 0 9 * * *\n     - Every Monday: 0 17 * * 1\n     - First of month: 0 9 1 * *\n\n📧 Multiple Recipients:\n   • \"Send Email Report\" node → Add options\n\n   • Comma-separate: email1@co.com,email2@co.com\n\n📊 Add Slack Notifications:\n   • Add Slack node after email\n   • Channel: #marketing\n   • Quick text summary for instant alerts\n\n🗃️ Archive Invalid Emails:\n   • Add Google Sheets node on FALSE branch\n   • Operation: Append\n   • Sheet: Create \"Invalid_Archive\" tab\n   • Keeps historical record\n\n📈 Export to CRM:\n   • Add HTTP Request/Webhook node\n   • Push validated emails to HubSpot/Salesforce\n   • Keep CRM automatically synced\n\n⚡ Rate Limiting (if needed):\n   • Add \"Wait\" node after validation\n   • Wait: 1-2 seconds\n   • Prevents API throttling for large lists\n\n🎨 Customize Email Design:\n   • Edit HTML in \"Send Email Report\"\n   • Change colors, fonts, branding\n   • Add company logo"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2816c5ba-112d-4073-b56c-5083ba104b4e",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1936,
+          688
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 464,
+          "height": 896,
+          "content": "## TROUBLESHOOTING GUIDE\n\n**Common issues & solutions**:\n\n❌ \"Column not found\" error:\n   **Fix**: Check **Google Sheet** has exact column names\n   • Names are **case-sensitive**\n   • Required: row_number, name, email, status, checked_at, notes\n\n❌ **Loop processes only 1 email**:\n   **Fix**: Check Google Sheets node returns multiple rows\n   • Verify \"Range\" field is empty or set to A:F\n   • Check \"Use Header Row\" is enabled\n\n❌ **Statistics show wrong counts**:\n   **Fix**: Enable \"Execute Once\" in Calculate Statistics\n   • Click gear icon on node\n   • Toggle \"Execute Once\" to ON\n   • This processes all items together, not one-by-one\n\n❌ **Email doesn't arrive**:\n   **Fix**: Check several things\n   • Gmail spam/promotions folder\n   • Gmail credential is authorized\n   • Recipient email is correct\n   • Try different recipient to test\n\n❌ **Validation API errors**:\n   **Fix**: Verify API access\n   • Check API key is valid\n   • Verify quota not exceeded\n   • Test with known email: test@gmail.com\n\n❌ **Merge node shows \"missing input\"**:\n   **Fix**: Both branches must connect to Merge\n   • TRUE branch → Merge Input 1\n   • FALSE branch → Merge Input 2\n   • Both Update nodes must complete\n\n💡 Debug Tips:\n   • Click individual nodes → \"Execute Node\"\n   • Check OUTPUT panel for each step\n   • Use console.log() in code nodes\n   • Test with 3-5 emails before full list\n   • Check execution log (bottom panel) for errors"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "b747883f-8107-45ba-be73-ac39e8076e88",
+    "connections": {
+      "Merge1": {
+        "main": [
+          [
+            {
+              "node": "Process Each Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Email List": {
+        "main": [
+          [
+            {
+              "node": "Process Each Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Each Email": {
+        "main": [
+          [
+            {
+              "node": "Calculate Statistics",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Validate Email Address",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Valid Email": {
+        "main": [
+          [
+            {
+              "node": "Update Valid Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Valid Status": {
+        "main": [
+          [
+            {
+              "node": "Merge1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Calculate Statistics": {
+        "main": [
+          [
+            {
+              "node": "Send Weekly Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Invalid Email": {
+        "main": [
+          [
+            {
+              "node": "Update Invalid Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Invalid Status": {
+        "main": [
+          [
+            {
+              "node": "Merge1",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Validate Email Address": {
+        "main": [
+          [
+            {
+              "node": "Check Validation Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Validation Result": {
+        "main": [
+          [
+            {
+              "node": "Process Valid Email",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Process Invalid Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Weekly Schedule (Friday 5PM)": {
+        "main": [
+          [
+            {
+              "node": "Read Email List",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 20,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 3
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 8
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 3
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-verifiemail.verifiEmail": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Jitesh Dugar",
+    "username": "jiteshdugar",
+    "bio": "AI Automation Specialist - OpenAI, CRM & Automation Expert with a solid understanding of various tools that include Zapier, Make, Zoho CRM, Hubspot, Google Sheets, Airtable, Pipedrive, Google Analytics, and more.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/jiteshdugar"
+    ],
+    "avatar": "https://gravatar.com/avatar/edaa3abb99806b0586dced559d0a5417f24a507e7c4464a63960f0638a4b1b90?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 38,
+      "name": "Lead Nurturing"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

@@ -1,0 +1,2935 @@
+{
+  "id": 6495,
+  "name": "Sync Shopify customer order data to Airtable with auto-updates",
+  "views": 240,
+  "recentViews": 0,
+  "totalViews": 240,
+  "createdAt": "2025-07-26T17:18:44.237Z",
+  "description": "Shopify Order Data to Airtable\n\nThis n8n template demonstrates how to capture incoming Shopify order webhooks, transform the data into a structured format, and insert each product line item as a separate record in an Airtable sheet. It provides both high-level order information and detailed product-level metrics, making it ideal for analytics, reporting, inventory management, and customer insights.\n\nGood to Know\n\nAirtable API Rate Limits: By default, Airtable allows 5 requests per second per base. Consider batching or adding delays if you process high volumes of orders.\n\nShopify Webhook Configuration: Ensure you have configured the orders/create webhook in your Shopify Admin to point to the n8n webhook node.\n\nField Mapping: The template maps standard Shopify fields; if your store uses custom order or line item properties, update the Function nodes accordingly.\n\nHow It Works\n\nWebhook Trigger: A Shopify orders/create webhook fires when a new order is placed.\n\nNormalize Order Data: The Function node extracts core order, customer, shipping, and billing details and computes financial totals (subtotal, tax, shipping, discounts).\n\nLine Item Breakdown: A second Function node builds an array of objects—one per line item—calculating per-item totals, tax/shipping allocation, and product attributes (color, size, material).\n\nCheck Customer Record: Optionally check against an Airtable \"Customers\" sheet to flag new vs existing customers.\n\nAuto-Increment Record ID: A Function node generates a running serial number for each Airtable record.\n\nInsert Records: The Airtable node writes each line item object into the target base and table, creating rich records with both order-level and product-level details.\n\nHow to Use\n\nClone the Template: Click \"Use Template\" in your n8n instance to import this workflow.\n\nConfigure Credentials:\n\nShopify Trigger: Add your Shopify store domain and webhook secret.\n\nAirtable Node: Set up your Airtable API key and select the base and table.\n\nReview Field Names: Match the field names in the Function nodes to the columns in your Airtable table.\n\nActivate Workflow: Turn on the workflow and place a test order in your Shopify store.\n\nVerify Records: Check your Airtable sheet to see the new order and its line items.\n\nRequirements\n\nn8n@latest\n\nShopify Store with orders/create webhook configured\n\nAirtable Account with a base and table ready to receive records\n\nCustomizing This Workflow\n\nAdd Custom Fields: Extend the Functions to include additional Shopify metafields, discounts, or customer tags.\n\nAlternative Destinations: Replace the Airtable node with Google Sheets, Supabase, or another database by swapping in the corresponding node.\n\nError Handling: Insert If/Wait nodes to retry on API failures or send notifications on errors.\n\nMulti-Currency Support: Adapt the currency logic to convert totals based on dynamic exchange rates.\n\nShopify Customer Append/Update to Airtable\n\nThis n8n template shows how to take incoming Shopify customer webhooks (create or update), check if the customer exists in your Airtable \"Customers\" sheet, append new details or update existing records, and maintain a clean customer database.\n\nGood to Know\n\nAirtable API Rate Limits: Airtable limits to 5 requests per second. Use batch lookups or add delays for high throughput.\n\nShopify Webhook Events: Configure both customers/create and customers/update webhooks in Shopify Admin.\n\nUnique Identifier: Ensure the \"Customer ID\" field in Airtable matches the Shopify customer.id for reliable updates.\n\nHow It Works\n\nWebhook Trigger: Fires on Shopify customers/create or customers/update events.\n\nExtract Customer Data: A Function node normalizes name, email, phone, and address fields from the webhook payload.\n\nFetch Existing Records: The Airtable node lists all records from the \"Customers\" table to find a matching Customer ID.\n\nIdentify Match: A Function node compares the incoming customer.id to existing records and flags found vs. not found.\n\nReturn Last Row: Ensures serial numbering continuity by grabbing the last record's serial in Airtable.\n\nAuto-Increment Serial: A Function node increments the serial number (S No) for new records.\n\nUpsert Record: Depending on match result, the Airtable node either updates the existing record or creates a new one with full details.\n\nHow to Use\n\nImport the Workflow: Click \"Use Template\" in n8n.\n\nSet Credentials:\n\nShopify: Add store domain and webhook secret.\n\nAirtable: Provide API key and select base/table.\n\nEnsure Field Alignment: The Airtable table must have fields: Customer ID, Name, Email, Phone, Address, and S No.\n\nActivate: Enable the workflow and test by creating or updating a customer in Shopify.\n\nVerify: Your Airtable sheet will show appended or updated customer records with correct serial numbering.\n\nRequirements\n\nn8n@latest\n\nShopify Store with customers/create and customers/update webhooks\n\nAirtable Account with a \"Customers\" table\n\nCustomizing This Workflow\n\nExtra Fields: Modify the Function nodes to include Shopify metafields or tags.\n\nAlternative Databases: Swap in Google Sheets, Supabase, or SQL nodes.\n\nError Notification: Add a Slack or email node to alert on webhook or API errors.\n\nBatch Processing: Use the SplitInBatches node to handle large customer syncs.",
+  "workflow": {
+    "id": "V4k5QjFUZSrtTDiE",
+    "meta": {
+      "instanceId": "ac3395400729d0f53e6b8e43c425ec1af04a99e154bcd808417b3b72fa9dec1f",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Shopify Customer Append/Update",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "3b321191-c893-490a-a46d-269f417c4e72",
+        "name": "Code17",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2600,
+          260
+        ],
+        "parameters": {
+          "jsCode": "const order = items[0].json.body;\nconst customer = order.customer || {};\nconst address = customer.default_address || order.billing_address || {};\nconst firstLineItem = order.line_items?.[0] || {};\n\nfunction extractIdFromGid(gid) {\n  return gid ? gid.split('/').pop() : '';\n}\n\nfunction formatDate(dateStr) {\n  return dateStr ? new Date(dateStr).toISOString().split('T')[0] : '';\n}\n\nfunction calculateDaysSince(dateStr) {\n  if (!dateStr) return '';\n  try {\n    const diff = new Date() - new Date(dateStr);\n    return Math.floor(diff / (1000 * 60 * 60 * 24));\n  } catch {\n    return '';\n  }\n}\n\nfunction calculateAvgDays(firstDate, lastDate, totalOrders) {\n  if (!firstDate || !lastDate || totalOrders < 2) return '';\n  try {\n    const start = new Date(firstDate);\n    const end = new Date(lastDate);\n    const diffDays = (end - start) / (1000 * 60 * 60 * 24);\n    return (diffDays / (totalOrders - 1)).toFixed(1); // Rounded to 1 decimal\n  } catch {\n    return '';\n  }\n}\n\n// Extract order dates\nconst firstOrderDate = formatDate(order.created_at); // Adjust as needed\nconst lastOrderDate = formatDate(order.created_at);  // You may update this later\n\nconst totalOrders = 1; // For webhook use, we assume it's the first or increment later\n\nconst output = {\n  // Basic Customer Info\n  customer_id: customer.id || '',\n  first_name: customer.first_name || '',\n  last_name: customer.last_name || '',\n  email: customer.email || '',\n  phone: customer.phone || address.phone || '',\n\n  // Address Info\n  address: [\n    address.address1,\n    address.address2,\n    address.city,\n    address.province || address.state,\n    address.country,\n    address.zip\n  ].filter(Boolean).join(', '),\n\n  address1: address.address1 || '',\n  address2: address.address2 || '',\n  city: address.city || '',\n  province: address.province || '',\n  zip: address.zip || '',\n  country: address.country || '',\n  country_name: address.country_name || '',\n\n  // Order Info\n  order_id: order.id || '',\n  order_name: order.name || '',\n  first_order_date: firstOrderDate,\n  last_order_date: lastOrderDate,\n  total_orders: totalOrders.toString(),\n  total_spent: order.total_price || '0.00',\n  payment_method: order.gateway || '',\n  days_since_last_order: calculateDaysSince(order.created_at),\n\n  // Variant Info\n  last_product_id: firstLineItem.product_id || '',\n  last_variant_id: firstLineItem.variant_id || '',\n\n  // Calculated Metric\n  average_days_between_orders: calculateAvgDays(firstOrderDate, lastOrderDate, totalOrders),\n\n  source: 'webhook:order/create'\n};\n\nreturn [{ json: output }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "794b3523-183b-44d2-bcee-eac796ec8279",
+        "name": "BTSD",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -1900,
+          280
+        ],
+        "parameters": {
+          "options": {
+            "dotNotation": true
+          },
+          "assignments": {
+            "assignments": [
+              {
+                "id": "071f21f4-5fff-4a1f-b666-3542c268e059",
+                "name": "Customer ID",
+                "type": "string",
+                "value": "={{ $json.customer_id }}"
+              },
+              {
+                "id": "1fb07c80-5a38-4f51-aa93-312a50a2b3d2",
+                "name": "Name",
+                "type": "string",
+                "value": "={{ $json.first_name }} {{ $json.last_name }}"
+              },
+              {
+                "id": "6f876cc3-a445-4bcd-8e39-13d8ef1aa561",
+                "name": "email",
+                "type": "string",
+                "value": "={{ $json.email }}"
+              },
+              {
+                "id": "1048cfd4-531f-4723-adae-2710097216e3",
+                "name": "phone",
+                "type": "string",
+                "value": "={{ $json.phone }}"
+              },
+              {
+                "id": "180947ae-95b1-4224-829b-c9e7b470184b",
+                "name": "address",
+                "type": "string",
+                "value": "={{ $json.address }}"
+              },
+              {
+                "id": "c208750e-7a8d-4f5a-a8c5-58fff3bef183",
+                "name": "order_id",
+                "type": "string",
+                "value": "={{ $json.order_id }}"
+              },
+              {
+                "id": "c7bc0c28-6e55-469c-98cb-01ce6f86bea8",
+                "name": "first_order_date",
+                "type": "string",
+                "value": "={{ $json.first_order_date }}"
+              },
+              {
+                "id": "bf1fe1b5-b410-4901-b01a-a8be7b175405",
+                "name": "last_order_date",
+                "type": "string",
+                "value": "={{ $json.last_order_date }}"
+              },
+              {
+                "id": "97ed7e35-f49b-42b7-95a2-16e54fea8a61",
+                "name": "total_orders",
+                "type": "string",
+                "value": "={{ $json.total_orders }}"
+              },
+              {
+                "id": "e60cd7ed-d2a3-4355-84b0-858ebc838baa",
+                "name": "total_spent",
+                "type": "string",
+                "value": "={{ $json.total_spent }}"
+              },
+              {
+                "id": "a3e78009-487b-4072-a953-2c627ffa5eef",
+                "name": "payment_method",
+                "type": "string",
+                "value": "={{ $json.payment_method }}"
+              },
+              {
+                "id": "1d65409c-5137-41b2-9786-0b164f99c039",
+                "name": "days_since_last_order",
+                "type": "string",
+                "value": "={{ $json.days_since_last_order }}"
+              },
+              {
+                "id": "1886359f-1cfd-4e82-a3ee-23058e413b40",
+                "name": "last_product_id",
+                "type": "string",
+                "value": "={{ $json.last_product_id }}"
+              },
+              {
+                "id": "c44e1aec-29ac-4f8e-8d55-8e9dc6392040",
+                "name": "last_variant_id",
+                "type": "string",
+                "value": "={{ $json.last_variant_id }}"
+              },
+              {
+                "id": "0a8e26b9-b161-473b-bebe-53f668bd4086",
+                "name": "average_days_between_orders",
+                "type": "string",
+                "value": "={{ $json.average_days_between_orders }}"
+              },
+              {
+                "id": "0dbc481e-0f09-4e83-bb22-840abefeaf3f",
+                "name": "source",
+                "type": "string",
+                "value": "={{ $json.source }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "f441b054-7767-4884-82f9-c55187824fc4",
+        "name": "Code19",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1000,
+          280
+        ],
+        "parameters": {
+          "jsCode": "// Get the item from BTSD node\nconst fieldItem = $items(\"BTSD\")[0];\nconst customerIdToFind = (fieldItem.json[\"Customer ID\"] || \"\").toString().trim().toLowerCase();\n\n// Get all rows from CCUST\nconst sheetItems = $items(\"CCUST\");\n\nlet found = false;\nlet matchedRow = null;\n\n// Log the value you are searching for\nconsole.log(\"Looking for Customer ID:\", customerIdToFind);\n\nif (customerIdToFind) {\n  matchedRow = sheetItems.find(item => {\n    const sheetCustomerId = (item.json[\"Customer ID\"] || \"\").toString().trim().toLowerCase();\n    console.log(\"Comparing with Sheet ID:\", sheetCustomerId);\n    return sheetCustomerId === customerIdToFind;\n  });\n\n  found = !!matchedRow;\n}\n\n// Return result\nreturn [{\n  json: {\n    ...fieldItem.json,\n    message: found\n      ? \"✅ Customer ID is found in Customer Sheet\"\n      : \"❌ Customer ID is not available in Customer Sheet\"\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e46fa249-7b57-41dd-bd48-866d66c69f60",
+        "name": "If7",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -540,
+          280
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "3fe2fdac-8c9d-4c69-a55f-25173e573d44",
+                "operator": {
+                  "type": "string",
+                  "operation": "contains"
+                },
+                "leftValue": "={{ $json.message }}",
+                "rightValue": "✅ Customer ID is found in Customer Sheet"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "e160ba34-9fb7-43ba-af93-10804109d7bb",
+        "name": "Edit Fields15",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -200,
+          580
+        ],
+        "parameters": {
+          "options": {
+            "dotNotation": true
+          },
+          "assignments": {
+            "assignments": [
+              {
+                "id": "96beb035-525f-4f6a-b3f9-17ea8f270086",
+                "name": "Customer ID",
+                "type": "string",
+                "value": "={{ $json['Customer ID'] }}"
+              },
+              {
+                "id": "45ae46cd-bb49-45df-94a5-78b2b5326b66",
+                "name": "Name",
+                "type": "string",
+                "value": "={{ $json.Name }}"
+              },
+              {
+                "id": "40cb8857-c693-4dee-96f4-3a5957fb95ea",
+                "name": "email",
+                "type": "string",
+                "value": "={{ $json.email }}"
+              },
+              {
+                "id": "b329feae-0ab5-42ca-8c9f-62d362b1e307",
+                "name": "phone",
+                "type": "string",
+                "value": "={{ $json.phone }}"
+              },
+              {
+                "id": "9bd52f34-18ac-41c5-9815-1a6f209dc87b",
+                "name": "address",
+                "type": "string",
+                "value": "={{ $json.address }}"
+              },
+              {
+                "id": "37434d0f-ac34-43b2-a28a-2ebfe1579f57",
+                "name": "order_id",
+                "type": "string",
+                "value": "={{ $json.order_id }}"
+              },
+              {
+                "id": "ae8db41c-048b-4fab-a608-298d55352961",
+                "name": "first_order_date",
+                "type": "string",
+                "value": "={{ $json.first_order_date }}"
+              },
+              {
+                "id": "83b10e54-5448-4ddb-99df-9e019a4ac1f7",
+                "name": "last_order_date",
+                "type": "string",
+                "value": "={{ $json.last_order_date }}"
+              },
+              {
+                "id": "a58288e0-6495-487f-ac5f-8b16f9dad4a8",
+                "name": "total_orders",
+                "type": "string",
+                "value": "={{ $json.total_orders }}"
+              },
+              {
+                "id": "2850839d-da6e-46af-89f4-60a592d026d5",
+                "name": "total_spent",
+                "type": "string",
+                "value": "={{ $json.total_spent }}"
+              },
+              {
+                "id": "0f6806a1-8d58-448b-b538-ef5c6aef64c1",
+                "name": "payment_method",
+                "type": "string",
+                "value": "={{ $json.payment_method }}"
+              },
+              {
+                "id": "3f88e644-6dd3-4d17-9767-729bd50464b9",
+                "name": "days_since_last_order",
+                "type": "string",
+                "value": "={{ $json.days_since_last_order }}"
+              },
+              {
+                "id": "0d620f7e-6744-4fa6-a6c6-56e9c11dc6ab",
+                "name": "last_product_id",
+                "type": "string",
+                "value": "={{ $json.last_product_id }}"
+              },
+              {
+                "id": "9a23f612-a77a-4025-8ff8-10f0b33adea8",
+                "name": "last_variant_id",
+                "type": "string",
+                "value": "={{ $json.last_variant_id }}"
+              },
+              {
+                "id": "b8492b42-9bdc-4d30-ab41-c3068dd187f5",
+                "name": "average_days_between_orders",
+                "type": "string",
+                "value": "={{ $json.average_days_between_orders }}"
+              },
+              {
+                "id": "22f220ad-8e9c-4f2b-9025-05b0d5e6f9d5",
+                "name": "source",
+                "type": "string",
+                "value": "={{ $json.source }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "4e8aa075-9d8e-421f-9083-12c0ae82a0d0",
+        "name": "Code20",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1140,
+          600
+        ],
+        "parameters": {
+          "jsCode": "const rows = $input.all();\nconst lastRow = rows[rows.length - 1];\nreturn [lastRow];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a564ed1d-9086-4bd3-aa73-d044d1f47e88",
+        "name": "Edit Fields16",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          1600,
+          600
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "fbac0979-9c87-4773-917c-9c2fc3128c8b",
+                "name": "S No",
+                "type": "string",
+                "value": "={{ $json['S No'] }}"
+              },
+              {
+                "id": "6fe94f05-df4d-4bab-965b-91b128a5ec6a",
+                "name": "Customer ID",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json['Customer ID'] }}"
+              },
+              {
+                "id": "9c6edb2d-13ad-49bb-843d-44bcb95b5309",
+                "name": "Name",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.Name }}"
+              },
+              {
+                "id": "16c84c98-d9af-4369-84d4-0593c1974b62",
+                "name": "email",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.email }}"
+              },
+              {
+                "id": "42c1b194-0e75-4c78-a3c1-9411cf9f7b78",
+                "name": "phone",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.phone }}"
+              },
+              {
+                "id": "3c89ccad-2ebd-4dc5-bc91-4b994ac76e37",
+                "name": "address",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.address }}"
+              },
+              {
+                "id": "0f504cf8-ff4b-4623-b957-ff833c19b214",
+                "name": "order_id",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.order_id }}"
+              },
+              {
+                "id": "08ca89c2-60a9-4747-bdc0-a381b9fd5d4b",
+                "name": "first_order_date",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.first_order_date }}"
+              },
+              {
+                "id": "e319166a-cfa9-4a7a-93a5-8213b882e43a",
+                "name": "last_order_date",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.last_order_date }}"
+              },
+              {
+                "id": "5c5b6de6-50b4-4fef-a96a-a5af805c9e55",
+                "name": "total_orders",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.total_orders }}"
+              },
+              {
+                "id": "896ae405-c711-4471-b197-df70c7976c94",
+                "name": "total_spent",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.total_spent }}"
+              },
+              {
+                "id": "454e43f4-9aa1-483c-b823-fed167bf45ff",
+                "name": "payment_method",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.payment_method }}"
+              },
+              {
+                "id": "69e45286-a40d-4ff1-88df-0217a6c23655",
+                "name": "days_since_last_order",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.days_since_last_order }}"
+              },
+              {
+                "id": "a5fe350c-c97d-41cd-924c-fc1815ab6aa8",
+                "name": "last_product_id",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.last_product_id }}"
+              },
+              {
+                "id": "c0eebbe0-ee58-4b67-99b6-1d5b5d69a24c",
+                "name": "last_variant_id",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.last_variant_id }}"
+              },
+              {
+                "id": "9c073c61-c16c-4f89-a96e-2baca6f4dfc6",
+                "name": "average_days_between_orders",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.average_days_between_orders }}"
+              },
+              {
+                "id": "b45ad319-507c-419a-93b1-24eb9b4c1fb9",
+                "name": "source",
+                "type": "string",
+                "value": "={{ $('Edit Fields15').item.json.source }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "7ba12eb2-e694-4bcc-87a7-120f111151f1",
+        "name": "Code21",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2040,
+          600
+        ],
+        "parameters": {
+          "jsCode": "// Get first item from previous node\nconst input = items[0].json;\n\n// Read the previous number from a field like \"S No\" or \"number\"\nlet previousNumber = parseInt(input[\"S No\"] || input.number || 0);\n\n// Make sure it's a valid number\nif (isNaN(previousNumber)) previousNumber = 0;\n\n// Increment by 1\nconst newNumber = previousNumber + 1;\n\n// Add the incremented number back to the data\nreturn [{\n  json: {\n    ...input,\n    \"S No\": newNumber\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b49c2db7-2ca6-47b5-959f-238df3ea171d",
+        "name": "Edit Fields18",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -60,
+          -200
+        ],
+        "parameters": {
+          "options": {
+            "dotNotation": true
+          },
+          "assignments": {
+            "assignments": [
+              {
+                "id": "96beb035-525f-4f6a-b3f9-17ea8f270086",
+                "name": "Customer ID",
+                "type": "string",
+                "value": "={{ $json['Customer ID'] }}"
+              },
+              {
+                "id": "45ae46cd-bb49-45df-94a5-78b2b5326b66",
+                "name": "Name",
+                "type": "string",
+                "value": "={{ $json.Name }}"
+              },
+              {
+                "id": "40cb8857-c693-4dee-96f4-3a5957fb95ea",
+                "name": "email",
+                "type": "string",
+                "value": "={{ $json.email }}"
+              },
+              {
+                "id": "b329feae-0ab5-42ca-8c9f-62d362b1e307",
+                "name": "phone",
+                "type": "string",
+                "value": "={{ $json.phone }}"
+              },
+              {
+                "id": "9bd52f34-18ac-41c5-9815-1a6f209dc87b",
+                "name": "address",
+                "type": "string",
+                "value": "={{ $json.address }}"
+              },
+              {
+                "id": "37434d0f-ac34-43b2-a28a-2ebfe1579f57",
+                "name": "order_id",
+                "type": "string",
+                "value": "={{ $json.order_id }}"
+              },
+              {
+                "id": "ae8db41c-048b-4fab-a608-298d55352961",
+                "name": "first_order_date",
+                "type": "string",
+                "value": "={{ $json.first_order_date }}"
+              },
+              {
+                "id": "83b10e54-5448-4ddb-99df-9e019a4ac1f7",
+                "name": "last_order_date",
+                "type": "string",
+                "value": "={{ $json.last_order_date }}"
+              },
+              {
+                "id": "a58288e0-6495-487f-ac5f-8b16f9dad4a8",
+                "name": "total_orders",
+                "type": "string",
+                "value": "={{ $json.total_orders }}"
+              },
+              {
+                "id": "2850839d-da6e-46af-89f4-60a592d026d5",
+                "name": "total_spent",
+                "type": "string",
+                "value": "={{ $json.total_spent }}"
+              },
+              {
+                "id": "0f6806a1-8d58-448b-b538-ef5c6aef64c1",
+                "name": "payment_method",
+                "type": "string",
+                "value": "={{ $json.payment_method }}"
+              },
+              {
+                "id": "3f88e644-6dd3-4d17-9767-729bd50464b9",
+                "name": "days_since_last_order",
+                "type": "string",
+                "value": "={{ $json.days_since_last_order }}"
+              },
+              {
+                "id": "0d620f7e-6744-4fa6-a6c6-56e9c11dc6ab",
+                "name": "last_product_id",
+                "type": "string",
+                "value": "={{ $json.last_product_id }}"
+              },
+              {
+                "id": "9a23f612-a77a-4025-8ff8-10f0b33adea8",
+                "name": "last_variant_id",
+                "type": "string",
+                "value": "={{ $json.last_variant_id }}"
+              },
+              {
+                "id": "b8492b42-9bdc-4d30-ab41-c3068dd187f5",
+                "name": "average_days_between_orders",
+                "type": "string",
+                "value": "={{ $json.average_days_between_orders }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "2d53e348-ef23-4513-a216-1eb38375d7e6",
+        "name": "Loop Over Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -2160,
+          260
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "1be37343-8232-4f5d-bd95-07c52890a771",
+        "name": "CCUST",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          -1580,
+          280
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appgGEef4Mw8vFS78",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78",
+            "cachedResultName": "IPM"
+          },
+          "sort": {
+            "property": [
+              {
+                "field": "S No"
+              }
+            ]
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tbl0LFpP9q21ZHyHr",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78/tbl0LFpP9q21ZHyHr",
+            "cachedResultName": "Customer Sheet"
+          },
+          "options": {},
+          "operation": "search",
+          "filterByFormula": "1"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "79d22973-b0d6-43eb-9462-b8cd5eaf5e37",
+        "name": "CustomerSheet",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          420,
+          -200
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appgGEef4Mw8vFS78",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78",
+            "cachedResultName": "IPM"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tbl0LFpP9q21ZHyHr",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78/tbl0LFpP9q21ZHyHr",
+            "cachedResultName": "Customer Sheet"
+          },
+          "columns": {
+            "value": {
+              "Address": "={{ $json.address }}",
+              "Customer ID": "={{ $json['Customer ID'] }}",
+              "Customer Name": "={{ $json.Name }}",
+              "Email Address": "={{ $json.email }}",
+              "Contact Number": "={{ $json.phone }}",
+              "Last Variant ID": "={{ $json.last_variant_id }}",
+              "Days Since Last Order": "={{ $json.days_since_last_order }}"
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "S No",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "S No",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Name",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email Address",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email Address",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Contact Number",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Contact Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Address",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Address",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Product Ordered (Last SKU / product title)",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Product Ordered (Last SKU / product title)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Variant ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Variant ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Created At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Created At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "First Order Date",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First Order Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Order Date",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Order Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Days Since Last Order",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Days Since Last Order",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Average Days Between Orders (Purchase frequency metric)",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Average Days Between Orders (Purchase frequency metric)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Orders",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Orders",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Returned Orders",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Returned Orders",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Discount Availed",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Discount Availed",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Spent",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Spent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Refunds",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Refunds",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Preferred Payment Method",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Preferred Payment Method",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Type",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Engagement Source",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Engagement Source",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Value Segment",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Value Segment",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Risk Indicator",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Risk Indicator",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Calculation",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Calculation",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "Customer ID"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "upsert"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "897a477f-9a17-4da2-9003-b45b80ac57cd",
+        "name": "CustomerSheet4",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          380,
+          600
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appgGEef4Mw8vFS78",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78",
+            "cachedResultName": "IPM"
+          },
+          "sort": {
+            "property": [
+              {
+                "field": "S No"
+              }
+            ]
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tbl0LFpP9q21ZHyHr",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78/tbl0LFpP9q21ZHyHr",
+            "cachedResultName": "Customer Sheet"
+          },
+          "options": {},
+          "operation": "search",
+          "filterByFormula": "1"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "77e1ccce-7e4a-46c2-9a68-3fb688079a6d",
+        "name": "PRDSHEET4",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          2780,
+          600
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appgGEef4Mw8vFS78",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78",
+            "cachedResultName": "IPM"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tbl0LFpP9q21ZHyHr",
+            "cachedResultUrl": "https://airtable.com/appgGEef4Mw8vFS78/tbl0LFpP9q21ZHyHr",
+            "cachedResultName": "Customer Sheet"
+          },
+          "columns": {
+            "value": {
+              "S No": "={{ $json[\"S No\"] }}",
+              "Address": "={{ $json.address }}",
+              "Created At": "={{ $json.first_order_date }}",
+              "Customer ID": "={{ $json[\"Customer ID\"] }}",
+              "Total Spent": "={{ $json.total_spent }}",
+              "Total Orders": "={{ $json.total_orders }}",
+              "Customer Name": "={{ $json.Name }}",
+              "Email Address": "={{ $json.email }}",
+              "Contact Number": "={{ $json.phone }}",
+              "Last Order Date": "={{ $json.last_order_date }}",
+              "First Order Date": "={{ $json.first_order_date }}",
+              "Days Since Last Order": "={{ $json.days_since_last_order }}",
+              "Preferred Payment Method": "={{ $json.payment_method }}",
+              "Average Days Between Orders (Purchase frequency metric)": "={{ $json.average_days_between_orders }}"
+            },
+            "schema": [
+              {
+                "id": "S No",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "S No",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer ID",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Name",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email Address",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email Address",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Contact Number",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Contact Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Address",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Address",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Product Ordered (Last SKU / product title)",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Product Ordered (Last SKU / product title)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Variant ID",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Variant ID",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Created At",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Created At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "First Order Date",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First Order Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Order Date",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Order Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Days Since Last Order",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Days Since Last Order",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Average Days Between Orders (Purchase frequency metric)",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Average Days Between Orders (Purchase frequency metric)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Orders",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Orders",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Returned Orders",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Returned Orders",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Discount Availed",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Discount Availed",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Spent",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Spent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Total Refunds",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Total Refunds",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Preferred Payment Method",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Preferred Payment Method",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Customer Type",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Customer Type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Engagement Source",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Engagement Source",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Value Segment",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Value Segment",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Risk Indicator",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Risk Indicator",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Calculation",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Calculation",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "Customer ID"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "create"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "fefc5e1d-099f-47b3-bdd3-ff8ec5138265",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3340,
+          140
+        ],
+        "parameters": {
+          "width": 340,
+          "height": 320,
+          "content": "## Webhook Trigger when the Customer create order\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2c9e0430-4150-414f-8b90-33999b8d4dcf",
+        "name": "customerCreate",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -3240,
+          260
+        ],
+        "webhookId": "b9ff3875-9fc3-4eb6-89cf-f2e4ccabdd53",
+        "parameters": {
+          "path": "customerCreate",
+          "options": {},
+          "httpMethod": "POST",
+          "authentication": "jwtAuth"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "97cdefda-5a75-4891-a07f-c1f57310ac3a",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2840,
+          -380
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 600,
+          "height": 860,
+          "content": "# Extracting data from body object\n## customer_id, first_name\n## last_name,  email\n## phone, address\n## address1, address2, city, province\n## zip, country, country_name\n## order_id, order_name\n## first_order_date, last_order_date\n## total_orders\n## total_spent\n## payment_method\n## days_since_last_order\n## last_product_id\n## last_variant_id\n## source\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "40f78983-237f-4e93-a592-f17f4a398923",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1700,
+          -40
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 320,
+          "height": 500,
+          "content": "# Airtable Customer Sheet\n\n## Listing out total rows of customer sheet\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c5888b04-72c9-412d-9443-4ff819429a32",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1280,
+          -400
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 680,
+          "height": 900,
+          "content": "# I'm a note \n## Check if the Customer ID from BTSD (new order/customer) exists in CCUST (customer sheet).\n\n🔄 Steps:\n\nGet Customer ID from BTSD node.\n\nNormalize it: toString(), .trim(), .toLowerCase().\n\nLoop through all rows in CCUST node.\n\nCompare each row’s Customer ID the same way.\n\nIf match found:\n\n✅ Return: \"Customer ID is found in Customer Sheet\"\n\nIf not found:\n\n❌ Return: \"Customer ID is not available in Customer Sheet\"\n\n🔍 Use Case:\nUseful for checking duplicates before saving customer data, or for tagging new vs. existing customers.\n\n⚙️ Returns:\nSame data from BTSD + a message field with status."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9e84864f-35ff-472e-a3ba-684c6452f670",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          200,
+          380
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 440,
+          "height": 440,
+          "content": "# Airtable Customer Sheet\n\n## Listing out total rows of customer sheet\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2da38eb1-9ed6-424b-9019-499ec498a9d0",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          960,
+          100
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 460,
+          "height": 760,
+          "content": "## Return Only Last Row\nPurpose: Get the last item from all incoming rows and pass it forward.\n\n📌 How it works:\n\n$input.all() → Fetches all incoming items.\n\nrows[rows.length - 1] → Picks the last item.\n\nreturn [lastRow]; → Sends only the last row to the next node.\n\n📦 Use Case:\nUse when you only want to process or forward the latest record"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b9a1e8aa-b8e1-4ca6-b423-b42a3f5b31bf",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1820,
+          80
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 540,
+          "height": 800,
+          "content": "# Auto-Increment \"S No\" from Previous Node\n## Take the serial number (S No) from previous node data, increment it by 1, and return the updated data.\n\n📌 How it works:\n\nReads the first item from the input.\n\nChecks for \"S No\"  field.\n\nIf missing or invalid, uses 0 as default.\n\nAdds +1 to generate the new serial number.\n\nReturns the full original data + updated \"S No\" field."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "adbb346f-1172-4834-bb89-3e07b13798ec",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2640,
+          380
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 460,
+          "height": 500,
+          "content": "# Airtable Sheet\n## Appending data in Airtable of new Customer Sheet "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d9ecb297-0e3e-47d5-a837-0fb8073b8fb6",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          260,
+          -500
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 480,
+          "height": 560,
+          "content": "# Airtable Customer Sheet\n## Updating the existing Customer Record in customer sheet like if he/she has changed the personal details like Address, Email Address, Contact number. "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fb8ea402-0810-4295-81ff-eb58c612ee5c",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -4640,
+          -940
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 980,
+          "height": 1740,
+          "content": "## This automation is built in n8n (a no-code/low-code automation platform). It automatically updates or adds customer data into your system every time a customer places an order on your Shopify store — whether they're a new customer or an existing one.\n\nNo manual copy-pasting. No missing data. Everything gets updated in real time.\n\n\n## 🚀 How Does It Help?\n\n✅ Keeps your customer records up-to-date automatically\n\n✅ Tracks new vs. repeat customers\n\n✅ Avoids duplicate entries\n\n✅ Makes customer follow-ups, marketing, and analytics more powerful\n\n✅ Saves you time — no more downloading/exporting/importing from Shopify\n\n## 🔧 How It Works (in Simple Terms)\n\nWhen someone places an order:\n\n1. ✅ The order data from Shopify is captured\n\n\n2. 🧠 The automation checks:\n\nIs this a new customer or an existing one?\n\nDoes their data already exist in your Airtable/CRM system?\n\n\n\n3. ✍ If they are new → it adds a new customer entry\nIf they already exist → it updates their data with the new order\n\n## 🧱 Technical Workflow (n8n Nodes Overview)\n\nHere’s how this is structured inside n8n:\n\n1. Webhook / Shopify Trigger Node – Triggers when a new order is received\n\n\n2. IF Node – Checks if the customer already exists\n\n\n3. Airtable Lookup Node – Searches for customer ID\n\n\n4. Set Node – Prepares structured customer/order data\n\n\n5. Create or Update Node –\n\nIf customer not found → Create New Customer Row\n\nIf customer found → Update Their Info\n\n \n## 🛍 Real-World Benefits for Store Owners\n\nImagine this:\n\nA new customer places an order. Their full profile is saved — instantly.\n\nA regular customer comes back? Their last order date gets updated.\n\nYou want to send marketing emails? Your customer database is ready.\n\n\n## No need to export orders from Shopify, filter duplicates, and clean data — the system does it for you.\n\n\nYou save time, avoid errors, and create a stronger customer experience — all automated.\n\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {
+      "customerCreate": [
+        {
+          "json": {
+            "body": {
+              "id": 820982911946154500,
+              "name": "#9999",
+              "note": null,
+              "tags": "tag1, tag2",
+              "test": true,
+              "email": "jon@example.com",
+              "phone": null,
+              "token": "123456abcd",
+              "app_id": null,
+              "number": 234,
+              "refunds": [],
+              "returns": [],
+              "user_id": null,
+              "currency": "INR",
+              "customer": {
+                "id": 115310627314723950,
+                "note": null,
+                "email": "john@example.com",
+                "phone": null,
+                "state": "disabled",
+                "currency": "INR",
+                "last_name": "Smith",
+                "created_at": null,
+                "first_name": "John",
+                "tax_exempt": false,
+                "updated_at": null,
+                "tax_exemptions": [],
+                "verified_email": true,
+                "default_address": {
+                  "id": 715243470612851200,
+                  "zip": "K2H7A8",
+                  "city": "Ottawa",
+                  "name": "John Smith",
+                  "phone": "123-123-1234",
+                  "company": null,
+                  "country": "Canada",
+                  "default": true,
+                  "address1": "123 Elm St.",
+                  "address2": null,
+                  "province": "Ontario",
+                  "last_name": "Smith",
+                  "first_name": "John",
+                  "customer_id": 115310627314723950,
+                  "country_code": "CA",
+                  "country_name": "Canada",
+                  "province_code": "ON"
+                },
+                "admin_graphql_api_id": "gid://shopify/Customer/115310627314723954",
+                "multipass_identifier": null
+              },
+              "closed_at": null,
+              "confirmed": false,
+              "device_id": null,
+              "po_number": null,
+              "reference": null,
+              "tax_lines": [],
+              "total_tax": "0.00",
+              "browser_ip": null,
+              "cart_token": null,
+              "created_at": "2025-06-24T18:40:12+05:30",
+              "line_items": [
+                {
+                  "id": 866550311766439000,
+                  "sku": "",
+                  "name": "Unisex Brushed‑Fleece Hoodie",
+                  "grams": 0,
+                  "price": "859.00",
+                  "title": "Unisex Brushed‑Fleece Hoodie",
+                  "duties": [],
+                  "vendor": null,
+                  "taxable": true,
+                  "quantity": 1,
+                  "gift_card": false,
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "859.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "859.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "product_id": 9784057299230,
+                  "properties": [],
+                  "variant_id": 49871285190942,
+                  "variant_title": null,
+                  "product_exists": true,
+                  "total_discount": "0.00",
+                  "current_quantity": 1,
+                  "attributed_staffs": [
+                    {
+                      "id": "gid://shopify/StaffMember/902541635",
+                      "quantity": 1
+                    }
+                  ],
+                  "requires_shipping": true,
+                  "fulfillment_status": null,
+                  "total_discount_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "fulfillment_service": "manual",
+                  "admin_graphql_api_id": "gid://shopify/LineItem/866550311766439020",
+                  "discount_allocations": [],
+                  "fulfillable_quantity": 1,
+                  "sales_line_item_group_id": null,
+                  "variant_inventory_management": "shopify"
+                },
+                {
+                  "id": 141249953214522980,
+                  "sku": "",
+                  "name": "Eco‑Friendly Organic Cotton T‑Shirt",
+                  "grams": 0,
+                  "price": "450.00",
+                  "title": "Eco‑Friendly Organic Cotton T‑Shirt",
+                  "duties": [],
+                  "vendor": null,
+                  "taxable": true,
+                  "quantity": 1,
+                  "gift_card": false,
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "450.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "450.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "product_id": 9784059330846,
+                  "properties": [],
+                  "variant_id": 49871297904926,
+                  "variant_title": null,
+                  "product_exists": true,
+                  "total_discount": "0.00",
+                  "current_quantity": 1,
+                  "attributed_staffs": [],
+                  "requires_shipping": true,
+                  "fulfillment_status": null,
+                  "total_discount_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "fulfillment_service": "manual",
+                  "admin_graphql_api_id": "gid://shopify/LineItem/141249953214522974",
+                  "discount_allocations": [],
+                  "fulfillable_quantity": 1,
+                  "sales_line_item_group_id": 142831562,
+                  "variant_inventory_management": "shopify"
+                },
+                {
+                  "id": 257004973105704600,
+                  "sku": "",
+                  "name": "RibPro Meridian Rib‑Knit Long‑Sleeve Tee",
+                  "grams": 0,
+                  "price": "899.00",
+                  "title": "RibPro Meridian Rib‑Knit Long‑Sleeve Tee",
+                  "duties": [],
+                  "vendor": null,
+                  "taxable": true,
+                  "quantity": 1,
+                  "gift_card": false,
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "899.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "899.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "product_id": 9784061002014,
+                  "properties": [],
+                  "variant_id": 49871311110430,
+                  "variant_title": null,
+                  "product_exists": true,
+                  "total_discount": "0.00",
+                  "current_quantity": 1,
+                  "attributed_staffs": [],
+                  "requires_shipping": true,
+                  "fulfillment_status": null,
+                  "total_discount_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "fulfillment_service": "manual",
+                  "admin_graphql_api_id": "gid://shopify/LineItem/257004973105704598",
+                  "discount_allocations": [],
+                  "fulfillable_quantity": 1,
+                  "sales_line_item_group_id": 142831562,
+                  "variant_inventory_management": "shopify"
+                }
+              ],
+              "source_url": null,
+              "tax_exempt": false,
+              "updated_at": "2025-06-24T18:40:12+05:30",
+              "checkout_id": null,
+              "location_id": null,
+              "source_name": "web",
+              "total_price": "2198.00",
+              "cancelled_at": "2025-06-24T18:40:12+05:30",
+              "fulfillments": [],
+              "landing_site": null,
+              "order_number": 1234,
+              "processed_at": "2025-06-24T18:40:12+05:30",
+              "total_weight": 0,
+              "cancel_reason": "customer",
+              "contact_email": "jon@example.com",
+              "payment_terms": null,
+              "total_tax_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "checkout_token": null,
+              "client_details": null,
+              "discount_codes": [],
+              "referring_site": null,
+              "shipping_lines": [
+                {
+                  "id": 271878346596884000,
+                  "code": null,
+                  "phone": null,
+                  "price": "10.00",
+                  "title": "Generic Shipping",
+                  "source": "shopify",
+                  "price_set": {
+                    "shop_money": {
+                      "amount": "10.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "10.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "tax_lines": [],
+                  "is_removed": false,
+                  "discounted_price": "0.00",
+                  "carrier_identifier": null,
+                  "discount_allocations": [],
+                  "discounted_price_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "current_discounted_price_set": {
+                    "shop_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    },
+                    "presentment_money": {
+                      "amount": "0.00",
+                      "currency_code": "INR"
+                    }
+                  },
+                  "requested_fulfillment_service_id": null
+                }
+              ],
+              "subtotal_price": "2198.00",
+              "taxes_included": false,
+              "billing_address": {
+                "zip": "40003",
+                "city": "Shippington",
+                "name": "Steve Shipper",
+                "phone": "555-555-SHIP",
+                "company": "Shipping Company",
+                "country": "United States",
+                "address1": "123 Shipping Street",
+                "address2": null,
+                "latitude": null,
+                "province": "Kentucky",
+                "last_name": "Shipper",
+                "longitude": null,
+                "first_name": "Steve",
+                "country_code": "US",
+                "province_code": "KY"
+              },
+              "customer_locale": "en",
+              "duties_included": false,
+              "estimated_taxes": false,
+              "note_attributes": [],
+              "total_discounts": "20.00",
+              "total_price_set": {
+                "shop_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                }
+              },
+              "financial_status": "voided",
+              "landing_site_ref": null,
+              "order_status_url": "https://usrnj8-ft.myshopify.com/93796040990/orders/123456abcd/authenticate?key=abcdefg",
+              "shipping_address": {
+                "zip": "40003",
+                "city": "Shippington",
+                "name": "Steve Shipper",
+                "phone": "555-555-SHIP",
+                "company": "Shipping Company",
+                "country": "United States",
+                "address1": "123 Shipping Street",
+                "address2": null,
+                "latitude": null,
+                "province": "Kentucky",
+                "last_name": "Shipper",
+                "longitude": null,
+                "first_name": "Steve",
+                "country_code": "US",
+                "province_code": "KY"
+              },
+              "current_total_tax": "0.00",
+              "source_identifier": null,
+              "total_outstanding": "2208.00",
+              "fulfillment_status": null,
+              "subtotal_price_set": {
+                "shop_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2198.00",
+                  "currency_code": "INR"
+                }
+              },
+              "total_tip_received": "0.00",
+              "confirmation_number": null,
+              "current_total_price": "2208.00",
+              "total_discounts_set": {
+                "shop_money": {
+                  "amount": "20.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "20.00",
+                  "currency_code": "INR"
+                }
+              },
+              "admin_graphql_api_id": "gid://shopify/Order/820982911946154508",
+              "presentment_currency": "INR",
+              "current_total_tax_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "discount_applications": [],
+              "payment_gateway_names": [
+                "visa",
+                "bogus"
+              ],
+              "current_subtotal_price": "2208.00",
+              "total_line_items_price": "2208.00",
+              "buyer_accepts_marketing": true,
+              "current_total_discounts": "0.00",
+              "current_total_price_set": {
+                "shop_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                }
+              },
+              "current_total_duties_set": null,
+              "total_shipping_price_set": {
+                "shop_money": {
+                  "amount": "10.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "10.00",
+                  "currency_code": "INR"
+                }
+              },
+              "merchant_of_record_app_id": null,
+              "original_total_duties_set": null,
+              "current_shipping_price_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "current_subtotal_price_set": {
+                "shop_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                }
+              },
+              "total_line_items_price_set": {
+                "shop_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "2208.00",
+                  "currency_code": "INR"
+                }
+              },
+              "current_total_discounts_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "merchant_business_entity_id": "27044839710",
+              "current_total_additional_fees_set": null,
+              "original_total_additional_fees_set": null,
+              "total_cash_rounding_refund_adjustment_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              },
+              "total_cash_rounding_payment_adjustment_set": {
+                "shop_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                },
+                "presentment_money": {
+                  "amount": "0.00",
+                  "currency_code": "INR"
+                }
+              }
+            },
+            "query": {},
+            "params": {},
+            "headers": {
+              "host": "ashu7859.app.n8n.cloud",
+              "accept": "*/*",
+              "cf-ray": "954c76cd61e71068-ORD",
+              "cdn-loop": "cloudflare; loops=1; subreqs=1",
+              "cf-ew-via": "15",
+              "cf-worker": "n8n.cloud",
+              "x-real-ip": "34.41.225.136",
+              "cf-visitor": "{\"scheme\":\"https\"}",
+              "user-agent": "Shopify-Captain-Hook",
+              "cf-ipcountry": "US",
+              "content-type": "application/json",
+              "x-is-trusted": "yes",
+              "content-length": "8971",
+              "x-shopify-test": "true",
+              "accept-encoding": "gzip, br",
+              "x-forwarded-for": "34.41.225.136, 172.71.1.138",
+              "x-shopify-topic": "orders/create",
+              "cf-connecting-ip": "34.41.225.136",
+              "x-forwarded-host": "ashu7859.app.n8n.cloud",
+              "x-forwarded-port": "443",
+              "x-forwarded-proto": "https",
+              "x-forwarded-server": "traefik-prod-users-gwc-55-69f456d475-rlss9",
+              "x-shopify-event-id": "abf3294f-af27-47f3-86ef-3cce8355e61f",
+              "x-shopify-webhook-id": "d4d27cd8-7671-4484-8cc5-a3a74d433ce6",
+              "x-shopify-api-version": "2025-04",
+              "x-shopify-hmac-sha256": "oSUFYglkcz5JlGtDV0lG8mpEufJ4y+X0Nmi/EH52U+k=",
+              "x-shopify-shop-domain": "usrnj8-ft.myshopify.com",
+              "x-shopify-triggered-at": "2025-06-24T13:10:12.769523556Z"
+            },
+            "webhookUrl": "https://ashu7859.app.n8n.cloud/webhook/createorder",
+            "executionMode": "production"
+          }
+        }
+      ]
+    },
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "81e248f6-f49f-42fb-ac99-2c99bc6a0dfc",
+    "connections": {
+      "If7": {
+        "main": [
+          [
+            {
+              "node": "Edit Fields18",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Edit Fields15",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "BTSD": {
+        "main": [
+          [
+            {
+              "node": "CCUST",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "CCUST": {
+        "main": [
+          [
+            {
+              "node": "Code19",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code17": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code19": {
+        "main": [
+          [
+            {
+              "node": "If7",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code20": {
+        "main": [
+          [
+            {
+              "node": "Edit Fields16",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code21": {
+        "main": [
+          [
+            {
+              "node": "PRDSHEET4",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "PRDSHEET4": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "CustomerSheet": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Edit Fields15": {
+        "main": [
+          [
+            {
+              "node": "CustomerSheet4",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Edit Fields16": {
+        "main": [
+          [
+            {
+              "node": "Code21",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Edit Fields18": {
+        "main": [
+          [
+            {
+              "node": "CustomerSheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "CustomerSheet4": {
+        "main": [
+          [
+            {
+              "node": "Code20",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "customerCreate": {
+        "main": [
+          [
+            {
+              "node": "Code17",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items": {
+        "main": [
+          [],
+          [
+            {
+              "node": "BTSD",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 25,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.set": {
+        "count": 4
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.airtable": {
+        "count": 4
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 10
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Mohammed Abid",
+    "username": "mohammedabid",
+    "bio": "",
+    "verified": true,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/2e84c0f8ab62f06e98c837570ecf2f965316c2c2bc79cff7d34a2eda37234046?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 2,
+      "icon": "file:airtable.svg",
+      "name": "n8n-nodes-base.airtable",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-sms-the-low-code-way-with-airtable-twilio-programmable-sms-and-n8n/",
+                "icon": "📱",
+                "label": "Sending SMS the Low-Code Way with Airtable, Twilio Programmable SMS, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automating-conference-organization-processes-with-n8n/",
+                "icon": "🙋‍♀️",
+                "label": "Automating Conference Organization Processes with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.airtable/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/airtable/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Airtable"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMTcwIj48cGF0aCBmaWxsPSIjZmNiNDAwIiBkPSJNODkgNC44IDE2LjIgMzQuOWMtNC4xIDEuNy00IDcuNC4xIDkuMWw3My4yIDI5YzYuNCAyLjYgMTMuNiAyLjYgMjAgMGw3My4yLTI5YzQuMS0xLjYgNC4xLTcuNC4xLTkuMWwtNzMtMzAuMUMxMDMuMiAyIDk1LjcgMiA4OSA0LjgiLz48cGF0aCBmaWxsPSIjMThiZmZmIiBkPSJNMTA1LjkgODguOXY3Mi41YzAgMy40IDMuNSA1LjggNi43IDQuNWw4MS42LTMxLjdjMS45LS43IDMuMS0yLjUgMy4xLTQuNVY1Ny4yYzAtMy40LTMuNS01LjgtNi43LTQuNUwxMDkgODQuM2MtMS45LjgtMy4xIDIuNi0zLjEgNC42Ii8+PHBhdGggZmlsbD0iI2Y4MmI2MCIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctMi41IDEuMkw5LjEgMTMwYy0zLjIgMS42LTcuNC0uOC03LjQtNC40VjU3LjVjMC0xLjMuNy0yLjQgMS42LTMuM3EuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNSA0LjMgNy4xLjUgOC45Ii8+PHBhdGggZmlsbD0iI2JhMWU0NSIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctNTkuNC01MHEuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNCA0LjMgNyAuNSA4LjgiLz48L3N2Zz4="
+      },
+      "displayName": "Airtable",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 39,
+      "name": "CRM"
+    }
+  ],
+  "image": []
+}

@@ -1,0 +1,3328 @@
+{
+  "id": 13500,
+  "name": "Generate M&A due diligence reports with Decodo, OpenAI and Pinecone",
+  "views": 38,
+  "recentViews": 0,
+  "totalViews": 38,
+  "createdAt": "2026-02-18T18:19:10.555Z",
+  "description": "Turn unstructured pitch decks and investment memos into polished Due Diligence PDF reports automatically. This n8n workflow handles everything from document ingestion to final delivery, combining internal document analysis with live web research to produce analyst-grade output in minutes.\n\n## The Problem It Solves\n\nReviewing a single deal manually reading the deck, cross-checking claims online, formatting the summary easily takes half a day. Multiply that by 10–20 inbound deals per week, and your team is buried in low-leverage work before any real analysis begins.\n\nThis workflow compresses that cycle into a single automated pipeline.\n\n## How It Works\n\n1. **Upload:** Send a PDF, DOCX, or PPTX to the webhook endpoint.\n2. **Parse:** LlamaParse extracts clean Markdown from complex layouts, preserving tables and financial data.\n3. **Enrich:** The workflow identifies the target company, then pulls supplementary data from the open web (corporate pages, risk signals) using Decodo's search and scraping APIs to verify and contextualize claims made in the source documents.\n4. **Analyze:** An AI Agent runs six targeted retrieval queries against the combined dataset: revenue history, key risks, business model, competitive landscape, management profile, and deal terms.\n5. **Deliver:** Results render into a branded HTML template, convert to PDF via Puppeteer, upload to Cloudflare R2, and return a download link.\n\nEach deal gets a unique namespace in Pinecone, so documents are isolated and repeat uploads skip redundant parsing.\n\n## What You Need\n\n| Service | Role |\n| --- | --- |\n| [n8n](https://n8n.partnerlinks.io/khmuhtadin) | Workflow orchestration |\n| [LlamaIndex Cloud](https://cloud.llamaindex.ai/) | Document parsing (LlamaParse) |\n| [Pinecone](https://www.pinecone.io/) | Vector storage & retrieval |\n| [OpenAI API](https://openai.com/) | Embeddings (text-embedding-3-small) & LLM analysis (GPT-5.4) |\n| [Decodo API](https://visit.decodo.com/1G9ox6) | Web search & page scraping |\n| [Cloudflare R2](https://developers.cloudflare.com/r2/) | Report file storage (S3-compatible) |\n\n## Quick Start\n\n1. Import the workflow JSON into your n8n instance.\n2. Add credentials for OpenAI, Pinecone, LlamaIndex (Header Auth), Decodo, and Cloudflare R2 (S3-compatible).\n3. Update the R2 base URL in the \"Build Public Report URL\" node.\n4. Fire a test POST with a sample deck to the webhook.\n\n## Customization Ideas\n\n- Swap the HTML template to match your firm's branding and report structure.\n- Extend the AI Agent prompt to cover additional dimensions like ESG scoring or technical debt.\n- Route the finished PDF to Slack, email, or your CRM instead of (or alongside) R2.\n\n## Troubleshooting\n\n| Symptom | Likely Fix |\n| --- | --- |\n| Parsing times out | Increase the Wait node duration; check file size against LlamaParse limits |\n| Thin or generic analysis | Verify the source PDF is text-based, not a scanned image, enable OCR if needed |\n| Broken PDF layout | Simplify CSS in the HTML render node; older Puppeteer builds handle basic layouts better |\n\n---\n\n**Created by:** [Khmuhtadin](https://khmuhtadin.com)\n**Category:** Business Intelligence | **Tags:** AI, RAG, Due Diligence, Decodo\n\n[Portfolio](https://khmuhtadin.com) • [Store](https://khaisa.studio/products/) • [LinkedIn](https://www.linkedin.com/in/khmuhtadin/) • [Medium](https://medium.com/@khaisastudio) • [Threads](https://www.threads.com/@khmuhtadin)",
+  "workflow": {
+    "name": "M&A Decodo",
+    "nodes": [
+      {
+        "id": "6688b756-2970-42f6-8e23-8e9153acc05b",
+        "name": "Retrieve Parsed Content",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          848,
+          -128
+        ],
+        "parameters": {
+          "url": "=https://api.cloud.llamaindex.ai/api/v1/parsing/job/{{ $json.id }}/result/markdown",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "accept",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "4hJbMGqzerAxpVEw",
+            "name": "llamaindex"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "d9480c54-6c62-487c-a2c3-84fcb5995c39",
+        "name": "Receive Upload Request",
+        "type": "n8n-nodes-base.webhook",
+        "onError": "continueRegularOutput",
+        "position": [
+          -1280,
+          -144
+        ],
+        "webhookId": "0d39d242-6a1d-4748-8c91-46008a3e6d28",
+        "parameters": {
+          "path": "0d39d242-6a1d-4748-8c91-46008a3e6d28",
+          "options": {},
+          "httpMethod": "POST",
+          "responseMode": "responseNode"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "0d442877-1d5d-4de8-9bfc-cce6b9d3ac66",
+        "name": "Split Uploaded Files + Build Deal ID",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1056,
+          -144
+        ],
+        "parameters": {
+          "jsCode": "// Split webhook binary files into separate items\n// Generate unified dealId from all filenames\n\nconst item = $input.first();\nconst body = item.json.body || {};\nconst binary = item.binary || {};\n\n// Parse filenames from body\nlet filenames = [];\ntry {\n  filenames = JSON.parse(body.filenames || '[]');\n} catch (e) {\n  // If not JSON, try to get from binary\n  filenames = Object.values(binary).map(b => b.fileName);\n}\n\n// Generate unified deal ID from sorted filenames\nconst combinedNames = filenames.sort().join('|');\nconst dealId = Buffer.from(combinedNames).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);\n\n// Get all binary keys\nconst binaryKeys = Object.keys(binary).filter(k => k.startsWith('data'));\n\nif (binaryKeys.length === 0) {\n  throw new Error('No binary files found in webhook request');\n}\n\n// Create one item per file\nconst items = binaryKeys.map((key, index) => {\n  const binaryData = binary[key];\n  const extension = (binaryData.fileExtension || '').toLowerCase();\n  \n  return {\n    json: {\n      dealId: dealId,\n      sourceFile: binaryData.fileName,\n      fileType: extension,\n      mimeType: binaryData.mimeType,\n      fileIndex: index,\n      totalFiles: binaryKeys.length\n    },\n    binary: {\n      data: binaryData\n    }\n  };\n});\n\nreturn items;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "cd76b011-6dba-44fb-83a3-bf1bbe9e21d1",
+        "name": "Iterate Files for Parsing",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -128,
+          -128
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "ff4f824c-4a75-4dab-b7c1-4db4124c5f53",
+        "name": "Get Pinecone Index Stats",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          -832,
+          -144
+        ],
+        "parameters": {
+          "url": "=https://[redacted url]/describe_index_stats",
+          "method": "POST",
+          "options": {},
+          "jsonBody": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "nodeCredentialType": "pineconeApi"
+        },
+        "credentials": {
+          "pineconeApi": {
+            "id": "IX4WqaNzLmXgybyA",
+            "name": "w3khmuhtadin"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 4.3,
+        "waitBetweenTries": 2000
+      },
+      {
+        "id": "fae9cf29-3210-425a-897d-2eb47f5c5eef",
+        "name": "Upsert Chunks to Pinecone",
+        "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+        "position": [
+          1232,
+          -128
+        ],
+        "parameters": {
+          "mode": "insert",
+          "options": {
+            "clearNamespace": false,
+            "pineconeNamespace": "={{ $('Iterate Files for Parsing').item.json.dealId }}"
+          },
+          "pineconeIndex": {
+            "__rl": true,
+            "mode": "list",
+            "value": "poc",
+            "cachedResultName": "poc"
+          }
+        },
+        "credentials": {
+          "pineconeApi": {
+            "id": "IX4WqaNzLmXgybyA",
+            "name": "w3khmuhtadin"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "2260f3e1-ac3e-40e4-a43c-1684faa7b72a",
+        "name": "Generate Embeddings (Ingest)",
+        "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "position": [
+          1232,
+          -16
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "hdBomZukFu3cyDUS",
+            "name": "Sumopod"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "7d8dc719-ad64-44ec-beaa-aab69e357f1f",
+        "name": "Prepare Parsed Text Document",
+        "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+        "position": [
+          1424,
+          -16
+        ],
+        "parameters": {
+          "options": {
+            "metadata": {
+              "metadataValues": [
+                {
+                  "name": "deal_id",
+                  "value": "={{ $json.dealId }}"
+                },
+                {
+                  "name": "source_file",
+                  "value": "={{ $json.sourceFile }}"
+                },
+                {
+                  "name": "file_type",
+                  "value": "={{ $json.fileType }}"
+                },
+                {
+                  "name": "timestamp",
+                  "value": "={{ $now.toUTC() }}"
+                }
+              ]
+            }
+          },
+          "jsonData": "={{ $json.parsedText || \"\" }}",
+          "jsonMode": "expressionData"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "e0dd6cd9-ddd3-4292-8fc1-a05501dede95",
+        "name": "Collect Ingested Deal IDs",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          64,
+          -624
+        ],
+        "parameters": {
+          "options": {},
+          "fieldsToAggregate": {
+            "fieldToAggregate": [
+              {
+                "fieldToAggregate": "metadata.deal_id"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "411ddd47-8033-4951-b9ca-adeae3a50cca",
+        "name": "Prepare Analysis Context",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -144,
+          -624
+        ],
+        "parameters": {
+          "jsCode": "// Handle both paths: from cache hit or from aggregated embeddings\n  const items = $input.all();\n\n  let dealId;\n\n  // Check if coming from cache hit path\n  if (items[0]?.json?.cacheHit === true) {\n    dealId = items[0].json.dealId;\n  } else {\n    // Coming from aggregate embeddings path\n    const dealIdArray = items[0]?.json?.deal_id;\n    dealId = Array.isArray(dealIdArray) ? dealIdArray[0] : (dealIdArray || 'unknown');\n  }\n\n  return [{\n    json: {\n      dealId,\n      filesProcessed: items[0]?.json?.vectorCount || (Array.isArray(items[0]?.json?.deal_id)\n   ? items[0].json.deal_id.length : 1),\n      fromCache: items[0]?.json?.cacheHit || false,\n      timestamp: new Date().toISOString()\n    }\n  }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c3cd7b37-7c90-4d46-8ff8-810615797343",
+        "name": "Run Due Diligence AI Analysis",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          3472,
+          -560
+        ],
+        "parameters": {
+          "text": "=You are a Senior Investment Analyst & Due Diligence Officer.\n\nMANDATORY RETRIEVAL STRATEGY:\nYou MUST make MULTIPLE Pinecone queries to gather ALL required data. Do\nNOT rely on a single query.\n\nREQUIRED QUERIES (execute ALL before generating output):\n  1. \"company name headquarters location employees industry overview\"\n  2. \"revenue financial performance FY2021 FY2022 FY2023 FY2024 FY2025 yearly results\"\n  3. \"gross margin net margin EBITDA margin profitability percentage\"\n  4. \"risk factors key risks challenges threats founder dependency labor market client concentration\"\n  5. \"customer concentration top clients revenue breakdown percentage\"\n  6. \"business model investment thesis value proposition growth strategy\"\n\nSTRICT RULES:\n  - Execute ALL 6 queries before generating JSON output\n  - Combine and synthesize evidence from ALL queries\n  - Extract ALL years of financial data (2021-2025), not just recent year\n  - Include ALL risks mentioned in documents (typically 5-7 risks)\n  - For customer concentration, include specific percentages (Top 3, Top 5, Top 10)\n  - If data is genuinely missing after all queries, use \"Not Available\" (string) or 0 (number)\n  - Do not hallucinate - only use retrieved evidence\n\nOUTPUT FORMAT:\nReturn ONLY valid JSON matching the parser schema. No markdown, no explanation.\n\nOUTPUT TYPES:\n  - String fields: use \"Not Available\" when missing\n  - Numeric fields (employee_count, year, amount, ebitda): use 0 when missing\n  - key_risks: MUST be array of strings with ALL identified risks\n  - revenue_history: MUST include ALL available years (up to 5 years)\n\nEXTERNAL EVIDENCE USAGE:\n  - Always factor external web evidence inserted into Pinecone namespace for this deal.\n  - Use external signals to validate company profile, commercial signals, and risk/compliance posture.\n  - If external evidence coverage is low, keep conclusions conservative and explicitly acknowledge lower confidence.",
+          "options": {},
+          "promptType": "define",
+          "hasOutputParser": true
+        },
+        "typeVersion": 3.1
+      },
+      {
+        "id": "effa0a6c-1e52-44e5-bea8-5011faf7e908",
+        "name": " OpenAI Chat Model (5-mini)",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          3328,
+          -448
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-5-mini",
+            "cachedResultName": "gpt-5-mini"
+          },
+          "options": {},
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "hdBomZukFu3cyDUS",
+            "name": "Sumopod"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "02ce8124-3a2b-4a30-86b7-324863092101",
+        "name": "Parse Structured Analysis JSON",
+        "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "position": [
+          3744,
+          -448
+        ],
+        "parameters": {
+          "jsonSchemaExample": "{\n  \"company_profile\": {\n    \"company_name\": \"Example Corp\",\n    \"industry\": \"Manufacturing\",\n    \"location\": \"Jakarta, Indonesia\",\n    \"employee_count\": 120\n  },\n  \"financials\": {\n    \"revenue_history\": [\n      { \"year\": 2023, \"amount\": 1200000, \"currency\": \"USD\" },\n      { \"year\": 2024, \"amount\": 1400000, \"currency\": \"USD\" },\n      { \"year\": 2025, \"amount\": 1600000, \"currency\": \"USD\" }\n    ],\n    \"ebitda\": 250000,\n    \"margins\": {\n      \"gross_margin\": \"42%\",\n      \"net_margin\": \"11%\",\n      \"ebitda_margin\": \"18%\"\n    }\n  },\n  \"analysis\": {\n    \"business_model\": \"B2B recurring contracts\",\n    \"investment_thesis\": \"Strong growth with expanding margins\",\n    \"key_risks\": [\n      \"Customer concentration\",\n      \"FX exposure\"\n    ],\n    \"customer_concentration\": \"Top 3 customers contribute 55% revenue\"\n  }\n}"
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "f0ce179e-eb36-4fc8-b409-16f24d109d6f",
+        "name": " Generate Embeddings (Retrieval)",
+        "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "position": [
+          3568,
+          -352
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "hdBomZukFu3cyDUS",
+            "name": "Sumopod"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "0eff02e2-045f-47fc-8964-15f977775d0b",
+        "name": "Map Analysis to Report Fields",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3952,
+          -512
+        ],
+        "parameters": {
+          "jsCode": "const raw = $input.first()?.json ?? {};\nconst data = raw.output && typeof raw.output === 'object' ? raw.output : raw;\n\nconst companyProfile = data.company_profile && typeof data.company_profile === 'object' ? data.company_profile : {};\nconst financials = data.financials && typeof data.financials === 'object' ? data.financials : {};\nconst analysis = data.analysis && typeof data.analysis === 'object' ? data.analysis : {};\nconst margins = financials.margins && typeof financials.margins === 'object' ? financials.margins : {};\n\nconst isPresent = (value) => value !== null && value !== undefined && String(value).trim() !== '';\n\nlet companyName = 'Not Available';\nif (isPresent(companyProfile.company_name)) companyName = String(companyProfile.company_name);\n\nlet industry = 'Not Available';\nif (isPresent(companyProfile.industry)) industry = String(companyProfile.industry);\n\nlet location = 'Not Available';\nif (isPresent(companyProfile.location)) location = String(companyProfile.location);\n\nlet employeeCount = 'Not Available';\nif (typeof companyProfile.employee_count === 'number' && Number.isFinite(companyProfile.employee_count) && companyProfile.employee_count !== 0) {\n  employeeCount = companyProfile.employee_count.toLocaleString('en-US');\n} else if (isPresent(companyProfile.employee_count) && String(companyProfile.employee_count).trim() !== '0') {\n  employeeCount = String(companyProfile.employee_count).trim();\n}\n\nconst escapeHtml = (value) => String(value)\n  .replace(/&/g, '&amp;')\n  .replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;')\n  .replace(/'/g, '&#39;');\n\nlet revenueTableRows = '<tr><td colspan=\"3\" class=\"na-value\">No revenue data available</td></tr>';\nif (Array.isArray(financials.revenue_history) && financials.revenue_history.length > 0) {\n  const rows = [];\n  for (const row of financials.revenue_history) {\n    const year = isPresent(row?.year) ? String(row.year) : 'N/A';\n\n    let amount = 'Not Available';\n    if (typeof row?.amount === 'number' && Number.isFinite(row.amount) && row.amount !== 0) {\n      amount = row.amount.toLocaleString('en-US');\n    } else if (isPresent(row?.amount) && String(row.amount).trim() !== '0') {\n      amount = String(row.amount).trim();\n    }\n\n    const currency = isPresent(row?.currency) ? String(row.currency) : 'USD';\n    rows.push('<tr><td>' + escapeHtml(year) + '</td><td>' + escapeHtml(amount) + '</td><td>' + escapeHtml(currency) + '</td></tr>');\n  }\n  revenueTableRows = rows.join('');\n}\n\nlet ebitda = 'Not Available';\nif (typeof financials.ebitda === 'number' && Number.isFinite(financials.ebitda) && financials.ebitda !== 0) {\n  ebitda = financials.ebitda.toLocaleString('en-US');\n} else if (isPresent(financials.ebitda) && String(financials.ebitda).trim() !== '0') {\n  ebitda = String(financials.ebitda).trim();\n}\n\nconst grossMargin = isPresent(margins.gross_margin) ? String(margins.gross_margin) : 'Not Available';\nconst netMargin = isPresent(margins.net_margin) ? String(margins.net_margin) : 'Not Available';\nconst ebitdaMargin = isPresent(margins.ebitda_margin) ? String(margins.ebitda_margin) : 'Not Available';\n\nconst businessModel = isPresent(analysis.business_model) ? String(analysis.business_model) : 'Not Available';\nconst investmentThesis = isPresent(analysis.investment_thesis) ? String(analysis.investment_thesis) : 'Not Available';\nconst customerConcentration = isPresent(analysis.customer_concentration) ? String(analysis.customer_concentration) : 'Not Available';\n\nlet riskListItems = '<li class=\"risk-item\"><span class=\"risk-icon\">-</span><span class=\"risk-text\">No specific risks identified in the document</span></li>';\nif (Array.isArray(analysis.key_risks)) {\n  const riskRows = [];\n  let riskIndex = 1;\n  for (const risk of analysis.key_risks) {\n    if (!isPresent(risk)) continue;\n    riskRows.push('<li class=\"risk-item\"><span class=\"risk-icon\">' + String(riskIndex) + '</span><span class=\"risk-text\">' + escapeHtml(String(risk)) + '</span></li>');\n    riskIndex += 1;\n  }\n  if (riskRows.length > 0) {\n    riskListItems = riskRows.join('');\n  }\n}\n\nlet dealId = 'N/A';\nconst ctx = $('Prepare Analysis Context').first();\nif (ctx?.json?.dealId) dealId = String(ctx.json.dealId);\n\nconst reportDate = DateTime.now().toFormat(\"MMMM dd, yyyy 'at' HH:mm\");\n\nreturn [{\n  json: {\n    companyName,\n    industry,\n    location,\n    employeeCount,\n    revenueTableRows,\n    ebitda,\n    grossMargin,\n    netMargin,\n    ebitdaMargin,\n    businessModel,\n    investmentThesis,\n    riskListItems,\n    customerConcentration,\n    dealId,\n    reportDate,\n  },\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0773b0d5-709a-42c5-a40f-4d4ed64e6b99",
+        "name": "Render DD Report HTML",
+        "type": "n8n-nodes-base.html",
+        "position": [
+          3584,
+          -208
+        ],
+        "parameters": {
+          "html": "=<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Due Diligence Report - {{ $json.companyName }}</title>\n    <style>\n        * { margin: 0; padding: 0; box-sizing: border-box; }\n        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background-color: #ffffff; color: #1e293b; line-height: 1.6; padding: 40px; max-width: 800px; margin: 0 auto; }\n        .header { border-bottom: 3px solid #0f766e; padding-bottom: 24px; margin-bottom: 32px; }\n        .header h1 { font-size: 28px; color: #0f766e; margin-bottom: 8px; }\n        .header .subtitle { font-size: 14px; color: #64748b; }\n        .header .date { font-size: 12px; color: #94a3b8; margin-top: 4px; }\n        .section { margin-bottom: 32px; }\n        .section-title { font-size: 18px; font-weight: 700; color: #0f766e; border-left: 4px solid #0f766e; padding-left: 12px; margin-bottom: 16px; }\n        .card { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin-bottom: 16px; }\n        .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }\n        .info-item { padding: 12px; background-color: #ffffff; border-radius: 6px; border: 1px solid #e2e8f0; }\n        .info-label { font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; margin-bottom: 4px; }\n        .info-value { font-size: 16px; font-weight: 600; color: #1e293b; }\n        table { width: 100%; border-collapse: collapse; margin-top: 12px; }\n        th { background-color: #0f766e; color: #ffffff; font-size: 12px; font-weight: 600; text-align: left; padding: 12px; text-transform: uppercase; letter-spacing: 0.5px; }\n        td { padding: 12px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }\n        tr:nth-child(even) { background-color: #f8fafc; }\n        .metric-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }\n        .metric-row:last-child { border-bottom: none; }\n        .metric-label { color: #475569; font-size: 14px; }\n        .metric-value { font-weight: 600; color: #1e293b; }\n        .text-content { font-size: 14px; color: #475569; line-height: 1.8; white-space: pre-line; }\n        .risk-list { list-style: none; padding: 0; }\n        .risk-item { display: flex; align-items: flex-start; padding: 12px; background-color: #fef2f2; border-left: 4px solid #ef4444; margin-bottom: 8px; border-radius: 0 6px 6px 0; }\n        .risk-icon { width: 20px; height: 20px; background-color: #ef4444; color: #ffffff; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; margin-right: 12px; flex-shrink: 0; }\n        .risk-text { font-size: 14px; color: #7f1d1d; }\n        .highlight-box { background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border: 1px solid #10b981; border-radius: 8px; padding: 20px; }\n        .highlight-content { font-size: 14px; color: #047857; line-height: 1.7; }\n        .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 11px; color: #94a3b8; }\n        .na-value { color: #94a3b8; font-style: italic; }\n    </style>\n</head>\n<body>\n    <div class=\"header\">\n        <h1>Due Diligence Report</h1>\n        <div class=\"subtitle\">{{ $json.companyName }}</div>\n        <div class=\"date\">Generated: {{ $json.reportDate }}</div>\n    </div>\n    <div class=\"section\">\n        <h2 class=\"section-title\">Company Overview</h2>\n        <div class=\"card\">\n            <div class=\"info-grid\">\n                <div class=\"info-item\"><div class=\"info-label\">Company Name</div><div class=\"info-value\">{{ $json.companyName }}</div></div>\n                <div class=\"info-item\"><div class=\"info-label\">Industry</div><div class=\"info-value\">{{ $json.industry }}</div></div>\n                <div class=\"info-item\"><div class=\"info-label\">Location</div><div class=\"info-value\">{{ $json.location }}</div></div>\n                <div class=\"info-item\"><div class=\"info-label\">Employee Count</div><div class=\"info-value\">{{ $json.employeeCount }}</div></div>\n            </div>\n        </div>\n    </div>\n    <div class=\"section\">\n        <h2 class=\"section-title\">Financial Summary</h2>\n        <div class=\"card\">\n            <h3 style=\"font-size: 14px; color: #475569; margin-bottom: 12px;\">Revenue History</h3>\n            <table><thead><tr><th>Year</th><th>Revenue</th><th>Currency</th></tr></thead><tbody>{{ $json.revenueTableRows }}</tbody></table>\n        </div>\n        <div class=\"card\">\n            <h3 style=\"font-size: 14px; color: #475569; margin-bottom: 12px;\">Key Metrics</h3>\n            <div class=\"metric-row\"><span class=\"metric-label\">EBITDA</span><span class=\"metric-value\">{{ $json.ebitda }}</span></div>\n            <div class=\"metric-row\"><span class=\"metric-label\">Gross Margin</span><span class=\"metric-value\">{{ $json.grossMargin }}</span></div>\n            <div class=\"metric-row\"><span class=\"metric-label\">Net Margin</span><span class=\"metric-value\">{{ $json.netMargin }}</span></div>\n            <div class=\"metric-row\"><span class=\"metric-label\">EBITDA Margin</span><span class=\"metric-value\">{{ $json.ebitdaMargin }}</span></div>\n        </div>\n    </div>\n    <div class=\"section\">\n        <h2 class=\"section-title\">Business Model</h2>\n        <div class=\"card\"><div class=\"text-content\">{{ $json.businessModel }}</div></div>\n    </div>\n    <div class=\"section\">\n        <h2 class=\"section-title\">Investment Thesis</h2>\n        <div class=\"highlight-box\"><div class=\"highlight-content\">{{ $json.investmentThesis }}</div></div>\n    </div>\n    <div class=\"section\">\n        <h2 class=\"section-title\">Risk Analysis</h2>\n        <div class=\"card\">\n            <h3 style=\"font-size: 14px; color: #475569; margin-bottom: 12px;\">Key Risks</h3>\n            <ul class=\"risk-list\">{{ $json.riskListItems }}</ul>\n        </div>\n        <div class=\"card\">\n            <h3 style=\"font-size: 14px; color: #475569; margin-bottom: 12px;\">Customer Concentration</h3>\n            <div class=\"text-content\">{{ $json.customerConcentration }}</div>\n        </div>\n    </div>\n    <div class=\"footer\">\n        <p>This report was generated automatically using AI-powered document analysis.</p>\n        <p>Deal ID: {{ $json.dealId }}</p>\n    </div>\n</body>\n</html>"
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "84a87c7e-e44a-4557-95a6-3b642cda42b4",
+        "name": "Render PDF from HTML",
+        "type": "n8n-nodes-puppeteer.puppeteer",
+        "position": [
+          3808,
+          -208
+        ],
+        "parameters": {
+          "options": {},
+          "operation": "runCustomScript",
+          "scriptCode": "=const html = $json.html || '';\n\nif (!html) {\n  throw new Error('HTML content is empty. Check Render DD Report HTML output.');\n}\n\nawait $page.setContent(html, {\n  waitUntil: 'networkidle0',\n  timeout: 60000,\n});\n\nconst pdfArray = await $page.pdf({\n  format: 'A4',\n  printBackground: true,\n  margin: {\n    top: '40px',\n    right: '40px',\n    bottom: '40px',\n    left: '40px',\n  },\n  scale: 0.95,\n  timeout: 60000,\n});\n\nconst pdfBase64 = Buffer.from(pdfArray).toString('base64');\nreturn [{ json: { pdfBase64 } }];"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8f4ef527-4c3b-4410-86c9-30f8679cf279",
+        "name": "Convert PDF Base64 to Binary File",
+        "type": "n8n-nodes-base.convertToFile",
+        "position": [
+          4032,
+          -208
+        ],
+        "parameters": {
+          "options": {
+            "fileName": "={{ $('Map Analysis to Report Fields').item.json.companyName }}-Analysis.pdf"
+          },
+          "operation": "toBinary",
+          "sourceProperty": "pdfBase64"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "14b8fceb-4c56-4af8-940f-a57b256a239b",
+        "name": "Upload Report PDF to S3",
+        "type": "n8n-nodes-base.s3",
+        "position": [
+          4480,
+          -208
+        ],
+        "parameters": {
+          "fileName": "={{ $json.fileName }}",
+          "operation": "upload",
+          "bucketName": "poc",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "s3": {
+            "id": "VlDlqmuisabClxpl",
+            "name": "S3 account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "280a68bd-ab8e-4cb0-9a96-83bca3e7bccb",
+        "name": "Build Public Report URL",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4704,
+          -208
+        ],
+        "parameters": {
+          "jsCode": "const baseUrl = 'https://poc.atlr.dev';\n  const fileName = $('Prepare S3 File Metadata').first().json.fileName;\n  const encodedFileName = encodeURIComponent(fileName);\n  const publicUrl = `${baseUrl}/${encodedFileName}`;\n\n  return {\n    json: {\n      success: true,\n      fileName: fileName,\n      publicUrl: publicUrl\n    }\n  };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f8ea8c89-eccf-4b9a-a6f0-7b4e157150ad",
+        "name": " Merge Analysis + Report URL",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          4272,
+          -544
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {},
+          "combineBy": "combineByPosition"
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "da95d545-b7db-49a6-ac5b-ab114e2ea3fd",
+        "name": "Is Parsing Job Complete?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          464,
+          -112
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "921ff875-817d-47fd-bd47-530ebdc21902",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.status }}",
+                "rightValue": "SUCCESS"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "52a8e8bd-ae59-4b99-990d-6dbacff0ea26",
+        "name": "Upload File to LlamaParse",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          96,
+          -112
+        ],
+        "parameters": {
+          "url": "https://api.cloud.llamaindex.ai/api/v1/parsing/upload",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "contentType": "multipart-form-data",
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "file",
+                "parameterType": "formBinaryData",
+                "inputDataFieldName": "data"
+              }
+            ]
+          },
+          "genericAuthType": "httpHeaderAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "accept",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "4hJbMGqzerAxpVEw",
+            "name": "llamaindex"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "ebde6a4b-5aa4-4803-a1ba-23c1ec6bad4a",
+        "name": "Check LlamaParse Job Status",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          288,
+          -112
+        ],
+        "parameters": {
+          "url": "=https://api.cloud.llamaindex.ai/api/v1/parsing/job/{{ $json.id }}",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "accept",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "4hJbMGqzerAxpVEw",
+            "name": "llamaindex"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "1c0d2632-3656-41aa-ba0e-06410b1e7830",
+        "name": "Wait 10s Before Recheck",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          640,
+          -96
+        ],
+        "webhookId": "399e6f5e-230a-407d-966f-87a35c3e115b",
+        "parameters": {
+          "amount": 10
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "bb6238c2-c2d1-4a2a-b3e9-a3415a20e9f9",
+        "name": "Return API Response",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          4720,
+          -544
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1.5
+      },
+      {
+        "id": "71bcafab-7d80-4aa0-990f-3cbe028b11bc",
+        "name": "Normalize Parsed Text Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1056,
+          -128
+        ],
+        "parameters": {
+          "jsCode": "const loopItem = $('Iterate Files for Parsing').item.json;\n  const parsedContent = $json.markdown || $json.text || '';\n\n  return [{\n    json: {\n      dealId: loopItem.dealId,\n      sourceFile: loopItem.sourceFile,\n      fileType: loopItem.fileType,\n      parsedText: parsedContent\n    }\n  }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9bccd041-e39e-419c-a9c5-70bf8b40c428",
+        "name": "Cache Hit?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -384,
+          -144
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "a45d92c0-a88f-49fc-b393-b482a3585d21",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.cacheHit }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "af834630-8789-4a25-a1f1-00f310a4b8c1",
+        "name": "Prepare S3 File Metadata",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4256,
+          -208
+        ],
+        "parameters": {
+          "jsCode": "const companyName = $('Map Analysis to Report Fields').first().json.companyName;\n  const timestamp = Date.now();\n  const fileName = `${companyName}-assessment-${timestamp}.pdf`;\n\n  return [{\n    json: {\n      fileName: fileName\n    },\n    binary: $input.first().binary\n  }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2c931666-2b98-42ad-b452-97359da5ab11",
+        "name": "Derive Company Seed",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          272,
+          -624
+        ],
+        "parameters": {
+          "jsCode": "const input = $input.first()?.json || {};\nconst dealId = input.dealId ? String(input.dealId) : 'unknown';\n\nconst countryRaw = String(input.location || input.country || input.hqCountry || 'United States').trim();\nconst countryKey = countryRaw.toLowerCase();\nconst countryMap = {\n  us: { name: 'United States', code: 'us', locale: 'en-US' },\n  usa: { name: 'United States', code: 'us', locale: 'en-US' },\n  'united states': { name: 'United States', code: 'us', locale: 'en-US' },\n  id: { name: 'Indonesia', code: 'id', locale: 'id-ID' },\n  indonesia: { name: 'Indonesia', code: 'id', locale: 'id-ID' },\n  sg: { name: 'Singapore', code: 'sg', locale: 'en-SG' },\n  singapore: { name: 'Singapore', code: 'sg', locale: 'en-SG' },\n  uk: { name: 'United Kingdom', code: 'gb', locale: 'en-GB' },\n  'united kingdom': { name: 'United Kingdom', code: 'gb', locale: 'en-GB' },\n  de: { name: 'Germany', code: 'de', locale: 'de-DE' },\n  germany: { name: 'Germany', code: 'de', locale: 'de-DE' },\n  fr: { name: 'France', code: 'fr', locale: 'fr-FR' },\n  france: { name: 'France', code: 'fr', locale: 'fr-FR' },\n  in: { name: 'India', code: 'in', locale: 'en-IN' },\n  india: { name: 'India', code: 'in', locale: 'en-IN' },\n  jp: { name: 'Japan', code: 'jp', locale: 'ja-JP' },\n  japan: { name: 'Japan', code: 'jp', locale: 'ja-JP' },\n  cn: { name: 'China', code: 'cn', locale: 'zh-CN' },\n  china: { name: 'China', code: 'cn', locale: 'zh-CN' },\n  au: { name: 'Australia', code: 'au', locale: 'en-AU' },\n  australia: { name: 'Australia', code: 'au', locale: 'en-AU' },\n};\nconst countryInfo = countryMap[countryKey] || { name: countryRaw || 'United States', code: 'us', locale: 'en-US' };\n\nlet uploaded = [];\ntry {\n  uploaded = $('Split Uploaded Files + Build Deal ID').all().map((item) => item.json || {});\n} catch (error) {}\n\nconst filenames = [...new Set(uploaded.map((row) => String(row.sourceFile || '').trim()).filter(Boolean))];\nconst genericWords = new Set([\n  'teaser', 'pitch', 'deck', 'presentation', 'financial', 'model', 'appendix', 'report', 'company', 'profile',\n  'data', 'room', 'deal', 'final', 'draft', 'rev', 'revised', 'version', 'copy', 'updated', 'new', 'signed',\n  'executive', 'summary', 'overview', 'confidential', 'cim', 'im', 'memo', 'management', 'seller', 'buyer',\n  'nda', 'appendices', 'attachment', 'file', 'doc', 'docs'\n]);\nconst monthWords = new Set(['jan','january','feb','february','mar','march','apr','april','may','jun','june','jul','july','aug','august','sep','sept','september','oct','october','nov','november','dec','december']);\nconst invalidTlds = new Set(['pdf', 'ppt', 'pptx', 'doc', 'docx', 'xls', 'xlsx']);\n\nconst stripExtension = (value) => String(value || '').replace(/\\.[a-z0-9]{2,5}$/i, '');\nconst titleCase = (value) => String(value || '').split(' ').filter(Boolean).map((token) => token.charAt(0).toUpperCase() + token.slice(1)).join(' ');\nconst extractDomains = (value) => {\n  const cleaned = stripExtension(value);\n  const matches = String(cleaned || '').match(/\\b(?:[a-z0-9-]+\\.)+[a-z]{2,}\\b/gi) || [];\n  return matches.map((entry) => entry.toLowerCase()).filter((entry) => !invalidTlds.has(entry.split('.').pop()));\n};\nconst normalizeCandidate = (value) => stripExtension(value)\n  .replace(/[|_]+/g, ' ')\n  .replace(/[()\\[\\]]/g, ' ')\n  .replace(/[–—-]+/g, ' ')\n  .replace(/\\b(v\\d+|ver\\d+|version\\d+|final|draft|copy|signed|updated|new)\\b/gi, ' ')\n  .replace(/\\b(19|20)\\d{2}\\b/g, ' ')\n  .replace(/[^a-zA-Z0-9.& ]/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nconst meaningfulTokens = (value) => normalizeCandidate(value)\n  .split(/\\s+/)\n  .map((token) => token.trim())\n  .filter(Boolean)\n  .filter((token) => token.length > 1)\n  .filter((token) => !monthWords.has(token.toLowerCase()))\n  .filter((token) => !/^(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)(19|20)?\\d{2}$/i.test(token))\n  .filter((token) => !genericWords.has(token.toLowerCase()))\n  .filter((token) => !/^\\d+$/.test(token))\n  .filter((token) => !/^(19|20)\\d{2}$/.test(token));\n\nconst tokenRows = filenames.map((name) => ({\n  raw: name,\n  tokens: meaningfulTokens(name),\n  domains: extractDomains(name),\n}));\nconst tokenCounts = {};\nfor (const row of tokenRows) {\n  for (const token of new Set(row.tokens.map((entry) => entry.toLowerCase()))) {\n    tokenCounts[token] = (tokenCounts[token] || 0) + 1;\n  }\n}\n\nlet consensusTokens = [];\nif (tokenRows.length > 1) {\n  const minSupport = Math.min(tokenRows.length, 2);\n  consensusTokens = Object.entries(tokenCounts)\n    .filter(([, count]) => count >= minSupport)\n    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))\n    .map(([token]) => token);\n}\n\nconst candidateRows = tokenRows.map((row) => {\n  let score = row.tokens.reduce((sum, token) => sum + ((tokenCounts[token.toLowerCase()] || 0) * 10), 0);\n  if (row.domains.length > 0) score -= 25;\n  if (row.tokens.length === 1) score += 12;\n  if (row.tokens.length >= 2) score += 8;\n  return {\n    raw: row.raw,\n    normalized: titleCase(row.tokens.slice(0, 4).join(' ')),\n    tokens: row.tokens,\n    score,\n  };\n}).filter((row) => row.tokens.length > 0);\ncandidateRows.sort((a, b) => b.score - a.score || a.normalized.localeCompare(b.normalized));\n\nlet companyTokens = [];\nif (consensusTokens.length > 0) {\n  companyTokens = consensusTokens.slice(0, 3);\n} else if (candidateRows[0]) {\n  companyTokens = candidateRows[0].tokens.slice(0, 4).map((token) => token.toLowerCase());\n}\n\nif (companyTokens.length === 0 && filenames[0]) {\n  companyTokens = normalizeCandidate(filenames[0]).split(/\\s+/).filter(Boolean).slice(0, 3).map((token) => token.toLowerCase());\n}\n\nlet companyNameGuess = titleCase(companyTokens.join(' ')).trim() || 'Target Company';\nconst genericFilenameFlag = companyTokens.length < 1;\nconst mentionedDomains = [...new Set(filenames.flatMap(extractDomains))];\nconst seedConfidence = mentionedDomains.length > 0 ? 'high' : (companyTokens.length >= 2 ? 'medium' : 'low');\nconst searchQuery = `${companyNameGuess} official website ${countryInfo.name}`.trim();\nconst fallbackSearchQuery = `${companyNameGuess} company ${countryInfo.name}`.trim();\n\nreturn [{\n  json: {\n    ...input,\n    dealId,\n    companyNameGuess,\n    primaryCompanyName: companyNameGuess,\n    sourceFilenames: filenames,\n    mentionedDomains,\n    genericFilenameFlag,\n    seedConfidence,\n    hqCountry: countryInfo.name,\n    searchCountryCode: countryInfo.code,\n    searchLocale: countryInfo.locale,\n    searchQuery,\n    fallbackSearchQuery,\n    tokenConsensus: consensusTokens.slice(0, 5),\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a668fb86-a110-42af-aa51-58fdebbbce3f",
+        "name": "Build Domain Candidates",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          672,
+          -624
+        ],
+        "parameters": {
+          "jsCode": "const seed = $('Derive Company Seed').first().json || {};\nconst payload = $json || {};\n\nconst blockedDomains = new Set([\n  'google.com', 'www.google.com', 'linkedin.com', 'www.linkedin.com', 'facebook.com', 'www.facebook.com',\n  'instagram.com', 'www.instagram.com', 'x.com', 'twitter.com', 'wikipedia.org', 'www.wikipedia.org',\n  'crunchbase.com', 'www.crunchbase.com', 'youtube.com', 'www.youtube.com', 'tiktok.com', 'www.tiktok.com',\n  'gmail.com', 'outlook.com', 'yahoo.com', 'drive.google.com', 'docs.google.com'\n]);\nconst blockedFragments = ['linkedin', 'facebook', 'instagram', 'twitter', 'x.com', 'wikipedia', 'crunchbase', 'glassdoor', 'indeed', 'zoominfo', 'pitchbook', 'bloomberg', 'mapquest', 'yelp', 'tripadvisor', 'directory', 'listing', 'provider', 'portal', 'forum', 'reddit', 'news'];\nconst blockedSuffixes = ['.gov', '.edu'];\n\nconst normalizeDomain = (value) => {\n  let raw = String(value || '').trim().toLowerCase();\n  if (!raw) return '';\n  raw = raw.replace(/^https?:\\/\\//, '').replace(/^www\\./, '');\n  raw = raw.split('/')[0].split('?')[0].split('#')[0].trim();\n  if (!raw || !raw.includes('.')) return '';\n  const tld = raw.split('.').pop();\n  if (['pdf', 'ppt', 'pptx', 'doc', 'docx', 'xls', 'xlsx'].includes(tld)) return '';\n  return raw;\n};\nconst normalizeUrl = (value) => {\n  const domain = normalizeDomain(value);\n  return domain ? `https://${domain}` : '';\n};\nconst isBlockedDomain = (domain) => {\n  if (!domain || blockedDomains.has(domain)) return true;\n  if (blockedSuffixes.some((suffix) => domain.endsWith(suffix))) return true;\n  if (domain.includes('.gov.') || domain.includes('.edu.')) return true;\n  if (domain.split('.').length > 4) return true;\n  return blockedFragments.some((fragment) => domain.includes(fragment));\n};\nconst companyTokens = String(seed.companyNameGuess || '').toLowerCase().split(/\\s+/).filter((token) => token.length > 2);\nconst scoreSearchHit = (title, snippet, domain) => {\n  const haystack = `${title} ${snippet} ${domain}`.toLowerCase();\n  let score = 0;\n  const matchedTokens = companyTokens.filter((token) => haystack.includes(token));\n  score += matchedTokens.length * 14;\n  if (haystack.includes('official')) score += 15;\n  if (haystack.includes('home')) score += 8;\n  if (haystack.includes('company')) score += 6;\n  if (haystack.includes((seed.hqCountry || '').toLowerCase())) score += 5;\n  if (blockedFragments.some((fragment) => haystack.includes(fragment))) score -= 50;\n  return score;\n};\n\nconst candidates = [];\nconst seen = new Set();\nconst addCandidate = (domainOrUrl, source, baseScore, extra = {}) => {\n  const domain = normalizeDomain(domainOrUrl);\n  if (!domain || isBlockedDomain(domain)) return;\n  if (!/^[a-z0-9.-]+\\.[a-z]{2,}$/i.test(domain)) return;\n  if (seen.has(domain)) return;\n  seen.add(domain);\n  candidates.push({\n    dealId: seed.dealId,\n    companyNameGuess: seed.companyNameGuess || 'Target Company',\n    hqCountry: seed.hqCountry || 'United States',\n    candidateDomain: domain,\n    url: normalizeUrl(domain),\n    source,\n    sourceSignals: [source],\n    baseScore,\n    resolutionReason: `candidate_from_${source}`,\n    ...extra,\n  });\n};\n\nfor (const domain of seed.mentionedDomains || []) addCandidate(domain, 'doc_domain', 65);\n\nconst organic = payload.results?.[0]?.content?.results?.results?.organic || payload.results?.[0]?.content?.results?.organic || [];\nconst searchResults = Array.isArray(organic) && organic.length > 0 ? organic : [];\nfor (const row of searchResults.slice(0, 8)) {\n  const title = String(row.title || row.favicon_text || '');\n  const snippet = String(row.desc || row.snippet || '');\n  const url = row.url || row.url_shown || '';\n  const domain = normalizeDomain(url);\n  if (!domain) continue;\n  const searchScore = scoreSearchHit(title, snippet, domain);\n  if (searchScore < 10) continue;\n  addCandidate(url, 'search_result', 30 + Math.min(searchScore, 25), {\n    resultTitle: title.slice(0, 240),\n    resultSnippet: snippet.slice(0, 500),\n    serpScore: searchScore,\n  });\n}\n\nconst normalizeBase = (value) => String(value || '')\n  .toLowerCase()\n  .replace(/\\b(inc|ltd|limited|llc|corp|corporation|co|group|holdings|company|pte|pt|cv|tbk|technologies|technology|solutions|management)\\b/g, ' ')\n  .replace(/[^a-z0-9\\s]/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nconst guessedBases = [];\nconst cleaned = normalizeBase(seed.companyNameGuess);\nconst parts = cleaned.split(' ').filter(Boolean);\nif (parts.length) guessedBases.push(parts.join(''));\nif (parts.length >= 2) guessedBases.push(parts[0]);\nconst tlds = ['.com', '.co'];\nif ((seed.searchCountryCode || '').toLowerCase() === 'id') tlds.push('.co.id', '.id');\nif ((seed.searchCountryCode || '').toLowerCase() === 'sg') tlds.push('.com.sg', '.sg');\nif ((seed.searchCountryCode || '').toLowerCase() === 'gb') tlds.push('.co.uk');\nfor (const base of [...new Set(guessedBases)].slice(0, 2)) {\n  if (base.length < 4) continue;\n  for (const tld of tlds) addCandidate(`${base}${tld}`, 'guessed', 10);\n}\n\ncandidates.sort((a, b) => (b.baseScore || 0) - (a.baseScore || 0) || a.candidateDomain.localeCompare(b.candidateDomain));\nreturn candidates.slice(0, 3).map((candidate, index) => ({ json: { ...candidate, candidateRank: index + 1 } }));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f2bb8172-ed14-4a74-82c1-1e77da43f768",
+        "name": "Iterate Domain Candidates",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          864,
+          -624
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "cefcae70-069f-421b-9cae-5857f525259a",
+        "name": "Decodo Verify Official Domain",
+        "type": "@decodo/n8n-nodes-decodo.decodo",
+        "onError": "continueRegularOutput",
+        "maxTries": 3,
+        "position": [
+          1040,
+          -528
+        ],
+        "parameters": {
+          "geo": "={{ $json.hqCountry || 'United States' }}",
+          "url": "={{ $json.url }}",
+          "headless": false,
+          "markdown": true
+        },
+        "credentials": {
+          "decodoApi": {
+            "id": "um6rsqlbtrY3NRQB",
+            "name": "cm@g.com"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 1,
+        "waitBetweenTries": 5000
+      },
+      {
+        "id": "a099198d-09b1-44a9-9b0f-647b656b43d3",
+        "name": "Score Domain Match",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1216,
+          -528
+        ],
+        "parameters": {
+          "jsCode": "const seed = $('Derive Company Seed').first().json || {};\nconst candidate = $('Iterate Domain Candidates').item.json || {};\nconst payload = $json || {};\nconst rawError = payload.error ? String(payload.error) : '';\nconst rawContent = payload.results?.[0]?.content || payload.content || payload.markdown || payload.html || payload.text || '';\nconst content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);\nconst lc = content.toLowerCase();\n\nconst companyName = String(seed.companyNameGuess || '').trim();\nconst companyLc = companyName.toLowerCase();\nconst companyTokens = companyLc.split(/\\s+/).filter((token) => token.length > 2);\n\nlet verificationScore = 0;\nconst reasons = [];\n\nif (companyLc && lc.includes(companyLc)) {\n  verificationScore += 35;\n  reasons.push('exact_company_name_match');\n} else {\n  const matchedTokens = companyTokens.filter((token) => lc.includes(token)).length;\n  if (matchedTokens >= Math.max(1, Math.min(2, companyTokens.length))) {\n    verificationScore += 20;\n    reasons.push('partial_company_token_match');\n  }\n}\n\nconst hqCountry = String(seed.hqCountry || '').toLowerCase();\nif (hqCountry && lc.includes(hqCountry)) {\n  verificationScore += 10;\n  reasons.push('country_match');\n}\n\nif (lc.includes('about') || lc.includes('company') || lc.includes('products') || lc.includes('services')) {\n  verificationScore += 8;\n  reasons.push('corporate_page_signal');\n}\n\nif (content.length > 500) {\n  verificationScore += 5;\n  reasons.push('sufficient_content_length');\n} else if (content.length < 120) {\n  verificationScore -= 20;\n  reasons.push('thin_content_penalty');\n}\n\nif (rawError) {\n  verificationScore -= 50;\n  reasons.push('request_error_penalty');\n}\n\nconst negativePatterns = [\n  'linkedin', 'crunchbase', 'wikipedia', 'facebook', 'instagram', 'x.com', 'twitter',\n  'domain for sale', 'buy this domain', 'parked domain', 'coming soon', 'not found', '404'\n];\nfor (const pattern of negativePatterns) {\n  if (lc.includes(pattern)) {\n    verificationScore -= 25;\n    reasons.push(`negative:${pattern}`);\n  }\n}\n\nconst finalScore = Math.max(0, Math.min(100, Number(candidate.baseScore || 0) + verificationScore));\nlet verifyStatus = 'reject';\nif (finalScore >= 80) verifyStatus = 'verified';\nelse if (finalScore >= 55) verifyStatus = 'probable';\n\nreturn [{\n  json: {\n    ...candidate,\n    verificationScore,\n    finalScore,\n    verifyStatus,\n    verifyPreview: content.slice(0, 1200),\n    resolutionReason: reasons.length ? reasons.join(',') : (candidate.resolutionReason || 'low_confidence_match'),\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "32d67839-fc2c-4d3c-bcff-f7a14ca650cf",
+        "name": "Collect Domain Scores",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          1040,
+          -688
+        ],
+        "parameters": {
+          "options": {},
+          "aggregate": "aggregateAllItemData",
+          "destinationFieldName": "domainCandidates"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "740c3c57-7a60-4d32-b04b-505821b6c5fa",
+        "name": "Select Canonical Domain",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1216,
+          -688
+        ],
+        "parameters": {
+          "jsCode": "const rows = Array.isArray($json.domainCandidates) ? $json.domainCandidates : [];\nconst fallback = $('Derive Company Seed').first().json || {};\n\nif (rows.length === 0) {\n  return [{\n    json: {\n      dealId: fallback.dealId || 'unknown',\n      companyNameGuess: fallback.companyNameGuess || 'Target Company',\n      hqCountry: fallback.hqCountry || 'United States',\n      canonicalDomain: '',\n      canonicalUrl: '',\n      finalScore: 0,\n      canonicalStatus: 'reject',\n      resolutionReason: 'no_candidates_found',\n      targetUrl: ''\n    }\n  }];\n}\n\nconst sortedRows = [...rows].sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0));\nconst best = sortedRows[0];\nconst canonicalStatus = best.verifyStatus || ((best.finalScore || 0) >= 80 ? 'verified' : ((best.finalScore || 0) >= 55 ? 'probable' : 'reject'));\nconst baseUrl = String(best.url || '').replace(/\\/$/, '');\nconst pathSet = canonicalStatus === 'verified' ? ['', '/about'] : [''];\n\nreturn pathSet.map((path, index) => ({\n  json: {\n    dealId: best.dealId || fallback.dealId,\n    companyNameGuess: best.companyNameGuess || fallback.companyNameGuess,\n    hqCountry: best.hqCountry || fallback.hqCountry || 'United States',\n    canonicalDomain: best.candidateDomain || '',\n    canonicalUrl: best.url || '',\n    finalScore: best.finalScore || 0,\n    canonicalStatus,\n    resolutionReason: best.resolutionReason || 'best_scoring_candidate',\n    sourceSignals: best.sourceSignals || [],\n    targetUrl: `${baseUrl}${path}`,\n    targetIndex: index + 1,\n  }\n}));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "1d00006f-d9c1-4a5d-877e-92567f304b7f",
+        "name": "Iterate Enrichment URLs",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          1680,
+          -592
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "196fdbb1-8c82-4420-a794-75cf6297ecbb",
+        "name": "Profile Page?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1920,
+          -432
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": false,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "condition-1771924304230-x47ljneew",
+                "operator": {
+                  "type": "string",
+                  "operation": "contains"
+                },
+                "leftValue": "={{ $json.targetUrl }}",
+                "rightValue": "about"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "cc8961fc-4457-4106-94d7-3de024d77aa6",
+        "name": "Decodo Scrape Company Profile",
+        "type": "@decodo/n8n-nodes-decodo.decodo",
+        "onError": "continueRegularOutput",
+        "maxTries": 3,
+        "position": [
+          2112,
+          -448
+        ],
+        "parameters": {
+          "geo": "={{ $json.hqCountry || 'United States' }}",
+          "url": "={{ $json.targetUrl }}",
+          "headless": false,
+          "markdown": true
+        },
+        "credentials": {
+          "decodoApi": {
+            "id": "um6rsqlbtrY3NRQB",
+            "name": "cm@g.com"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 1,
+        "waitBetweenTries": 5000
+      },
+      {
+        "id": "c44deabd-9988-466e-adad-83b841cffe38",
+        "name": "Decodo Scrape Commercial and Risk",
+        "type": "@decodo/n8n-nodes-decodo.decodo",
+        "onError": "continueRegularOutput",
+        "maxTries": 3,
+        "position": [
+          2112,
+          -256
+        ],
+        "parameters": {
+          "geo": "={{ $json.hqCountry || 'United States' }}",
+          "url": "={{ $json.targetUrl }}",
+          "headless": false,
+          "markdown": true
+        },
+        "credentials": {
+          "decodoApi": {
+            "id": "um6rsqlbtrY3NRQB",
+            "name": "cm@g.com"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 1,
+        "waitBetweenTries": 5000
+      },
+      {
+        "id": "7c053d89-5fd6-48de-ad3d-0c45db398124",
+        "name": "Normalize External Evidence",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2304,
+          -368
+        ],
+        "parameters": {
+          "jsCode": "const src = $('Iterate Enrichment URLs').item.json;\nconst payload = $json || {};\nconst rawError = payload.error ? String(payload.error) : '';\nconst content = payload.results?.[0]?.content || payload.content || payload.markdown || payload.html || payload.text || '';\nconst text = typeof content === 'string' ? content : JSON.stringify(content);\n\nconst url = src.targetUrl || src.canonicalUrl || '';\nlet evidenceType = 'commercial_risk';\nif (url.includes('/about') || url.includes('/company') || url.includes('/team')) evidenceType = 'company_profile';\n\nlet confidence = 0.3;\nif ((src.canonicalStatus || '') === 'verified') confidence = 0.8;\nelse if ((src.canonicalStatus || '') === 'probable') confidence = 0.55;\nif (text.length > 1000) confidence += 0.1;\nconfidence = Math.max(0.2, Math.min(0.95, confidence));\n\nreturn [{\n  json: {\n    dealId: src.dealId,\n    canonicalUrl: src.canonicalUrl,\n    canonicalStatus: src.canonicalStatus || 'reject',\n    resolutionReason: src.resolutionReason || 'unclassified',\n    sourceSignals: src.sourceSignals || [],\n    sourceUrl: url,\n    evidenceType,\n    claim: text.slice(0, 4000),\n    confidence: Number(confidence.toFixed(2)),\n    geoUsed: src.hqCountry || 'United States',\n    capturedAt: new Date().toISOString(),\n    status: rawError ? 'error' : (text.length > 0 ? 'success' : 'failed'),\n    rawError,\n    markdown: text\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "93178829-b1c2-4d89-b412-d6d680712411",
+        "name": "Collect External Evidence",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          1904,
+          -608
+        ],
+        "parameters": {
+          "options": {},
+          "aggregate": "aggregateAllItemData",
+          "destinationFieldName": "externalEvidence"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "de844c02-d42b-476a-a7cd-0d2aa5c3021c",
+        "name": "Evidence Coverage Metrics",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2112,
+          -608
+        ],
+        "parameters": {
+          "jsCode": "const items = $json.externalEvidence || [];\nconst canonicalStatus = items[0]?.canonicalStatus || $('Select Canonical Domain').first().json.canonicalStatus || 'reject';\nif (canonicalStatus === 'reject') {\n  return [{\n    json: {\n      dealId: items[0]?.dealId || $('Prepare Analysis Context').first().json.dealId,\n      externalEvidence: [],\n      failedEvidence: items,\n      externalSourcesCount: 0,\n      failedEvidenceCount: items.length,\n      evidenceCoverage: 0,\n      confidenceSummary: 'low',\n      evidenceGatePass: false,\n      evidenceCategories: { profileCount: 0, riskCount: 0 },\n      canonicalStatus,\n      generatedAt: new Date().toISOString()\n    }\n  }];\n}\nconst success = items.filter((item) => item.status === 'success');\nconst failed = items.filter((item) => item.status !== 'success');\nconst coverage = items.length === 0 ? 0 : success.length / items.length;\nlet confidenceSummary = 'low';\nif (coverage >= 0.75) confidenceSummary = 'high';\nelse if (coverage >= 0.4) confidenceSummary = 'medium';\nconst profileCount = success.filter((item) => item.evidenceType.includes('profile')).length;\nconst riskCount = success.filter((item) => item.evidenceType.includes('risk') || item.evidenceType.includes('commercial')).length;\nreturn [{\n  json: {\n    dealId: items[0]?.dealId || $('Prepare Analysis Context').first().json.dealId,\n    externalEvidence: success,\n    failedEvidence: failed,\n    externalSourcesCount: success.length,\n    failedEvidenceCount: failed.length,\n    evidenceCoverage: Number(coverage.toFixed(2)),\n    confidenceSummary,\n    evidenceGatePass: success.length >= 1,\n    evidenceCategories: { profileCount, riskCount },\n    canonicalStatus,\n    generatedAt: new Date().toISOString()\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5f353e85-edd6-4c8e-a4bb-cc6e05d89285",
+        "name": "Has External Evidence?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          2336,
+          -608
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "has-external-evidence-gate",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.evidenceGatePass }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "3183ddf5-6572-4f60-8553-069cb972d747",
+        "name": "Prepare External Evidence Document",
+        "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+        "position": [
+          2800,
+          -512
+        ],
+        "parameters": {
+          "options": {
+            "metadata": {
+              "metadataValues": [
+                {
+                  "name": "deal_id",
+                  "value": "={{ $json.dealId }}"
+                },
+                {
+                  "name": "source_type",
+                  "value": "external_web"
+                },
+                {
+                  "name": "evidence_count",
+                  "value": "={{ $json.externalSourcesCount }}"
+                },
+                {
+                  "name": "coverage",
+                  "value": "={{ $json.evidenceCoverage }}"
+                },
+                {
+                  "name": "timestamp",
+                  "value": "={{ $now.toUTC() }}"
+                }
+              ]
+            }
+          },
+          "jsonData": "={{ ($json.externalEvidence || []).map((item, index) => [\n  'Source ' + (index + 1) + ': ' + (item.sourceUrl || 'unknown'),\n  'Evidence type: ' + (item.evidenceType || 'unknown'),\n  'Confidence: ' + (item.confidence || 0),\n  item.markdown || item.claim || ''\n].join('\\n')).join('\\n\\n---\\n\\n') }}",
+          "jsonMode": "expressionData"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "b91a09d6-6c79-4f5b-b545-a6c946e45e72",
+        "name": "Generate Embeddings (External)",
+        "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "position": [
+          2608,
+          -512
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "hdBomZukFu3cyDUS",
+            "name": "Sumopod"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "00d503a4-163e-4c97-b999-16b6e567c00d",
+        "name": "Upsert External Evidence to Pinecone",
+        "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+        "position": [
+          2608,
+          -624
+        ],
+        "parameters": {
+          "mode": "insert",
+          "options": {
+            "clearNamespace": false,
+            "pineconeNamespace": "={{ $json.dealId }}"
+          },
+          "pineconeIndex": {
+            "__rl": true,
+            "mode": "list",
+            "value": "poc",
+            "cachedResultName": "poc"
+          }
+        },
+        "credentials": {
+          "pineconeApi": {
+            "id": "IX4WqaNzLmXgybyA",
+            "name": "w3khmuhtadin"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "a78ac7a2-4e90-4482-a65f-ed5a838e7477",
+        "name": "Prepare AI Input with Evidence",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3088,
+          -560
+        ],
+        "parameters": {
+          "jsCode": "const base = $('Prepare Analysis Context').first().json;\nlet metrics = {\n  externalSourcesCount: 0,\n  evidenceCoverage: 0,\n  confidenceSummary: 'low',\n  evidenceGatePass: false,\n  evidenceCategories: { profileCount: 0, riskCount: 0 },\n};\ntry {\n  metrics = { ...metrics, ...$('Evidence Coverage Metrics').first().json };\n} catch (error) {}\nconst canonical = $('Select Canonical Domain').first().json || {};\nconst canonicalStatus = canonical.canonicalStatus || 'reject';\nif (canonicalStatus === 'reject') {\n  metrics.externalSourcesCount = 0;\n  metrics.evidenceCoverage = 0;\n  metrics.confidenceSummary = 'low';\n  metrics.evidenceGatePass = false;\n}\nreturn [{\n  json: {\n    ...base,\n    externalSourcesCount: metrics.externalSourcesCount || 0,\n    evidenceCoverage: metrics.evidenceCoverage || 0,\n    confidenceSummary: metrics.confidenceSummary || 'low',\n    evidenceGatePass: metrics.evidenceGatePass || false,\n    evidenceCategories: metrics.evidenceCategories || { profileCount: 0, riskCount: 0 },\n    canonicalStatus,\n    canonicalDomain: canonical.canonicalDomain || '',\n    resolutionReason: canonical.resolutionReason || 'no_valid_domain',\n    sourceSignals: canonical.sourceSignals || [],\n    externalEvidenceSummary: canonicalStatus === 'reject'\n      ? 'external_sources=0; coverage=0; confidence=low; canonical_status=reject'\n      : `external_sources=${metrics.externalSourcesCount || 0}; coverage=${metrics.evidenceCoverage || 0}; confidence=${metrics.confidenceSummary || 'low'}; canonical_status=${canonicalStatus}`\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "3aed2a48-44ab-4ef0-902d-93a25185f596",
+        "name": "Augment Report with Evidence",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3360,
+          -208
+        ],
+        "parameters": {
+          "jsCode": "const report = { ...($input.first()?.json || {}) };\nconst evidence = $('Prepare AI Input with Evidence').first().json;\n\nreport.evidenceCoverage = evidence.evidenceCoverage ?? 0;\nreport.externalSourcesCount = evidence.externalSourcesCount ?? 0;\nreport.confidenceSummary = evidence.confidenceSummary || 'low';\nreport.evidenceDisclaimer = report.evidenceCoverage < 0.4\n  ? 'External evidence coverage is limited. Conclusions should be interpreted with caution.'\n  : '';\n\nreturn [{ json: report }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5552be97-8992-4a59-9d08-f9f5a6dfd4d4",
+        "name": "Prepare API Response Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4496,
+          -544
+        ],
+        "parameters": {
+          "jsCode": "const merged = $input.first().json || {};\nconst aiInput = $('Prepare AI Input with Evidence').first().json || {};\nconst rawAi = $('Run Due Diligence AI Analysis').first().json || {};\nconst structured = rawAi.output && typeof rawAi.output === 'object' ? rawAi.output : rawAi;\nconst companyProfile = structured.company_profile && typeof structured.company_profile === 'object' ? structured.company_profile : {};\nconst financials = structured.financials && typeof structured.financials === 'object' ? structured.financials : {};\nconst analysis = structured.analysis && typeof structured.analysis === 'object' ? structured.analysis : {};\nconst margins = financials.margins && typeof financials.margins === 'object' ? financials.margins : {};\n\nconst revenueHistory = Array.isArray(financials.revenue_history)\n  ? financials.revenue_history.map((item) => ({\n      year: item?.year ?? null,\n      amount: item?.amount ?? null,\n      currency: item?.currency ?? null,\n    }))\n  : [];\n\nconst keyRisks = Array.isArray(analysis.key_risks)\n  ? analysis.key_risks.filter((risk) => risk !== null && risk !== undefined && String(risk).trim() !== '').map((risk) => String(risk))\n  : [];\n\nconst hasExternalEvidence = (aiInput.externalSourcesCount || 0) > 0 && aiInput.canonicalStatus !== 'reject';\nconst responseStatus = hasExternalEvidence ? 'success' : 'partial_success';\n\nreturn [{\n  json: {\n    success: true,\n    responseStatus,\n    dealId: aiInput.dealId || 'unknown',\n    fileName: merged.fileName || '',\n    publicUrl: merged.publicUrl || '',\n    output: {\n      company_profile: {\n        company_name: companyProfile.company_name ?? 'Not Available',\n        industry: companyProfile.industry ?? 'Not Available',\n        location: companyProfile.location ?? 'Not Available',\n        employee_count: companyProfile.employee_count ?? 'Not Available',\n      },\n      financials: {\n        revenue_history: revenueHistory,\n        ebitda: financials.ebitda ?? 'Not Available',\n        margins: {\n          ebitda_margin: margins.ebitda_margin ?? 'Not Available',\n        }\n      },\n      analysis: {\n        investment_thesis: analysis.investment_thesis ?? 'Not Available',\n        key_risks: keyRisks,\n        customer_concentration: analysis.customer_concentration ?? 'Not Available',\n      }\n    },\n    evidence: {\n      evidenceCoverage: hasExternalEvidence ? (aiInput.evidenceCoverage || 0) : 0,\n      externalSourcesCount: hasExternalEvidence ? (aiInput.externalSourcesCount || 0) : 0,\n      confidenceSummary: hasExternalEvidence ? (aiInput.confidenceSummary || 'low') : 'low',\n      canonicalStatus: aiInput.canonicalStatus || 'reject',\n      resolutionReason: aiInput.resolutionReason || 'no_valid_domain',\n      evidenceDisclaimer: aiInput.canonicalStatus === 'reject'\n        ? 'External website could not be confidently verified. Report uses internal document evidence only.'\n        : ((aiInput.evidenceCoverage || 0) < 0.4\n            ? 'External evidence coverage is limited. Validate manually for investment-critical decisions.'\n            : ''),\n    }\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "86681c72-ac7b-4a87-9dd9-cd4f93075832",
+        "name": "Pinecone Vector Store",
+        "type": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+        "position": [
+          3456,
+          -448
+        ],
+        "parameters": {
+          "mode": "retrieve-as-tool",
+          "options": {
+            "pineconeNamespace": "={{ $json.dealId }}"
+          },
+          "pineconeIndex": {
+            "__rl": true,
+            "mode": "list",
+            "value": "poc",
+            "cachedResultName": "poc"
+          },
+          "toolDescription": "Retrieve deal-specific parsed documents and validated external web evidence from Pinecone for the current deal namespace. Use this before answering company profile, financials, risks, customer concentration, and investment thesis questions."
+        },
+        "credentials": {
+          "pineconeApi": {
+            "id": "IX4WqaNzLmXgybyA",
+            "name": "w3khmuhtadin"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "0e0ddf23-c4da-4dc8-971a-e8a37ab68dfd",
+        "name": "Check Deal Namespace Cache",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -608,
+          -144
+        ],
+        "parameters": {
+          "jsCode": "const stats = $input.first().json;\n  const originalItems = $('Split Uploaded Files + Build Deal ID').all();\n  const dealId = originalItems[0]?.json?.dealId;\n\n  if (stats.error || !stats.namespaces || typeof stats.namespaces !== 'object') {\n    return originalItems.map(item => ({\n      json: {\n        ...item.json,\n        cacheHit: false,\n        cacheStatus: 'unknown',\n        cacheReason: stats.error || 'namespace lookup unavailable'\n      },\n      binary: item.binary\n    }));\n  }\n\n  const namespaceExists = stats.namespaces && stats.namespaces[dealId];\n  const vectorCount = namespaceExists ? stats.namespaces[dealId].vectorCount : 0;\n\n  if (vectorCount > 0) {\n    return [{\n      json: {\n        dealId: dealId,\n        cacheHit: true,\n        cacheStatus: 'hit',\n        vectorCount: vectorCount,\n        message: `Cache HIT: ${vectorCount} vectors found`\n      }\n    }];\n  }\n\n  return originalItems.map(item => ({\n    json: {\n      ...item.json,\n      cacheHit: false,\n      cacheStatus: 'miss'\n    },\n    binary: item.binary\n  }));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "cf5b5a13-cf0f-41af-bd6f-f8e4848d0e61",
+        "name": "Decodo Search Official Site",
+        "type": "@decodo/n8n-nodes-decodo.decodo",
+        "position": [
+          464,
+          -624
+        ],
+        "parameters": {
+          "geo": "={{ $json.searchCountryCode || \"us\" }}",
+          "query": "={{ $json.searchQuery || $json.fallbackSearchQuery || $json.companyNameGuess }}",
+          "locale": "={{ $json.searchLocale || \"en-US\" }}",
+          "operation": "google_search"
+        },
+        "credentials": {
+          "decodoApi": {
+            "id": "um6rsqlbtrY3NRQB",
+            "name": "cm@g.com"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "db8edcb6-78e1-488d-81b7-896391bc4e64",
+        "name": "Canonical Domain Acceptable?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1424,
+          -576
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "canonical-accept",
+                "operator": {
+                  "name": "filter.operator.notEquals",
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{ $json.canonicalStatus }}",
+                "rightValue": "reject"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "dabddbd9-abb7-4a16-be47-5dd4556f7b52",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1888,
+          -944
+        ],
+        "parameters": {
+          "width": 500,
+          "height": 750,
+          "content": "## Due Diligence AI: Ingest, Enrich & Report\n\n### How it works\n1. Receive uploaded deal files via webhook, split multiple files, and generate a unified dealId.\n2. Parse documents with LlamaParse, normalize text, create embeddings and upsert content chunks into a Pinecone namespace for the deal.\n3. Derive a company seed from filenames, run web searches and domain verification, then scrape profile and risk pages to collect external evidence and index it in Pinecone.\n4. Run the AI due-diligence agent (OpenAI) that queries Pinecone for internal documents + external evidence, synthesizes company profile, financial history, risks, customer concentration and an investment thesis.\n5. Render a structured JSON analysis and a styled HTML report, convert to PDF, upload the PDF to S3, and return a public report URL in the webhook response.\n\n### Setup\n- [ ] Add LlamaParse / LlamaIndex API key (HTTP header auth)\n- [ ] Connect OpenAI API key for embeddings and the analysis model\n- [ ] Configure Pinecone credentials and ensure index \"poc\" exists\n- [ ] Add Decodo (or web-scrape) API credentials for domain verification and scraping\n- [ ] Configure S3 credentials and target bucket for report uploads\n- [ ] Expose the webhook URL publicly and test a sample file upload\n- [ ] (Optional) Verify Pinecone namespace retention and index quotas for large deals\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "07eba514-18bf-415d-b614-29ace85f506c",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1344,
+          -288
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1104,
+          "height": 464,
+          "content": "## Intake + Cache Check\nReceives file uploads, splits them into per-file items, builds a deal ID, and checks if this deal was already ingested."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "12e033ad-8171-4ec2-bc4d-bec47b06191a",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -224,
+          -288
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1792,
+          "height": 464,
+          "content": "## Parse Documents + Store Vectors\nUploads each file for parsing, polls until ready, normalizes the extracted text, then embeds and stores chunks for later retrieval."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bfc0f03b-fbfd-4cbe-86e8-0f05fcd886bd",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -224,
+          -768
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1792,
+          "height": 464,
+          "content": "## Find + Validate Official Website\nInfers a company name from filenames, searches for the official domain, verifies candidates, and picks the best canonical site to use for enrichment."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "40b9aaf2-bd33-4822-9f67-c773e2ee1c79",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1584,
+          -720
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1664,
+          "height": 784,
+          "content": "## Scrape External Evidence + Index It\nScrapes key pages from the selected site, tags the content as profile or risk evidence, measures coverage, and stores the web evidence for the deal"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "29be529a-b062-4fa6-be07-9ffe83d7a0ee",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3280,
+          -720
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1792,
+          "height": 784,
+          "content": "## AI Due Diligence + Report Delivery\nQueries the deal knowledge base, generates a structured diligence summary, builds a PDF report, uploads it, and returns the report link and key fields via API."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "23cf1626-33c9-4c0e-9c52-eb80f2698355",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1344,
+          -944
+        ],
+        "parameters": {
+          "color": "#FF99F1",
+          "width": 1028,
+          "height": 638,
+          "content": "![M&A Decodo Home](https://raw.githubusercontent.com/khmuhtadin/n8n-template/main/M%26A%20Decodo/home.png)"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {
+      "Receive Upload Request": [
+        {
+          "json": {
+            "body": {
+              "filenames": "[\"NorthStar_CIM_Jan2026.docx\"]"
+            },
+            "query": {},
+            "params": {},
+            "headers": {
+              "host": "n8n.khmuhtadin.com",
+              "accept": "*/*",
+              "cf-ray": "9dd498aecb109f6e-SIN",
+              "origin": "https://m-a-decodo.contactmuhtadin.workers.dev",
+              "referer": "https://m-a-decodo.contactmuhtadin.workers.dev/",
+              "sec-gpc": "1",
+              "cdn-loop": "cloudflare; loops=1",
+              "priority": "u=1, i",
+              "sec-ch-ua": "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Brave\";v=\"146\"",
+              "cf-visitor": "{\"scheme\":\"https\"}",
+              "connection": "keep-alive",
+              "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+              "cf-ipcountry": "SG",
+              "content-type": "multipart/form-data; boundary=----WebKitFormBoundaryPT3IWgakaaHnmjjq",
+              "cf-warp-tag-id": "1d1b862f-52a7-49d0-bc95-6bcd126f59bb",
+              "content-length": "31352",
+              "sec-fetch-dest": "empty",
+              "sec-fetch-mode": "cors",
+              "sec-fetch-site": "cross-site",
+              "accept-encoding": "gzip, br",
+              "accept-language": "en-US,en;q=0.8",
+              "x-forwarded-for": "2a09:bac5:55fa:137d::1f1:1e9",
+              "cf-connecting-ip": "2a09:bac5:55fa:137d::1f1:1e9",
+              "sec-ch-ua-mobile": "?0",
+              "x-forwarded-proto": "https",
+              "sec-ch-ua-platform": "\"macOS\""
+            },
+            "webhookUrl": "https://n8n.khmuhtadin.com/webhook/m-a-decodo",
+            "executionMode": "production"
+          },
+          "binary": {
+            "data": {
+              "id": "filesystem-v2:workflows/xdh3Ffr5asrTbRIQ/executions/temp/binary_data/7b1c024a-c850-4223-9613-1a9f91637b1c",
+              "data": "filesystem-v2",
+              "bytes": 30965,
+              "fileName": "NorthStar_CIM_Jan2026.docx",
+              "fileSize": "31 kB",
+              "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              "fileExtension": "docx"
+            }
+          },
+          "pairedItem": {
+            "item": 0
+          }
+        }
+      ]
+    },
+    "connections": {
+      "Cache Hit?": {
+        "main": [
+          [
+            {
+              "node": "Prepare Analysis Context",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Iterate Files for Parsing",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Profile Page?": {
+        "main": [
+          [
+            {
+              "node": "Decodo Scrape Company Profile",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Decodo Scrape Commercial and Risk",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Score Domain Match": {
+        "main": [
+          [
+            {
+              "node": "Iterate Domain Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Derive Company Seed": {
+        "main": [
+          [
+            {
+              "node": "Decodo Search Official Site",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Render PDF from HTML": {
+        "main": [
+          [
+            {
+              "node": "Convert PDF Base64 to Binary File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Collect Domain Scores": {
+        "main": [
+          [
+            {
+              "node": "Select Canonical Domain",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pinecone Vector Store": {
+        "ai_tool": [
+          [
+            {
+              "node": "Run Due Diligence AI Analysis",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Render DD Report HTML": {
+        "main": [
+          [
+            {
+              "node": "Render PDF from HTML",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has External Evidence?": {
+        "main": [
+          [
+            {
+              "node": "Upsert External Evidence to Pinecone",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Prepare AI Input with Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Receive Upload Request": {
+        "main": [
+          [
+            {
+              "node": "Split Uploaded Files + Build Deal ID",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Domain Candidates": {
+        "main": [
+          [
+            {
+              "node": "Iterate Domain Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Public Report URL": {
+        "main": [
+          [
+            {
+              "node": " Merge Analysis + Report URL",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Iterate Enrichment URLs": {
+        "main": [
+          [
+            {
+              "node": "Collect External Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Profile Page?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Retrieve Parsed Content": {
+        "main": [
+          [
+            {
+              "node": "Normalize Parsed Text Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Select Canonical Domain": {
+        "main": [
+          [
+            {
+              "node": "Canonical Domain Acceptable?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Report PDF to S3": {
+        "main": [
+          [
+            {
+              "node": "Build Public Report URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Wait 10s Before Recheck": {
+        "main": [
+          [
+            {
+              "node": "Check LlamaParse Job Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Pinecone Index Stats": {
+        "main": [
+          [
+            {
+              "node": "Check Deal Namespace Cache",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Parsing Job Complete?": {
+        "main": [
+          [
+            {
+              "node": "Retrieve Parsed Content",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Wait 10s Before Recheck",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Analysis Context": {
+        "main": [
+          [
+            {
+              "node": "Derive Company Seed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare S3 File Metadata": {
+        "main": [
+          [
+            {
+              "node": "Upload Report PDF to S3",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Collect External Evidence": {
+        "main": [
+          [
+            {
+              "node": "Evidence Coverage Metrics",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Collect Ingested Deal IDs": {
+        "main": [
+          [
+            {
+              "node": "Prepare Analysis Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Evidence Coverage Metrics": {
+        "main": [
+          [
+            {
+              "node": "Has External Evidence?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Iterate Domain Candidates": {
+        "main": [
+          [
+            {
+              "node": "Collect Domain Scores",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Decodo Verify Official Domain",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Iterate Files for Parsing": {
+        "main": [
+          [
+            {
+              "node": "Collect Ingested Deal IDs",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Upload File to LlamaParse",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload File to LlamaParse": {
+        "main": [
+          [
+            {
+              "node": "Check LlamaParse Job Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upsert Chunks to Pinecone": {
+        "main": [
+          [
+            {
+              "node": "Iterate Files for Parsing",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Deal Namespace Cache": {
+        "main": [
+          [
+            {
+              "node": "Cache Hit?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      " OpenAI Chat Model (5-mini)": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Run Due Diligence AI Analysis",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check LlamaParse Job Status": {
+        "main": [
+          [
+            {
+              "node": "Is Parsing Job Complete?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decodo Search Official Site": {
+        "main": [
+          [
+            {
+              "node": "Build Domain Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize External Evidence": {
+        "main": [
+          [
+            {
+              "node": "Iterate Enrichment URLs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      " Merge Analysis + Report URL": {
+        "main": [
+          [
+            {
+              "node": "Prepare API Response Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Augment Report with Evidence": {
+        "main": [
+          [
+            {
+              "node": "Render DD Report HTML",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Canonical Domain Acceptable?": {
+        "main": [
+          [
+            {
+              "node": "Iterate Enrichment URLs",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Prepare AI Input with Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Embeddings (Ingest)": {
+        "ai_embedding": [
+          [
+            {
+              "node": "Upsert Chunks to Pinecone",
+              "type": "ai_embedding",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare API Response Payload": {
+        "main": [
+          [
+            {
+              "node": "Return API Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Parsed Text Document": {
+        "ai_document": [
+          [
+            {
+              "node": "Upsert Chunks to Pinecone",
+              "type": "ai_document",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decodo Scrape Company Profile": {
+        "main": [
+          [
+            {
+              "node": "Normalize External Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decodo Verify Official Domain": {
+        "main": [
+          [
+            {
+              "node": "Score Domain Match",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Map Analysis to Report Fields": {
+        "main": [
+          [
+            {
+              "node": "Augment Report with Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Parsed Text Payload": {
+        "main": [
+          [
+            {
+              "node": "Upsert Chunks to Pinecone",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Run Due Diligence AI Analysis": {
+        "main": [
+          [
+            {
+              "node": "Map Analysis to Report Fields",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": " Merge Analysis + Report URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Embeddings (External)": {
+        "ai_embedding": [
+          [
+            {
+              "node": "Upsert External Evidence to Pinecone",
+              "type": "ai_embedding",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Structured Analysis JSON": {
+        "ai_outputParser": [
+          [
+            {
+              "node": "Run Due Diligence AI Analysis",
+              "type": "ai_outputParser",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare AI Input with Evidence": {
+        "main": [
+          [
+            {
+              "node": "Run Due Diligence AI Analysis",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      " Generate Embeddings (Retrieval)": {
+        "ai_embedding": [
+          [
+            {
+              "node": "Pinecone Vector Store",
+              "type": "ai_embedding",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Convert PDF Base64 to Binary File": {
+        "main": [
+          [
+            {
+              "node": "Prepare S3 File Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decodo Scrape Commercial and Risk": {
+        "main": [
+          [
+            {
+              "node": "Normalize External Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare External Evidence Document": {
+        "ai_document": [
+          [
+            {
+              "node": "Upsert External Evidence to Pinecone",
+              "type": "ai_document",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Uploaded Files + Build Deal ID": {
+        "main": [
+          [
+            {
+              "node": "Get Pinecone Index Stats",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upsert External Evidence to Pinecone": {
+        "main": [
+          [
+            {
+              "node": "Prepare AI Input with Evidence",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 61,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 5
+      },
+      "n8n-nodes-base.s3": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 16
+      },
+      "n8n-nodes-base.html": {
+        "count": 1
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.aggregate": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 4
+      },
+      "n8n-nodes-base.convertToFile": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 3
+      },
+      "n8n-nodes-puppeteer.puppeteer": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "@decodo/n8n-nodes-decodo.decodo": {
+        "count": 4
+      },
+      "n8n-nodes-base.respondToWebhook": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.embeddingsOpenAi": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.vectorStorePinecone": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.outputParserStructured": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.documentDefaultDataLoader": {
+        "count": 2
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Khairul Muhtadin",
+    "username": "khmuhtadin",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://khmuhtadin.com"
+    ],
+    "avatar": "https://gravatar.com/avatar/eb5ab777f1b9a8ec3306fff57cf9c4d1f68c9460212cd1181f6c7cd7ab98530e?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 365,
+      "icon": "file:s3.png",
+      "name": "n8n-nodes-base.s3",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.s3/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/s3/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "S3"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADwAAAA8CAMAAAANIilAAAABDlBMVEUAAAATbrMSbbQTbbQSbbQTbrQTbrQUbrQTbrQSbrQTbbQSbbQSbbQTbrMSbbQTbrQTbrQTbbQSbbMTbbQSbbQSbbQSbbQTbrQTbbQTbrQSbrQSbrQSbbQSbbMTbrQUbrQTbbMSbbQSbbQSbbQTbLQTbbQTbbQTbrQSbbQTbbQSbbQTbrQTbrQTbbQSbbQSbbQOarITbbQUbrT///8KaLEQa7MNarISbbN3q9MFZa+81uqfxOFyqNIbc7cUbrWNudsvf7wkd7m10ehin81IjsUIZ7H7/f71+fzw9vvd6vTE2+x9r9VrpNBVlslOksfR4vCnyeORu9uCsdc+iMI8h8Ho8PfL4O+ry+SSvNxnoc6vyMA5AAAAMnRSTlMACARbK/r177Z20ZlGk1HYxb9oYiQVEPfyy41LHBnr6KtlQTsvDOPeraKBem43Hob+sqyldq4AAALoSURBVEjH7ZbndqJAFICHKh1EsPfek4ygbjZuYkmvm+3v/yILKgITiPhrz9mT7989zuctDlfAB/8QLE9WCTbbOVE4uVkqFktNmVNOOlmWqJJ5DITTqKkiI9MwBFpmRLXWCDJxgedicC8xjhdwtFqCg5HJEL769TY8iLbuunkeHghf2MmkcqiskO6wJPowNy15hyZkDnEzgkfFk9a4mVI0s8RYw066mZNEzu68wiuxPb+ywlfsbnNE0lN1WtTW30IKfZHhYimK8joUlYpxjNgXyLWj8Wlv3ck0pMuEhm27wAr1qkSofdairxJStV7AtnViGlGmYTrpbToOLYpMNlHLg1DytUSWKU6sk3HfDc3uumpl2mIvkauRQ72BWTT0IVnLJXpiO9PaTeQIeJGgBdJmiqbTaZpO2QNAkHxy/aBbQtd9sn7YJdGBjw5EMD45jN/IHeCHhQhP99MN9ysTIrCILCFDmXweOfw2EDclIbLWCpXPUbmlAQQluqwAFD66zAOURHQ5AVBIKqpMkQAFa0aVmxh4QzmqXAZvYcPkr4jMBsgC9DG9O91w94DcTyFA1pAF+MUBXYBagNyIw0jEA/8nxWiyCIJQvU+jGSqrgXJ1s6JMczW9X859UzIn7uquBsq6DC2O5y83o9HV86Nrm7PlfFeJrINAmPXBxWjNzcrYtfF0tdwFDAjmyPrs8mG0ZTHbZVuMnmcTZOuiSHZzL458893YJn60ojMndS5ELtBW1acjh9XltuM7K7jdTpAuhMg4B034y3Gv7cxuI6+biMNBCLx19MyRTzc9j+c/1+HtxRjdIug2ceu+ftykMqa+hysRKg8oy75YXNmJlnYiO/zhtPHNqoQahMp52a5z9vR6/ufCgFt5erZhastyPlTGy+vzxrFpuPdr7LDeIjgIpQv30AXhDON7nuUheAesEi+GmcV4BQPvg9crWYaLoS/KTLZSx0EUsAI5yBEq2+t2e6xK5AZkAQP/D38B/zR2KYIltgQAAAAASUVORK5CYII="
+      },
+      "displayName": "S3",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 535,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.respondToWebhook",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.respondtowebhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Respond to Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Respond to Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 842,
+      "icon": "file:html.svg",
+      "name": "n8n-nodes-base.html",
+      "codex": {
+        "data": {
+          "alias": [
+            "extract",
+            "template",
+            "table"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.html/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "HTML"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTguNjQwNjIgMEgxMC40Mzc1VjEuNzgxMjVIMTIuMDkzN1YwSDEzLjg5MDZWNS4zOTA2MkgxMi4wOTM3VjMuNTkzNzVIMTAuNDUzMVY1LjM5MDYySDguNjQwNjJNMTYuMjY1NiAxLjc5Njg3SDE0LjY3OTdWMEgxOS42NTYyVjEuNzk2ODdIMTguMDYyNVY1LjM5MDYySDE2LjI2NTZNMjAuNDQ1MyAwSDIyLjMyODFMMjMuNDg0NCAxLjg5ODQ0TDI0LjY0MDYgMEgyNi41MjM0VjUuMzkwNjJIMjQuNzI2NlYyLjcxODc1TDIzLjQ2ODcgNC42NTYyNUwyMi4yMTA5IDIuNzE4NzVWNS4zOTA2MkgyMC40NDUzTTI3LjQxNDEgMEgyOS4yMTA5VjMuNjA5MzdIMzEuNzU3OFY1LjM5MDYySDI3LjQxNDEiIGZpbGw9ImJsYWNrIi8+CjxwYXRoIGQ9Ik04LjU3ODEyIDM2Ljc5NjlMNiA3Ljg1OTM4SDM0LjM0MzdMMzEuNzY1NiAzNi43ODEyTDIwLjE0ODQgNDAiIGZpbGw9IiNFNDREMjYiLz4KPHBhdGggZD0iTTIwLjE3MTkgMzcuNTM5MVYxMC4yMzQ0SDMxLjc1NzhMMjkuNTQ2OSAzNC45MjE5IiBmaWxsPSIjRjE2NTI5Ii8+CjxwYXRoIGQ9Ik0xMS4yNjU2IDEzLjc3MzRIMjAuMTcxOVYxNy4zMjAzSDE1LjE1NjJMMTUuNDg0NCAyMC45NTMxSDIwLjE3MTlWMjQuNDkyMkgxMi4yMzQ0TTEyLjM5MDYgMjYuMjczNEgxNS45NTMxTDE2LjIwMzEgMjkuMTA5NEwyMC4xNzE5IDMwLjE3MTlWMzMuODc1TDEyLjg5MDYgMzEuODQzNyIgZmlsbD0iI0VCRUJFQiIvPgo8cGF0aCBkPSJNMjkuMDQ2OSAxMy43NzM0SDIwLjE1NjJWMTcuMzIwM0gyOC43MTg3TTI4LjM5ODQgMjAuOTUzMUgyMC4xNTYyVjI0LjVIMjQuNTMxMkwyNC4xMTcyIDI5LjEwOTRMMjAuMTU2MiAzMC4xNzE5VjMzLjg1OTRMMjcuNDIxOSAzMS44NDM3IiBmaWxsPSJ3aGl0ZSIvPgo8L3N2Zz4K"
+      },
+      "displayName": "HTML",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1141,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.embeddingsopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Embeddings"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Embeddings OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Embeddings OpenAI",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1179,
+      "icon": "fa:code",
+      "name": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "codex": {
+        "data": {
+          "alias": [
+            "json",
+            "zod"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.outputparserstructured/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Output Parsers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Structured Output Parser"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Structured Output Parser",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1230,
+      "icon": "file:pinecone.svg",
+      "name": "@n8n/n8n-nodes-langchain.vectorStorePinecone",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.vectorstorepinecone/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Vector Stores",
+              "Tools",
+              "Root Nodes"
+            ],
+            "Tools": [
+              "Other Tools"
+            ],
+            "Vector Stores": [
+              "Other Vector Stores"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Pinecone Vector Store"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzUiIHZpZXdCb3g9IjAgMCAzMiAzNSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEzLjg1NTUgMzQuMjk2MkMxNC45MzI1IDM0LjI5NjIgMTUuODA1NSAzMy40NDUxIDE1LjgwNTUgMzIuMzk1NEMxNS44MDU1IDMxLjM0NTYgMTQuOTMyNSAzMC40OTQ2IDEzLjg1NTUgMzAuNDk0NkMxMi43Nzg2IDMwLjQ5NDYgMTEuOTA1NSAzMS4zNDU2IDExLjkwNTUgMzIuMzk1NEMxMS45MDU1IDMzLjQ0NTEgMTIuNzc4NiAzNC4yOTYyIDEzLjg1NTUgMzQuMjk2MloiIGZpbGw9ImJsYWNrIi8+CjxwYXRoIGQ9Ik0xOC40MTM4IDcuMTk2NzVMMTkuMjUxMiAyLjY2MDA1IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMTE3ODYiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiLz4KPHBhdGggZD0iTTIyLjI2NTYgNS41ODU1TDE5LjM0NjYgMi4xMTA5OUwxNS4zNzQ4IDQuMzcyOTIiIHN0cm9rZT0iYmxhY2siIHN0cm9rZS13aWR0aD0iMi4xMTc4NiIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8cGF0aCBkPSJNMTQuOTIwMiAyNi41NTI4TDE1LjczMzcgMjIuMDE2OSIgc3Ryb2tlPSJibGFjayIgc3Ryb2tlLXdpZHRoPSIyLjExNzg2IiBzdHJva2UtbGluZWNhcD0ic3F1YXJlIi8+CjxwYXRoIGQ9Ik0xOC43NzI5IDI0LjkzMDRMMTUuODMgMjEuNDY3MUwxMS44NzAxIDIzLjc0MSIgc3Ryb2tlPSJibGFjayIgc3Ryb2tlLXdpZHRoPSIyLjExNzg2IiBzdHJva2UtbGluZWNhcD0ic3F1YXJlIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjxwYXRoIGQ9Ik0xNi42MDc3IDE3LjE5OTZMMTcuNDIxMiAxMi42NjMzIiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMTE3ODYiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiLz4KPHBhdGggZD0iTTIwLjQ1ODcgMTUuNThMMTcuNTI3NyAxMi4xMjhMMTMuNTY3OSAxNC4zOTA0IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMTE3ODYiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPHBhdGggZD0iTTguMzI4NzEgMjYuMTU1NEw0Ljc1MTcxIDI4LjU4MTUiIHN0cm9rZT0iYmxhY2siIHN0cm9rZS13aWR0aD0iMi4wMTAxNyIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSIvPgo8cGF0aCBkPSJNOC41NDM4MyAzMC4wODY1TDQuMzIwOCAyOC44NzM4TDQuNjMxODUgMjQuNTk0NCIgc3Ryb2tlPSJibGFjayIgc3Ryb2tlLXdpZHRoPSIyLjAxMDE3IiBzdHJva2UtbGluZWNhcD0ic3F1YXJlIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjxwYXRoIGQ9Ik0yMS4zMjEzIDI4LjQyOTlMMjMuODA5NiAzMS45MjgyIiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMDEwMTciIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiLz4KPHBhdGggZD0iTTE5LjcxOCAzMi4wNDVMMjQuMTA4NSAzMi4zMzY1TDI1LjM1MjcgMjguMjQzOCIgc3Ryb2tlPSJibGFjayIgc3Ryb2tlLXdpZHRoPSIyLjAxMDE3IiBzdHJva2UtbGluZWNhcD0ic3F1YXJlIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjxwYXRoIGQ9Ik0yNS4zOTk5IDIxLjMyOTFMMjkuNzc4NCAyMi4wOTk2IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMDU4MDQiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiLz4KPHBhdGggZD0iTTI2LjkwNzIgMjUuMDcyTDMwLjMwNDggMjIuMTkxOUwyOC4xNjM0IDE4LjM1NTciIHN0cm9rZT0iYmxhY2siIHN0cm9rZS13aWR0aD0iMi4wNTgwNCIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8cGF0aCBkPSJNMjQuMTE5NiAxMi44NjE1TDI4LjAxOTcgMTAuNzYzIiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMDU4MDQiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiLz4KPHBhdGggZD0iTTI0LjMzNTcgOC44Mzk2NUwyOC40ODY5IDEwLjUxODhMMjcuNzA5MyAxNC44MjE2IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMDU4MDQiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPHBhdGggZD0iTTYuOTE2MzkgMTguMTU3MkwyLjUyNTg4IDE3LjQxMDEiIHN0cm9rZT0iYmxhY2siIHN0cm9rZS13aWR0aD0iMi4wNTgwNCIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSIvPgo8cGF0aCBkPSJNNC4xNzczMSAyMS4xNjQ1TDIgMTcuMzI4TDUuMzYxNjcgMTQuNDM2IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIuMDU4MDQiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KPHBhdGggZD0iTTExLjA3OTkgMTAuNjEyOUw4LjE0ODkzIDcuMzQ3NjkiIHN0cm9rZT0iYmxhY2siIHN0cm9rZS13aWR0aD0iMi4wNTgwNCIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSIvPgo8cGF0aCBkPSJNMTIuMjg5NyA2Ljc3NDk2TDcuODAzNDkgNi45NjE1Nkw3LjAxMzkyIDExLjI2NDkiIHN0cm9rZT0iYmxhY2siIHN0cm9rZS13aWR0aD0iMi4wNTgwNCIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L3N2Zz4K"
+      },
+      "displayName": "Pinecone Vector Store",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1234,
+      "icon": "file:convertToFile.svg",
+      "name": "n8n-nodes-base.convertToFile",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Spreadsheet",
+            "Excel",
+            "xls",
+            "xlsx",
+            "ods",
+            "tabular",
+            "encode",
+            "encoding",
+            "Move Binary Data",
+            "Binary",
+            "File",
+            "JSON",
+            "HTML",
+            "ICS",
+            "iCal",
+            "RTF",
+            "64",
+            "Base64"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.converttofile/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Files",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Convert to File"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEzLjc2MTkgMkMxMy4yNDM3IDIgMTIuODIzNiAyLjQyMDA5IDEyLjgyMzYgMi45MzgzMVYxNS4yNTI2QzEzLjMxOTkgMTUuNDY0MyAxMy43ODUxIDE1Ljc3MiAxNC4xOTEgMTYuMTc1N0wyMS4yMjgzIDIzLjE3MzlDMjIuMDU0OCAyMy45OTU4IDIyLjUxOTUgMjUuMTEzMiAyMi41MTk1IDI2LjI3ODhDMjIuNTE5NSAyNy40NDQzIDIyLjA1NDggMjguNTYxOCAyMS4yMjgzIDI5LjM4MzdMMTQuMTkxIDM2LjM4MTlDMTMuNzg1IDM2Ljc4NTYgMTMuMzE5OSAzNy4wOTMyIDEyLjgyMzYgMzcuMzA1VjM3LjM1MjdDMTIuODIzNiAzNy44NzA5IDEzLjI0MzcgMzguMjkxIDEzLjc2MTkgMzguMjkxSDM5LjA2MTdDMzkuNTc5OSAzOC4yOTEgNDAgMzcuODcwOSA0MCAzNy4zNTI3TDQwIDE1Ljc5NEgyNy4xNDQzQzI2LjYyNjEgMTUuNzk0IDI2LjIwNiAxNS4zNzM5IDI2LjIwNiAxNC44NTU3VjJIMTMuNzYxOVoiIGZpbGw9IiMzQTQyRTkiLz4KPHBhdGggZD0iTTI4Ljg2NDUgMkMyOC43NzgxIDIgMjguNzA4MSAyLjA3MDAyIDI4LjcwODEgMi4xNTYzOVYxMi44MjI3QzI4LjcwODEgMTMuMDgxOCAyOC45MTgyIDEzLjI5MTkgMjkuMTc3MyAxMy4yOTE5SDM5Ljg0MzZDMzkuOTMgMTMuMjkxOSA0MCAxMy4yMjE5IDQwIDEzLjEzNTVMNDAgMTIuNjI2M0M0MCAxMi4zNzc4IDM5LjkwMTQgMTIuMTM5NSAzOS43MjYgMTEuOTYzNkwzMC4wNjEgMi4yNzU2MUMyOS44ODUgMi4wOTkxNiAyOS42NDYgMiAyOS4zOTY3IDJIMjguODY0NVoiIGZpbGw9IiMzQTQyRTkiLz4KPHBhdGggZD0iTTkuNzcyNjggMzQuNjAwM0M5LjA0MTg2IDMzLjg2NTQgOS4wNDUxNyAzMi42NzcyIDkuNzgwMDcgMzEuOTQ2NEwxMy42MzE1IDI4LjExNjNMMC45MzgzMTEgMjguMTE2M0MwLjQyMDA5NiAyOC4xMTYzIC0yLjI2NTE5ZS0wOCAyNy42OTYyIDAgMjcuMTc4TDguMjAyOTdlLTA4IDI1LjMwMTRDMS4wNDY4MmUtMDcgMjQuNzgzMiAwLjQyMDA5NSAyNC4zNjMxIDAuOTM4MzExIDI0LjM2MzFIMTMuNTUyOUw5Ljc4MDA3IDIwLjYxMTJDOS4wNDUxNyAxOS44ODA0IDkuMDQxODYgMTguNjkyMiA5Ljc3MjY4IDE3Ljk1NzNDMTAuNTAzNSAxNy4yMjI0IDExLjY5MTcgMTcuMjE5MSAxMi40MjY2IDE3Ljk0OTlMMTkuNDYzOSAyNC45NDgxQzE5LjgxODEgMjUuMzAwNCAyMC4wMTczIDI1Ljc3OTMgMjAuMDE3MyAyNi4yNzg4QzIwLjAxNzMgMjYuNzc4MyAxOS44MTgxIDI3LjI1NzIgMTkuNDYzOSAyNy42MDk1TDEyLjQyNjYgMzQuNjA3N0MxMS42OTE3IDM1LjMzODUgMTAuNTAzNSAzNS4zMzUyIDkuNzcyNjggMzQuNjAwM1oiIGZpbGw9IiMzQTQyRTkiLz4KPC9zdmc+Cg=="
+      },
+      "displayName": "Convert to File",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1236,
+      "icon": "file:aggregate.svg",
+      "name": "n8n-nodes-base.aggregate",
+      "codex": {
+        "data": {
+          "alias": [
+            "Aggregate",
+            "Combine",
+            "Flatten",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.aggregate/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Aggregate"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjRkY2RDVBIiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTMyIDE0OGMwLTYuNjI3IDUuMzczLTEyIDEyLTEyaDE0NmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJINDRjLTYuNjI3IDAtMTItNS4zNzMtMTItMTJ6bTAgOTZjMC02LjYyNyA1LjM3My0xMiAxMi0xMmgxNDZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnYyNGMwIDYuNjI3LTUuMzczIDEyLTEyIDEySDQ0Yy02LjYyNyAwLTEyLTUuMzczLTEyLTEyem0wIDk2YzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMTQ2YzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MjRjMCA2LjYyNy01LjM3MyAxMi0xMiAxMkg0NGMtNi42MjcgMC0xMi01LjM3My0xMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjxwYXRoIGQ9Ik03NCA3NmMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDExNi4yMTdjMTcuNjczIDAgMzIgMTQuMzI3IDMyIDMydjU2YzAgMjYuOTc4IDEwLjI3MiA1MS41NTcgMjcuMTE5IDcwLjAzOSA1LjA1NSA1LjU0NSA1LjA1NSAxNC4zNzcgMCAxOS45MjItMTYuODQ3IDE4LjQ4Mi0yNy4xMTkgNDMuMDYxLTI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMtMTQuMzI3IDMyLTMyIDMySDg2Yy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTE2LjIxN2M0NC4xODMgMCA4MC0zNS44MTcgODAtODB2LTU2YzAtMzAuOTI4IDI1LjA3Mi01NiA1Ni01NmE1Ljc4MyA1Ljc4MyAwIDAgMCA1Ljc4My01Ljc4M3YtMzYuNDM0YTUuNzgzIDUuNzgzIDAgMCAwLTUuNzgzLTUuNzgzYy0zMC45MjggMC01Ni0yNS4wNzItNTYtNTZ2LTU2YzAtNDQuMTgzLTM1LjgxNy04MC04MC04MEg4NmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0zNzYgMjQ0YzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMTEyYzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MjRjMCA2LjYyNy01LjM3MyAxMi0xMiAxMkgzODhjLTYuNjI3IDAtMTItNS4zNzMtMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48L2c+PGRlZnM+PGNsaXBQYXRoIGlkPSJhIj48cGF0aCBmaWxsPSIjZmZmIiBkPSJNMCAwaDUxMnY1MTJIMHoiLz48L2NsaXBQYXRoPjwvZGVmcz48L3N2Zz4="
+      },
+      "displayName": "Aggregate",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1243,
+      "icon": "file:binary.svg",
+      "name": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.documentdefaultdataloader/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Document Loaders"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Default Data Loader"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI3NjgiIGhlaWdodD0iMTAyNCI+PHBhdGggZmlsbD0iIzdEN0Q4NyIgZD0iTTAgOTYwVjY0aDU3NmwxOTIgMTkydjcwNHptNzA0LTY0MEw1MTIgMTI4SDY0djc2OGg2NDB6TTMyMCA1MTJIMTI4VjI1NmgxOTJ6bS02NC0xOTJoLTY0djEyOGg2NHptMCA0NDhoNjR2NjRIMTI4di02NGg2NFY2NDBoLTY0di02NGgxMjh6bTI1Ni0zMjBoNjR2NjRIMzg0di02NGg2NFYzMjBoLTY0di02NGgxMjh6bTY0IDM4NEgzODRWNTc2aDE5MnptLTY0LTE5MmgtNjR2MTI4aDY0eiIvPjwvc3ZnPg=="
+      },
+      "displayName": "Default Data Loader",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 35,
+      "name": "Document Extraction"
+    },
+    {
+      "id": 48,
+      "name": "AI RAG"
+    }
+  ],
+  "image": []
+}

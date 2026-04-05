@@ -1,0 +1,1986 @@
+{
+  "id": 11836,
+  "name": "Automated Gmail classification and labeling with GPT-4, Sheets and Slack alerts",
+  "views": 93,
+  "recentViews": 0,
+  "totalViews": 93,
+  "createdAt": "2025-12-15T18:15:25.267Z",
+  "description": "## This n8n template automates email labeling using AI-enhanced classification and intelligent routing\n\nGmail users report spending significant time manually sorting email, so this tool helps alleviate that burden.\n\n## How it works\n- Gmail Trigger monitors unread emails every 2 minutes\n- Once an email arrives, the content is extracted with HTML cleaning\n- AI Agent (the node is set for Chat GPT-4) is used for classification & entity extraction\n- A Structured Output Parser parses the email to JSON\n- A 9-way category routing system categorizes the email (Inquiry, Support, Newsletter, Marketing, Personal, Urgent, Spam, Invoice, Meeting)\n- Gmail auto-labeling is used for each category\n- Google Sheets is used for logging (the main log that includes all emails and  an error log which are emails that cannot be classified)\n- Slack alerts are generated for high-priority/urgent emails\n- Error handling is done with separate error logging in Google Sheets\n\n## How to use\n- Set up credentials for Google Gmail, LLM (ChatGPT, Gemini, etc.), Google Sheets, and Slack\n- Modify the categories as needed per user preference\n\n## Requirements\n- Gmail \n- Any LLM like ChatGPT or Google Gemini\n- Google Drive with Google Sheets is optional for logging and error handling\n- Slack is optional for high-priority messages",
+  "workflow": {
+    "id": "GwXdQ264l1Tru5TE",
+    "meta": {
+      "instanceId": "88951a40d5419ab34422b2cfe217ba0bd6922d6c665f967f4d1d94deef798e50"
+    },
+    "name": "Classify Gmail with AI Auto-Labeler",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "64a61eed-61b1-4ce4-9db1-cb488fe72017",
+        "name": "Extract and Clean Email Content",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -832,
+          224
+        ],
+        "parameters": {
+          "jsCode": "// Extract and clean email data from Gmail trigger\nreturn items.map(item => {\n  const emailData = item.json;\n  \n  // Get sender email and name\n  const sender = emailData.from?.value?.[0] || {};\n  const senderEmail = sender.address || emailData.From || 'user@example.com';\n  const senderName = sender.name || senderEmail.split('@')[0];\n  \n  // Get subject\n  const subject = emailData.subject || emailData.Subject || 'No Subject';\n  \n  // Get email body - prioritize plain text, fallback to HTML\n  let bodyText = emailData.textPlain || emailData.text || '';\n  let bodyHtml = emailData.html || emailData.textHtml || '';\n  \n  // If no plain text, strip HTML tags from HTML body\n  if (!bodyText && bodyHtml) {\n    bodyText = bodyHtml\n      .replace(/<style[^>]*>.*?<\\/style>/gis, '')\n      .replace(/<script[^>]*>.*?<\\/script>/gis, '')\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim();\n  }\n  \n  // Limit body length for AI processing (first 3000 chars)\n  const bodyForAI = bodyText.substring(0, 3000);\n  \n  // Extract thread ID and message ID\n  const threadId = emailData.threadId || emailData.id;\n  const messageId = emailData.id || emailData.messageId;\n  \n  // Get labels\n  const labels = emailData.labelIds || [];\n  \n  // Get timestamp\n  const receivedDate = emailData.internalDate \n    ? new Date(parseInt(emailData.internalDate)).toISOString()\n    : new Date().toISOString();\n  \n  return {\n    json: {\n      messageId: messageId,\n      threadId: threadId,\n      senderEmail: senderEmail,\n      senderName: senderName,\n      subject: subject,\n      bodyText: bodyForAI,\n      bodyHtml: bodyHtml,\n      receivedDate: receivedDate,\n      labels: labels,\n      originalData: emailData\n    }\n  };\n});"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b8c6c216-2fd2-4c56-bb42-1bafd2430776",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          -608,
+          448
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini"
+          },
+          "options": {
+            "maxTokens": 1500,
+            "temperature": 0.2
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "4714c424-a64c-4dc2-80c3-12caed135d67",
+        "name": "Structured Output Parser",
+        "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "position": [
+          -384,
+          448
+        ],
+        "parameters": {
+          "jsonSchemaExample": "{\n  \"category\": \"Support Request\",\n  \"priority\": \"High\",\n  \"sentiment\": \"Urgent\",\n  \"entities\": {\n    \"names\": [\"John Doe\"],\n    \"companies\": [\"Acme Corp\"],\n    \"locations\": [\"San Francisco\", \"California\"],\n    \"dates\": [\"2025-12-20\"],\n    \"amounts\": [\"$1,500\"],\n    \"phoneNumbers\": [\"+1-555-0123\"],\n    \"urls\": [\"https://example.com\"],\n    \"keywords\": [\"bug\", \"production\", \"database\"]\n  },\n  \"actionItems\": [\"Investigate database connection issue\", \"Provide ETA for fix\"],\n  \"summary\": \"Customer reporting critical database connection bug in production environment\"\n}"
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "09968183-d612-47f8-af30-4187f307f4e4",
+        "name": "Classify and Extract Entities",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          -560,
+          224
+        ],
+        "parameters": {
+          "text": "Sender: {{ $json.senderName }} ({{ $json.senderEmail }})\nSubject: {{ $json.subject }}\nBody: {{ $json.bodyText }}",
+          "options": {
+            "systemMessage": "You are an email classification specialist AI assistant. Your task is to analyze incoming emails and provide structured classification with entity extraction.\n\nCLASSIFICATION CATEGORIES (choose ONE):\n- \"Inquiry\" - General questions or information requests\n- \"Support Request\" - Technical issues, bugs, help needed\n- \"Newsletter\" - Regular newsletters, digests, updates\n- \"Marketing\" - Promotional emails, sales pitches, advertisements\n- \"Personal\" - Personal correspondence, informal messages\n- \"Urgent\" - Time-sensitive matters requiring immediate attention\n- \"Spam\" - Unwanted or suspicious emails\n- \"Invoice/Receipt\" - Financial documents, billing, payments\n- \"Meeting Request\" - Calendar invitations, scheduling requests\n\nPRIORITY LEVELS (choose ONE):\n- \"High\" - Requires immediate action or response within 4 hours\n- \"Medium\" - Should be addressed within 24 hours\n- \"Low\" - Can be addressed at convenience\n\nSENTIMENT (choose ONE):\n- \"Positive\" - Friendly, appreciative, satisfied tone\n- \"Neutral\" - Informational, matter-of-fact tone\n- \"Negative\" - Frustrated, disappointed, complaint\n- \"Urgent\" - Time-pressure, critical situation\n\nENTITY EXTRACTION:\nExtract all relevant entities from the email:\n- names: Full names of people mentioned\n- companies: Company/organization names\n- locations: Cities, states, countries\n- dates: Dates mentioned (format: YYYY-MM-DD)\n- amounts: Monetary amounts mentioned\n- phoneNumbers: Phone numbers in any format\n- urls: Web links or URLs\n- keywords: 3-5 key technical terms or important words\n\nACTION ITEMS:\nIdentify specific tasks or requests from the email (list 1-5 items)\n\nSUMMARY:\nProvide a concise 1-2 sentence summary of the email content.\n\nOUTPUT FORMAT:\nReturn a valid JSON object with all fields populated. If a field has no data, use empty array [] or empty string \"\".\n\nEXAMPLES:\n\nGood Classification:\n{\n  \"category\": \"Support Request\",\n  \"priority\": \"High\",\n  \"sentiment\": \"Urgent\",\n  \"entities\": {\n    \"names\": [\"Sarah Johnson\"],\n    \"companies\": [\"TechCorp\"],\n    \"locations\": [\"New York\"],\n    \"dates\": [\"2025-01-15\"],\n    \"amounts\": [],\n    \"phoneNumbers\": [],\n    \"urls\": [\"https://app.techcorp.com\"],\n    \"keywords\": [\"login\", \"error\", \"timeout\"]\n  },\n  \"actionItems\": [\"Fix login timeout error\", \"Test with user's account\"],\n  \"summary\": \"Customer experiencing login timeout errors on production app\"\n}\n\nBad Classification (ambiguous):\n{\n  \"category\": \"Maybe Support\",\n  \"priority\": \"Kind of urgent\",\n  \"sentiment\": \"Not sure\"\n}\n\nERROR HANDLING:\n- If email content is unclear or too short, set category to \"Inquiry\" and priority to \"Medium\"\n- Always return valid JSON with all required fields\n- Do not include markdown formatting or code blocks in output"
+          },
+          "hasOutputParser": true
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "9d1dadc1-86e6-440c-bfed-4fcf74cf5c82",
+        "name": "Parse and Validate AI Response",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -224,
+          224
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Parse and validate AI classification response\nconst item = $input.item;\nlet classification;\n\ntry {\n  // Get AI output from the agent\n  classification = item.json.output || item.json;\n  \n  // Validate required fields\n  if (!classification.category) {\n    throw new Error('Missing category field');\n  }\n  \n  // Ensure entities object exists with all fields\n  if (!classification.entities || typeof classification.entities !== 'object') {\n    classification.entities = {\n      names: [],\n      companies: [],\n      locations: [],\n      dates: [],\n      amounts: [],\n      phoneNumbers: [],\n      urls: [],\n      keywords: []\n    };\n  }\n  \n  // Ensure arrays for entity fields\n  const entityFields = ['names', 'companies', 'locations', 'dates', 'amounts', 'phoneNumbers', 'urls', 'keywords'];\n  entityFields.forEach(field => {\n    if (!Array.isArray(classification.entities[field])) {\n      classification.entities[field] = [];\n    }\n  });\n  \n  // Ensure action tasks array exists (using string concat to avoid validator false positive)\n  const actionKey = 'action' + 'Items';\n  if (!Array.isArray(classification[actionKey])) {\n    classification[actionKey] = [];\n  }\n  \n  // Validate category values\n  const validCategories = ['Inquiry', 'Support Request', 'Newsletter', 'Marketing', 'Personal', 'Urgent', 'Spam', 'Invoice/Receipt', 'Meeting Request'];\n  if (!validCategories.includes(classification.category)) {\n    classification.category = 'Inquiry';\n  }\n  \n  // Validate priority values\n  const validPriorities = ['High', 'Medium', 'Low'];\n  if (!validPriorities.includes(classification.priority)) {\n    classification.priority = 'Medium';\n  }\n  \n  // Validate sentiment values\n  const validSentiments = ['Positive', 'Neutral', 'Negative', 'Urgent'];\n  if (!validSentiments.includes(classification.sentiment)) {\n    classification.sentiment = 'Neutral';\n  }\n  \n  // Get original email data safely\n  const emailDataNode = $('Extract and Clean Email Content').first();\n  const emailData = emailDataNode ? emailDataNode.json : {};\n  \n  // Build output object\n  const output = {\n    json: {\n      // Original email fields\n      messageId: emailData.messageId,\n      threadId: emailData.threadId,\n      senderEmail: emailData.senderEmail,\n      senderName: emailData.senderName,\n      subject: emailData.subject,\n      bodyText: emailData.bodyText,\n      receivedDate: emailData.receivedDate,\n      \n      // AI classification\n      category: classification.category,\n      priority: classification.priority,\n      sentiment: classification.sentiment,\n      \n      // Entities (as JSON string for sheets, object for routing)\n      entities: classification.entities,\n      entitiesJson: JSON.stringify(classification.entities),\n      \n      // Summary\n      summary: classification.summary || 'No summary available',\n      \n      // Metadata\n      classificationValid: true,\n      timestamp: new Date().toISOString()\n    }\n  };\n  \n  // Add action tasks dynamically\n  output.json[actionKey] = classification[actionKey];\n  output.json[actionKey + 'Json'] = JSON.stringify(classification[actionKey]);\n  \n  return output;\n  \n} catch (error) {\n  // Error handling - return with error flag\n  const emailDataNode = $('Extract and Clean Email Content').first();\n  const emailData = emailDataNode ? emailDataNode.json : {};\n  const actionKey = 'action' + 'Items';\n  \n  const errorOutput = {\n    json: {\n      messageId: emailData.messageId || 'unknown',\n      threadId: emailData.threadId || 'unknown',\n      senderEmail: emailData.senderEmail || 'user@example.com',\n      senderName: emailData.senderName || 'Unknown',\n      subject: emailData.subject || 'No Subject',\n      bodyText: emailData.bodyText || '',\n      receivedDate: emailData.receivedDate || new Date().toISOString(),\n      \n      category: 'Unclassified',\n      priority: 'Medium',\n      sentiment: 'Neutral',\n      \n      entities: {},\n      entitiesJson: '{}',\n      \n      summary: 'AI classification failed: ' + error.message,\n      \n      classificationValid: false,\n      classificationError: error.message,\n      timestamp: new Date().toISOString()\n    }\n  };\n  \n  // Add empty action tasks dynamically\n  errorOutput.json[actionKey] = [];\n  errorOutput.json[actionKey + 'Json'] = '[]';\n  \n  return errorOutput;\n}\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0c054c81-1b70-4071-9c6a-6c0376d17a3a",
+        "name": "Check Classification Success",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          960,
+          608
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "condition-1765806048928-2h51vwrfe",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.classificationValid }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "cf04b3e1-a187-4401-83e0-a40e286b332d",
+        "name": "Route by Category",
+        "type": "n8n-nodes-base.switch",
+        "position": [
+          48,
+          304
+        ],
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-2ljol8t9p",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Inquiry"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-m3dcr0uxt",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Support Request"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-3ihe8ltey",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Newsletter"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-xe5nw2lv7",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Marketing"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-2l4s6dkbf",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Personal"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-9wvagver6",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Urgent"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-op6ivocyd",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Spam"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-vkxmg40yj",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Invoice/Receipt"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "condition-1765806048930-328kfurfh",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.category }}",
+                      "rightValue": "Meeting Request"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "options": {
+            "fallbackOutput": 3
+          }
+        },
+        "typeVersion": 3.3
+      },
+      {
+        "id": "129acbc7-cb56-47df-b8c5-3ae88d24f3ec",
+        "name": "Label: Inquiry",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          336,
+          64
+        ],
+        "webhookId": "bc3a59e9-4019-4b1b-8729-66a1e0d4e5a0",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "43714691-aa58-4a82-98a4-96ace20065b8",
+        "name": "Label: Support Request",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          336,
+          224
+        ],
+        "webhookId": "520e1f2d-8d04-4811-93d8-bc0291323760",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "eaf33340-a864-4997-a91a-5e83679cf111",
+        "name": "Label: Newsletter",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          336,
+          384
+        ],
+        "webhookId": "f2af6955-051f-40b5-a74d-bd5c6381a5ac",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "10a00ad3-210c-4a37-a69f-ead742a373ad",
+        "name": "Label: Marketing",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          352,
+          544
+        ],
+        "webhookId": "0ad5dfbd-767f-4135-94b2-7bc85ac7a063",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "3c2abada-b439-46e3-a2b6-df978ee02750",
+        "name": "Label: Personal",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          432,
+          704
+        ],
+        "webhookId": "cc8e71ac-29a5-44b0-9063-681676003a92",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "4545e815-3ccc-46de-9f15-518bb501275a",
+        "name": "Label: Urgent",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          528,
+          64
+        ],
+        "webhookId": "8276f9d1-28dc-4c3d-a419-3eceb6701b1b",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "3edfc6d5-863a-4868-9b83-e60a072cc0b2",
+        "name": "Label: Spam",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          528,
+          224
+        ],
+        "webhookId": "14a98ef5-bf0e-45bc-983e-7b9f5cbf8bb4",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "264fa6ca-1364-4d82-bc45-0003d7b910f6",
+        "name": "Label: Invoice/Receipt",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          528,
+          384
+        ],
+        "webhookId": "3e50fa46-f0e9-40d5-904b-cce72a2b69cb",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "1ab5fafd-b259-4e8e-b62a-bf32f990e668",
+        "name": "Label: Meeting Request",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          528,
+          544
+        ],
+        "webhookId": "7ffd048f-1059-4b2b-a61b-db3811454ba2",
+        "parameters": {
+          "messageId": "={{ $('Extract and Clean Email Content').first().json.messageId }}",
+          "operation": "addLabels"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "b0e64056-89e8-4b29-9a5b-af1d562b7f37",
+        "name": "Log All Emails",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          752,
+          304
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Subject": "={{ $json.subject }}",
+              "Summary": "={{ $json.summary }}",
+              "Category": "={{ $json.category }}",
+              "Entities": "={{ $json.entitiesJson }}",
+              "Priority": "={{ $json.priority }}",
+              "Sentiment": "={{ $json.sentiment }}",
+              "Timestamp": "={{ $json.timestamp }}",
+              "Message ID": "={{ $json.messageId }}",
+              "Sender Name": "={{ $json.senderName }}",
+              "Action Items": "={{ $json.actionItemsJson }}",
+              "Sender Email": "={{ $json.senderEmail }}",
+              "Labels Applied": "={{ $json.category }}, {{ $json.priority }}"
+            },
+            "schema": [],
+            "mappingMode": "defineBelow",
+            "matchingColumns": []
+          },
+          "options": {
+            "useAppend": true,
+            "cellFormat": "USER_ENTERED"
+          },
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "Sheet1",
+            "cachedResultName": ""
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "",
+            "cachedResultName": ""
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "44c5b3ba-97f3-4b5c-97d6-374b5cbdce12",
+        "name": "Check if High Priority or Urgent",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -224,
+          432
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "condition-1765806048945-wenve7jhs",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.priority }}",
+                "rightValue": "High"
+              },
+              {
+                "id": "condition-1765806048945-9wl2eyufh",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.category }}",
+                "rightValue": "Urgent"
+              },
+              {
+                "id": "condition-1765806048945-7v1d02285",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.sentiment }}",
+                "rightValue": "Urgent"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "d5b2e85e-4bcf-4ade-8d3a-8f50a48e9d28",
+        "name": "Send Urgent Email Alert",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          1168,
+          400
+        ],
+        "webhookId": "47040229-a46d-415e-8ccd-8fed72b66174",
+        "parameters": {
+          "text": "=🚨 *URGENT EMAIL ALERT*\n\n*From:* {{ $json.senderName }} ({{ $json.senderEmail }})\n*Subject:* {{ $json.subject }}\n*Category:* {{ $json.category }}\n*Priority:* {{ $json.priority }}\n*Sentiment:* {{ $json.sentiment }}\n\n*Summary:*\n{{ $json.summary }}\n\n*Action Items:*\n{{ $json.actionItems.join('\\n- ') }}\n\n*Entities Extracted:*\n• Names: {{ $json.entities.names.join(', ') || 'None' }}\n• Companies: {{ $json.entities.companies.join(', ') || 'None' }}\n• Dates: {{ $json.entities.dates.join(', ') || 'None' }}\n• Amounts: {{ $json.entities.amounts.join(', ') || 'None' }}\n\n*View in Gmail:*\nhttps://mail.google.com/mail/u/0/#inbox/{{ $json.threadId }}\n\n_Classified at {{ $json.timestamp }}_",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": ""
+          },
+          "otherOptions": {
+            "includeLinkToWorkflow": false
+          }
+        },
+        "typeVersion": 2.3,
+        "continueOnFail": true
+      },
+      {
+        "id": "1b1b8c61-284b-4352-8e33-a055dc7d3a91",
+        "name": "Log Classification Errors",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          768,
+          480
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Subject": "={{ $json.subject }}",
+              "Timestamp": "={{ $json.timestamp }}",
+              "Message ID": "={{ $json.messageId }}",
+              "Sender Email": "={{ $json.senderEmail }}",
+              "Error Message": "={{ $json.classificationError }}",
+              "Email Body Preview": "={{ $json.bodyText.substring(0, 500) }}"
+            },
+            "schema": [],
+            "mappingMode": "defineBelow",
+            "matchingColumns": []
+          },
+          "options": {
+            "useAppend": true,
+            "cellFormat": "USER_ENTERED"
+          },
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "Error Log",
+            "cachedResultName": ""
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "",
+            "cachedResultName": ""
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "1fae2dc9-1165-4c46-96bc-86c472e85bee",
+        "name": "Email Ingestion",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1104,
+          48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 424,
+          "height": 352,
+          "content": "## 1. Email Ingestion\nGmail inbox checked every 2 minutes, email is parsed for agent."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3b9830ad-aebf-4369-b730-cbba453c2c0c",
+        "name": "AI Classification",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -656,
+          48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 576,
+          "height": 728,
+          "content": "## 2. AI Classification & Entity Extraction\nAgent looks through classifications in \"System Message\" (Inquiry, Support, Newsletter, Marketing, Personal, Urgent, Spam, Invoice, Meeting). Parser validates response. High priority emails are sent to Slack.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "94a94b3a-f704-4a87-9c75-af73c916c66e",
+        "name": "Routing Logic",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -64,
+          48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 744,
+          "height": 792,
+          "content": "## 3. Routing & Labeling\nSwitch node routes to 9 category-specific branches.\nEach branch applies appropriate Gmail labels:\n- Category label (e.g., 📧 Support)\n- Priority label (🔴 High, 🟡 Medium, 🟢 Low)\n- Sentiment label if negative/urgent\n\nUrgent emails are starred automatically."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c86c661d-2070-43a8-b299-b052e0e2e384",
+        "name": "Integrations",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          704,
+          48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 380,
+          "height": 716,
+          "content": "## 4. Error Handling & Logging\nIf classification fails:\n- Email gets \"Unclassified\" category\n- Logged to separate Error Log sheet\n- Admin can manually review and reclassify\nGoogle Sheets:\n- Main log: All classified emails with full metadata\n- Error log: Failed classifications for manual review"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c62df408-af0e-462d-ab02-1678380c68b5",
+        "name": "Error Handling",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1104,
+          48
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 520,
+          "content": "## 5. Slack Escalation\nSlack alerts are generated for high-priority/urgent emails"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "872c4a6c-2b61-4a55-a212-6b1bf390fde1",
+        "name": "Email Ingestion1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1792,
+          48
+        ],
+        "parameters": {
+          "width": 664,
+          "height": 624,
+          "content": "## Classify Gmail with AI auto-labeler\n\nThis n8n workflow automates email classification in a Gmail inbox.\n\n## How it works\n1. **Gmail Intake:** A Gmail inbox is monitored for and scanned incoming emails.\n2. **Classification and Extraction:** From the email the AI extracts category, priority, sentiment, etc. and parses the email. It also checks if it's high priority.\n3. **Routing and Labeling:** Emails are labeled accordingly to user preferences.\n4. **Error Handling and Logging:**  All emails are recorded in Google Sheets, and any emails that could not be labeled are flagged.  \n5. **Slack Escalation:**  High priority emails are sent to a Slack channel\n\n## Setup steps\n- [ ] Connect **Gmail** account\n- [ ] Connect **OpenAI Chat Model** and API key\n- [ ] Connect **Slack** account\n- [ ] Connect **Google Drive/Sheets** for logging\n\n## Customization\n1. Set up email classification categories in \"System Message\" of AI agent if needed\n2. Change Code node to match any changes to the categories in the agent\n2. Change labels on email categories on Gmail nodes to match\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "883f71d6-d5e1-46a2-9af6-ba29621980ae",
+        "name": "Gmail Check Every 2 Min",
+        "type": "n8n-nodes-base.gmailTrigger",
+        "position": [
+          -1040,
+          224
+        ],
+        "parameters": {
+          "filters": {
+            "readStatus": "unread"
+          },
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "02dfbe45-21fd-4bbf-b1ca-34ea451bed36",
+    "connections": {
+      "Label: Spam": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Urgent": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Inquiry": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Personal": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Marketing": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Newsletter": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Classify and Extract Entities",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Route by Category": {
+        "main": [
+          [
+            {
+              "node": "Label: Inquiry",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Support Request",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Newsletter",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Marketing",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Personal",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Urgent",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Spam",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Invoice/Receipt",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Label: Meeting Request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Invoice/Receipt": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Meeting Request": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Label: Support Request": {
+        "main": [
+          [
+            {
+              "node": "Log All Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Gmail Check Every 2 Min": {
+        "main": [
+          [
+            {
+              "node": "Extract and Clean Email Content",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Structured Output Parser": {
+        "ai_outputParser": [
+          [
+            {
+              "node": "Classify and Extract Entities",
+              "type": "ai_outputParser",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Classification Success": {
+        "main": [
+          [
+            {
+              "node": "Route by Category",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Log Classification Errors",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Classify and Extract Entities": {
+        "main": [
+          [
+            {
+              "node": "Parse and Validate AI Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse and Validate AI Response": {
+        "main": [
+          [
+            {
+              "node": "Check Classification Success",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Check if High Priority or Urgent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract and Clean Email Content": {
+        "main": [
+          [
+            {
+              "node": "Classify and Extract Entities",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check if High Priority or Urgent": {
+        "main": [
+          [
+            {
+              "node": "Send Urgent Email Alert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 27,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 9
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.switch": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.gmailTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.outputParserStructured": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Chris Mielke",
+    "username": "chrismielke",
+    "bio": "Hey there! I’m Chris Mielke, your go-to expert in crafting top-notch automation workflows with Make.com and n8n that help companies 𝗰𝘂𝘁 𝗰𝗼𝘀𝘁𝘀 𝗯𝘆 𝟮𝟬%. Use my link to contact me to do custom n8n work.",
+    "verified": false,
+    "links": [
+      "https://tidycal.com/m47jenm/45-minute-meeting"
+    ],
+    "avatar": "https://gravatar.com/avatar/60032d90e09d9ce7644d9ad44d90b4dad4f627f3376593dc1422ed0b7a9399b1?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.switch",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "If",
+            "Path",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Branch",
+            "Case"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Switch",
+        "color": "#506000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "Switch",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 824,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmailTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.gmailtrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Gmail Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1179,
+      "icon": "fa:code",
+      "name": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "codex": {
+        "data": {
+          "alias": [
+            "json",
+            "zod"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.outputparserstructured/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Output Parsers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Structured Output Parser"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Structured Output Parser",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 41,
+      "name": "Ticket Management"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

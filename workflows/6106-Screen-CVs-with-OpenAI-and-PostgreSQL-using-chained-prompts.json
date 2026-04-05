@@ -1,0 +1,1480 @@
+{
+  "id": 13876,
+  "name": "Screen CVs with OpenAI and PostgreSQL using chained prompts",
+  "views": 2,
+  "recentViews": 0,
+  "totalViews": 2,
+  "createdAt": "2026-03-04T23:31:34.839Z",
+  "description": "## How it works\n\n- Webhook receives a job ID and list of candidate IDs from your database\n- If the job has no template yet, **Prompt 0** reads the job description and automatically extracts mandatory requirements, differentials, behavioral competencies and sets the weight of each criterion\n- For each candidate, 3 prompts run sequentially with accumulated context:\n  - **Prompt 1** scores the candidate (0–100) against the job template using calibration anchors to avoid score inflation, plus a breakdown score per criterion\n  - **Prompt 2** receives the score as context and identifies strengths with concrete resume evidence, separating critical gaps (missing mandatory requirements) from secondary gaps (missing differentials)\n  - **Prompt 3** receives the gaps as context and generates personalized interview questions for that specific candidate — not generic HR templates\n- Results are saved directly to PostgreSQL after each candidate\n- When all candidates are processed, **Prompt 4** automatically generates an executive summary of the entire pool with recommendations on who to interview\n\n## Set up steps\n\n- Add your **OpenAI credentials** to all AI nodes (~2 min)\n- Add your **PostgreSQL credentials** to all Postgres nodes (~2 min)\n- Create the required tables using the SQL schema provided in the workflow sticky note (~5 min)\n- Trigger via `POST /webhook/cv-analyze` with `{ \"job_id\": 1, \"candidate_ids\": [1, 2, 3] }`",
+  "workflow": {
+    "id": "FoMizxWit6hOJVzp",
+    "meta": {
+      "instanceId": "58e8d6f88fe0fa710ea6cd8b8dc92c4f15ade950ad61feb0b84deb700c9e81cf",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "AI CV Screening with Chained Prompts",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "0cb0572a-b6e0-49e4-a9f2-c7249f9df88a",
+        "name": "Overview",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -272,
+          64
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 500,
+          "height": 832,
+          "content": "## 🤖 AI CV Screening with Chained Prompts\n\nAutomatically screen resumes using 4 sequential AI prompts, each building on the previous one's output. Results are saved directly to PostgreSQL — no external backend required.\n\n### How it works\n1. **Webhook** receives a job ID + list of candidate IDs. Candidates and job must already exist in the database.\n2. **Prompt 0** extracts a structured job template (requirements, differentials, behavioral competencies and weights) from the job description — runs only if `gabarito` is null in the jobs table.\n3. **Prompts 1–3** run for each candidate in a loop:\n   - **Prompt 1** scores the candidate (0–100) against the job template with calibration anchors to avoid score inflation, plus per-criteria scores\n   - **Prompt 2** uses the score as context to identify concrete strengths (with CV evidence) and critical vs secondary gaps\n   - **Prompt 3** uses the gaps as context to generate personalized interview questions for that specific candidate\n4. Results are saved directly to the `analyses` table and candidate status updated to `processed`\n5. **Prompt 4** runs automatically when all candidates are processed — generates an executive summary saved to `job_summaries`\n\n### Setup\n- Add your **OpenAI API credentials** to all AI nodes\n- Add your **PostgreSQL credentials** to all Postgres nodes\n- Create the required tables using the SQL schema in the sticky note below\n- Trigger via `POST /webhook/cv-analyze` with `{ \"job_id\": 1, \"candidate_ids\": [1, 2, 3] }`\n\n### Customization\n- Swap `gpt-4.1-mini` for a more powerful model for higher accuracy\n- Adjust scoring anchors in Prompt 1 to match your hiring standards\n- Add more criteria to the job template in Prompt 0"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5ef87983-e5bb-49f1-9ea7-7842acb476d2",
+        "name": "Database Schema",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          800,
+          672
+        ],
+        "parameters": {
+          "width": 708,
+          "height": 880,
+          "content": "## 🗄️ Required Database Schema\n\n```sql\nCREATE TABLE jobs (\n  id SERIAL PRIMARY KEY,\n  title VARCHAR(255) NOT NULL,\n  description TEXT NOT NULL,\n  gabarito JSONB,\n  status VARCHAR(20) DEFAULT 'draft',\n  created_at TIMESTAMP DEFAULT NOW()\n);\n\nCREATE TABLE candidates (\n  id SERIAL PRIMARY KEY,\n  job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,\n  name VARCHAR(255),\n  filename VARCHAR(255),\n  cv_text TEXT,\n  status VARCHAR(20) DEFAULT 'pending',\n  created_at TIMESTAMP DEFAULT NOW()\n);\n\nCREATE TABLE analyses (\n  id SERIAL PRIMARY KEY,\n  candidate_id INTEGER REFERENCES candidates(id) ON DELETE CASCADE,\n  job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,\n  score INTEGER,\n  nivel_aderencia VARCHAR(20),\n  justificativa_score TEXT,\n  pontos_fortes JSONB,\n  gaps_criticos JSONB,\n  gaps_secundarios JSONB,\n  perguntas_entrevista JSONB,\n  score_criterios JSONB,\n  created_at TIMESTAMP DEFAULT NOW(),\n  CONSTRAINT analyses_candidate_unique UNIQUE (candidate_id)\n);\n\nCREATE TABLE job_summaries (\n  id SERIAL PRIMARY KEY,\n  job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,\n  total_analisados INTEGER,\n  recomendados JSONB,\n  destaque TEXT,\n  gap_comum TEXT,\n  resumo TEXT,\n  created_at TIMESTAMP DEFAULT NOW(),\n  CONSTRAINT job_summaries_job_id_key UNIQUE (job_id)\n);\n```"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e04df0d8-215c-4c7c-9c76-e49cd768cbdf",
+        "name": "Input Format",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          304,
+          64
+        ],
+        "parameters": {
+          "width": 340,
+          "height": 232,
+          "content": "## 📥 Webhook Input\nSend a POST request:\n```json\n{\n  \"job_id\": 1,\n  \"candidate_ids\": [1, 2, 3]\n}\n```\nCandidates and job must already exist in the database with `cv_text` populated."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e3297343-eac2-4658-a1a7-19d66f2df74f",
+        "name": "Prompt 0 Section",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          832,
+          176
+        ],
+        "parameters": {
+          "width": 700,
+          "height": 140,
+          "content": "## 🧠 Prompt 0 — Job Template Extraction\nRuns only when `gabarito` is null in the jobs table.\nExtracts structured requirements and sets weights automatically."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "68d2ff58-4421-422b-8a6b-008b40527bde",
+        "name": "Candidate Loop Section",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2112,
+          64
+        ],
+        "parameters": {
+          "width": 1700,
+          "height": 140,
+          "content": "## 🔄 Candidate Loop\nProcesses one candidate at a time.\nPrompts 1 → 2 → 3 run sequentially,\neach using the previous output as context.\nResults saved to Postgres after each candidate."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "512b3240-cb2c-4d8a-9ad7-be87df671b62",
+        "name": "Summary Section",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          4432,
+          64
+        ],
+        "parameters": {
+          "width": 1100,
+          "height": 140,
+          "content": "## 📊 Executive Summary — Prompt 4\nRuns once when all candidates are processed (pending = 0).\nSaves pool-level recommendation to job_summaries table."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7b48fa44-ea08-4c46-b89e-388d3ae9ee0e",
+        "name": "Receive CVs",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          304,
+          360
+        ],
+        "webhookId": "3a70a559-3905-44d1-8837-f983b30f8354",
+        "parameters": {
+          "path": "cv-analyze",
+          "options": {},
+          "httpMethod": "POST"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "6dbd0cb2-dba2-46dd-a355-eb8bb474e68b",
+        "name": "Fetch Job and Candidates",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          528,
+          360
+        ],
+        "parameters": {
+          "query": "SELECT j.id AS job_id, j.title, j.description, j.gabarito, array_agg(c.id) AS candidate_ids, json_agg(json_build_object('id', c.id, 'name', c.name, 'cv_text', c.cv_text)) AS candidates FROM jobs j JOIN candidates c ON c.job_id = j.id WHERE j.id = {{ $json.body.job_id }} AND c.id = ANY(ARRAY[{{ $json.body.candidate_ids.join(',') }}]::int[]) GROUP BY j.id, j.title, j.description, j.gabarito",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "4cfed364-6856-4b72-a781-dbcc5e784879",
+        "name": "Job Template exists?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          752,
+          360
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "cond-gabarito",
+                "operator": {
+                  "type": "object",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.gabarito }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "e0574622-0404-4739-8f86-64e9f2061a5a",
+        "name": "Prompt 0 — Extract Job Template",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          976,
+          432
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "GPT-4.1-MINI"
+          },
+          "options": {},
+          "responses": {
+            "values": [
+              {
+                "role": "system",
+                "content": "You are an HR and recruitment specialist. Analyze the job description and extract information in a structured way. Return ONLY valid JSON, no additional text, no markdown, no backticks."
+              },
+              {
+                "content": "=JOB DESCRIPTION:\n{{ $('Fetch Job and Candidates').item.json.description }}\n\nReturn ONLY valid JSON in this format:\n{\n  \"mandatory_requirements\": [\"list of mandatory requirements\"],\n  \"differential_requirements\": [\"list of differentials\"],\n  \"behavioral_competencies\": [\"list of behavioral competencies\"],\n  \"seniority_level\": \"junior|mid|senior|specialist\",\n  \"area\": \"area of expertise\",\n  \"weights\": {\n    \"mandatory_requirements\": 0.5,\n    \"differential_requirements\": 0.2,\n    \"behavioral_competencies\": 0.2,\n    \"experience\": 0.1\n  }\n}\n\nWeights must sum to 1.0 and reflect the importance of each criterion for THIS specific job."
+              }
+            ]
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "lEM4Vz2E6WMNTSrX",
+            "name": "OpenAi account"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "1f095e0e-bb1e-4eb7-b2bf-593e775928bb",
+        "name": "Save Job Template",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          1328,
+          432
+        ],
+        "parameters": {
+          "query": "UPDATE jobs SET gabarito = '{{ $json.output[0].content[0].text }}'::jsonb WHERE id = {{ $('Fetch Job and Candidates').item.json.job_id }} RETURNING gabarito",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "aed6cd32-e56a-482a-85ec-3a3ccde8e35f",
+        "name": "Prepare Candidates",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1552,
+          360
+        ],
+        "parameters": {
+          "jsCode": "const jobData = $('Fetch Job and Candidates').first().json;\n\nlet gabarito = jobData.gabarito;\n\nif (!gabarito) {\n  const raw = $('Prompt 0 — Extract Job Template').first().json.output[0].content[0].text;\n  gabarito = JSON.parse(raw);\n}\n\nconst candidates = typeof jobData.candidates === 'string'\n  ? JSON.parse(jobData.candidates)\n  : jobData.candidates;\n\nreturn candidates.map(c => ({\n  json: {\n    job_id:         jobData.job_id,\n    job_title:      jobData.title,\n    gabarito:       gabarito,\n    candidate_id:   c.id,\n    candidate_name: c.name,\n    cv_text:        c.cv_text\n  }\n}));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d974a929-57f3-49de-821b-77a41d46724e",
+        "name": "Loop Candidates",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          1776,
+          360
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "414e3332-8857-4b7a-8f19-4083e60516a1",
+        "name": "Prompt 1 — Score",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          2000,
+          288
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "GPT-4.1-MINI"
+          },
+          "options": {},
+          "responses": {
+            "values": [
+              {
+                "role": "system",
+                "content": "You are a senior recruitment specialist with 15 years of experience. You evaluate resumes with technical rigor and impartiality. Never inflate scores — an average candidate should receive an average score. Return ONLY valid JSON, no additional text, no markdown, no backticks."
+              },
+              {
+                "content": "=JOB TEMPLATE:\n{{ JSON.stringify($json.gabarito) }}\n\nCANDIDATE RESUME:\n{{ $json.cv_text }}\n\nSCORING RULES — follow strictly:\n- 90-100: Meets ALL mandatory requirements with proven, documented experience. Has most differentials.\n- 70-89: Meets most mandatory requirements. Minor gaps compensated by other strengths.\n- 50-69: Partially meets mandatory requirements. Relevant but non-eliminatory gaps.\n- 30-49: Critical gaps in mandatory requirements. Candidate would need significant development.\n- 0-29: Does not meet the minimum requirements for the role.\n\nINSTRUCTIONS:\n- Consider PROVEN experience, not just superficial keyword mentions.\n- Penalize absence of mandatory requirements proportionally to weights in the job template.\n- Value real projects and concrete results over theoretical knowledge.\n- Use the job template weights to calculate the final score AND per-criteria scores.\n\nReturn ONLY valid JSON:\n{\n  \"score\": number between 0 and 100,\n  \"adherence_level\": \"Low|Medium|High|Excellent\",\n  \"justification\": \"3 objective sentences explaining the score. Cite concrete evidence from the resume and specific gaps that justify the rating.\",\n  \"criteria_scores\": {\n    \"mandatory_requirements\": number between 0 and 100,\n    \"differential_requirements\": number between 0 and 100,\n    \"behavioral_competencies\": number between 0 and 100,\n    \"experience\": number between 0 and 100\n  }\n}"
+              }
+            ]
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "lEM4Vz2E6WMNTSrX",
+            "name": "OpenAi account"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "ab0906db-3de1-4f4e-b749-a680b16d8cd9",
+        "name": "Prompt 2 — Gaps",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          2352,
+          288
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "GPT-4.1-MINI"
+          },
+          "options": {},
+          "responses": {
+            "values": [
+              {
+                "role": "system",
+                "content": "You are a senior recruitment specialist. Analyze resumes with surgical precision — cite concrete evidence, not generalities. Return ONLY valid JSON, no additional text, no markdown, no backticks."
+              },
+              {
+                "content": "=JOB TEMPLATE:\n{{ JSON.stringify($('Loop Candidates').item.json.gabarito) }}\n\nCANDIDATE RESUME:\n{{ $('Loop Candidates').item.json.cv_text }}\n\nSCORE RESULT:\n{{ $('Prompt 1 — Score').item.json.output[0].content[0].text }}\n\nINSTRUCTIONS:\n- For each strength: cite the EXACT evidence from the resume (project, company, technology mentioned).\n- For critical gaps: list only MANDATORY requirements from the template that are absent or insufficiently proven.\n- For secondary gaps: list absent differentials and unevidenced behavioral competencies.\n- Be specific — \"Experience with n8n in self-hosted production\" is better than \"Automation experience\".\n- Do not repeat information between strengths and gaps.\n\nReturn ONLY valid JSON:\n{\n  \"strengths\": [\"strength with resume evidence — max 8 items\"],\n  \"critical_gaps\": [\"absent or insufficient mandatory requirement — be specific\"],\n  \"secondary_gaps\": [\"absent differential or behavioral competency\"]\n}"
+              }
+            ]
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "lEM4Vz2E6WMNTSrX",
+            "name": "OpenAi account"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "bccbda40-5c02-490b-b2bd-ee1a98ad1e9e",
+        "name": "Prompt 3 — Interview Questions",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          2704,
+          288
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "GPT-4.1-MINI"
+          },
+          "options": {},
+          "responses": {
+            "values": [
+              {
+                "role": "system",
+                "content": "You are a recruitment specialist with experience in technical and behavioral competency-based interviews. Generate questions that reveal the real candidate, not the prepared one. Return ONLY valid JSON, no additional text, no markdown, no backticks."
+              },
+              {
+                "content": "=JOB TEMPLATE:\n{{ JSON.stringify($('Loop Candidates').item.json.gabarito) }}\n\nCANDIDATE PROFILE:\n- Name: {{ $('Loop Candidates').item.json.candidate_name }}\n- Score: {{ $('Prompt 1 — Score').item.json.output[0].content[0].text }}\n- Full analysis: {{ $('Prompt 2 — Gaps').item.json.output[0].content[0].text }}\n\nINSTRUCTIONS:\n- Generate PERSONALIZED questions for this candidate — not generic HR questions.\n- Prefer situational questions: \"Tell me about a time when...\" or \"How would you handle...\"\n- Avoid yes/no questions.\n- For critical gaps: investigate non-confrontationally — \"What is your experience with X?\" instead of \"Do you know X?\".\n- For strengths: dig deeper with requests for concrete examples and measurable results.\n- Vary types: at least 2 technical, 2 behavioral, 1 situational.\n- Each question must have a clear and distinct objective.\n\nReturn ONLY valid JSON:\n{\n  \"interview_questions\": [\n    {\n      \"question\": \"full question text\",\n      \"objective\": \"what this question specifically reveals about this candidate\",\n      \"type\": \"technical|behavioral|situational\"\n    }\n  ]\n}\n\nGenerate between 5 and 7 questions."
+              }
+            ]
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "lEM4Vz2E6WMNTSrX",
+            "name": "OpenAi account"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "01fcae4e-6bcb-48a8-bbd0-8e137e9ef190",
+        "name": "Build Analysis Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3056,
+          288
+        ],
+        "parameters": {
+          "jsCode": "const candidate = $('Loop Candidates').item.json;\n\nconst score_data = JSON.parse($('Prompt 1 — Score').item.json.output[0].content[0].text);\nconst gaps_data  = JSON.parse($('Prompt 2 — Gaps').item.json.output[0].content[0].text);\nconst pergs_data = JSON.parse($('Prompt 3 — Interview Questions').item.json.output[0].content[0].text);\n\nreturn [{\n  json: {\n    candidate_id:          candidate.candidate_id,\n    job_id:                candidate.job_id,\n    score:                 score_data.score,\n    nivel_aderencia:       score_data.adherence_level,\n    justificativa_score:   score_data.justification,\n    score_criterios:       score_data.criteria_scores,\n    pontos_fortes:         gaps_data.strengths,\n    gaps_criticos:         gaps_data.critical_gaps,\n    gaps_secundarios:      gaps_data.secondary_gaps,\n    perguntas_entrevista:  pergs_data.interview_questions\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d9ba1c99-fb5d-46f4-8af1-62a9189b4c66",
+        "name": "Save Analysis",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          3280,
+          288
+        ],
+        "parameters": {
+          "query": "INSERT INTO analyses (candidate_id, job_id, score, nivel_aderencia, justificativa_score, score_criterios, pontos_fortes, gaps_criticos, gaps_secundarios, perguntas_entrevista) VALUES ({{ $json.candidate_id }}, {{ $json.job_id }}, {{ $json.score }}, '{{ $json.nivel_aderencia }}', '{{ $json.justificativa_score.replace(/'/g, \"''\") }}', '{{ JSON.stringify($json.score_criterios) }}'::jsonb, '{{ JSON.stringify($json.pontos_fortes) }}'::jsonb, '{{ JSON.stringify($json.gaps_criticos) }}'::jsonb, '{{ JSON.stringify($json.gaps_secundarios) }}'::jsonb, '{{ JSON.stringify($json.perguntas_entrevista) }}'::jsonb) ON CONFLICT (candidate_id) DO UPDATE SET score = EXCLUDED.score, nivel_aderencia = EXCLUDED.nivel_aderencia, justificativa_score = EXCLUDED.justificativa_score, score_criterios = EXCLUDED.score_criterios, pontos_fortes = EXCLUDED.pontos_fortes, gaps_criticos = EXCLUDED.gaps_criticos, gaps_secundarios = EXCLUDED.gaps_secundarios, perguntas_entrevista = EXCLUDED.perguntas_entrevista",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "a74272c7-8c2d-4b3b-a6ac-baa509eb8b12",
+        "name": "Update Candidate Status",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          3504,
+          288
+        ],
+        "parameters": {
+          "query": "UPDATE candidates SET status = 'processed' WHERE id = {{ $('Build Analysis Payload').item.json.candidate_id }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "25b0eaf5-2598-48d0-8be9-fb569d37ea03",
+        "name": "Check Pending Candidates",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          3728,
+          288
+        ],
+        "parameters": {
+          "query": "SELECT COUNT(*) AS pending FROM candidates WHERE job_id = {{ $('Build Analysis Payload').item.json.job_id }} AND status = 'pending'",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "3398f657-1294-4e5f-a006-6f8ed5c2e9bc",
+        "name": "All Candidates Processed?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          3952,
+          360
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "cond-pending",
+                "operator": {
+                  "type": "number",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.pending }}",
+                "rightValue": 0
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "397c9184-d234-47d8-bc3a-49087c7874e1",
+        "name": "Update Job Status",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          4176,
+          360
+        ],
+        "parameters": {
+          "query": "UPDATE jobs SET status = 'done' WHERE id = {{ $('Build Analysis Payload').item.json.job_id }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "bb43a8a2-8431-47dd-b436-2f71c96430a6",
+        "name": "Fetch Full Pool",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          4400,
+          360
+        ],
+        "parameters": {
+          "query": "SELECT c.name, a.score, a.nivel_aderencia, a.justificativa_score, a.pontos_fortes, a.gaps_criticos FROM candidates c JOIN analyses a ON a.candidate_id = c.id WHERE c.job_id = {{ $('Build Analysis Payload').item.json.job_id }} ORDER BY a.score DESC",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "e4934c9f-1b20-4bbd-b7d8-2512c665f51a",
+        "name": "Fetch Job for Summary",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          4624,
+          360
+        ],
+        "parameters": {
+          "query": "SELECT title, gabarito FROM jobs WHERE id = {{ $('Build Analysis Payload').item.json.job_id }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      },
+      {
+        "id": "f8529e9e-1443-4b42-a6c7-c59af19f51c6",
+        "name": "Prompt 4 — Executive Summary",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          4848,
+          360
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "GPT-4.1-MINI"
+          },
+          "options": {},
+          "responses": {
+            "values": [
+              {
+                "role": "system",
+                "content": "You are a senior HR consultant with experience in executive selection. Analyze candidate pools with strategic vision and objective language. Return ONLY valid JSON, no additional text, no markdown, no backticks."
+              },
+              {
+                "content": "=JOB: {{ $('Fetch Job for Summary').item.json.title }}\n\nJOB TEMPLATE:\n{{ JSON.stringify($('Fetch Job for Summary').item.json.gabarito) }}\n\nANALYZED CANDIDATES (ordered by score):\n{{ JSON.stringify($('Fetch Full Pool').all().map(i => i.json)) }}\n\nAnalyze the complete candidate pool and generate an executive summary for the HR team.\n\nINSTRUCTIONS:\n- Be direct and objective — HR needs to make a quick decision\n- Clearly identify who to recommend for interview (score >= 70)\n- Point out the most recurring gap in the pool — this may indicate an issue with the job description or the market\n- The summary should have at most 3 sentences — concise and executive\n- Do not repeat information already in individual candidate analyses\n\nReturn ONLY valid JSON:\n{\n  \"total_analyzed\": total number of candidates as integer,\n  \"recommended\": [\"Names of candidates with score >= 70\"],\n  \"destaque\": \"1 sentence about the highest scoring candidate and why they stand out\",\n  \"gap_comum\": \"1 sentence about the most recurring gap in the pool\",\n  \"resumo\": \"2-3 sentence executive conclusion with a clear recommendation for next steps\"\n}"
+              }
+            ]
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "lEM4Vz2E6WMNTSrX",
+            "name": "OpenAi account"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "44192b37-dd99-4a6a-a23b-8138b1b33d28",
+        "name": "Build Summary Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          5200,
+          360
+        ],
+        "parameters": {
+          "jsCode": "const raw  = $('Prompt 4 — Executive Summary').item.json.output[0].content[0].text;\nconst data = JSON.parse(raw);\nconst job_id = $('Build Analysis Payload').item.json.job_id;\n\nreturn [{\n  json: {\n    job_id:           job_id,\n    total_analisados: data.total_analyzed,\n    recomendados:     data.recommended,\n    destaque:         data.destaque,\n    gap_comum:        data.gap_comum,\n    resumo:           data.resumo\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "221e40ba-5662-45ac-9200-787a460e9c8b",
+        "name": "Save Summary",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          5424,
+          360
+        ],
+        "parameters": {
+          "query": "INSERT INTO job_summaries (job_id, total_analisados, recomendados, destaque, gap_comum, resumo) VALUES ({{ $json.job_id }}, {{ $json.total_analisados }}, '{{ JSON.stringify($json.recomendados) }}'::jsonb, '{{ $json.destaque.replace(/'/g, \"''\") }}', '{{ $json.gap_comum.replace(/'/g, \"''\") }}', '{{ $json.resumo.replace(/'/g, \"''\") }}') ON CONFLICT (job_id) DO UPDATE SET total_analisados = EXCLUDED.total_analisados, recomendados = EXCLUDED.recomendados, destaque = EXCLUDED.destaque, gap_comum = EXCLUDED.gap_comum, resumo = EXCLUDED.resumo",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "SokBhjvxZoBINTiO",
+            "name": "Prompt"
+          }
+        },
+        "typeVersion": 2.5
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "dc533c0c-4541-411b-a15d-81cd4c668502",
+    "connections": {
+      "Receive CVs": {
+        "main": [
+          [
+            {
+              "node": "Fetch Job and Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Analysis": {
+        "main": [
+          [
+            {
+              "node": "Update Candidate Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Full Pool": {
+        "main": [
+          [
+            {
+              "node": "Fetch Job for Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Candidates": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Prompt 1 — Score",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prompt 2 — Gaps": {
+        "main": [
+          [
+            {
+              "node": "Prompt 3 — Interview Questions",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Job Template": {
+        "main": [
+          [
+            {
+              "node": "Prepare Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Job Status": {
+        "main": [
+          [
+            {
+              "node": "Fetch Full Pool",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Candidates": {
+        "main": [
+          [
+            {
+              "node": "Loop Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prompt 1 — Score": {
+        "main": [
+          [
+            {
+              "node": "Prompt 2 — Gaps",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Job Template exists?": {
+        "main": [
+          [
+            {
+              "node": "Prepare Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Prompt 0 — Extract Job Template",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Summary Payload": {
+        "main": [
+          [
+            {
+              "node": "Save Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Job for Summary": {
+        "main": [
+          [
+            {
+              "node": "Prompt 4 — Executive Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Analysis Payload": {
+        "main": [
+          [
+            {
+              "node": "Save Analysis",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Candidate Status": {
+        "main": [
+          [
+            {
+              "node": "Check Pending Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Pending Candidates": {
+        "main": [
+          [
+            {
+              "node": "All Candidates Processed?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Job and Candidates": {
+        "main": [
+          [
+            {
+              "node": "Job Template exists?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "All Candidates Processed?": {
+        "main": [
+          [
+            {
+              "node": "Update Job Status",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Loop Candidates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prompt 4 — Executive Summary": {
+        "main": [
+          [
+            {
+              "node": "Build Summary Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prompt 3 — Interview Questions": {
+        "main": [
+          [
+            {
+              "node": "Build Analysis Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prompt 0 — Extract Job Template": {
+        "main": [
+          [
+            {
+              "node": "Save Job Template",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 27,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 3
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.postgres": {
+        "count": 9
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 5
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Lucas Hideki",
+    "username": "lucashideki",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/lucas-hideki-tb/"
+    ],
+    "avatar": "https://gravatar.com/avatar/08ecf9c0ea6f9f301ccd2c337d43f823ab9d552f01b422b0d6fda9e665b05608?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "icon": "file:postgres.svg",
+      "name": "n8n-nodes-base.postgres",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/postgres/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Postgres"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzkgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwMCIgZD0iTTc3LjM5MSA0Ny45MjJjLS40NjYtMS40MTItMS42ODgtMi4zOTYtMy4yNjgtMi42MzItLjc0NS0uMTExLTEuNTk4LS4wNjQtMi42MDguMTQ0LTEuNzYuMzYzLTMuMDY1LjUwMS00LjAxOC41MjggMy41OTYtNi4wNzIgNi41MjEtMTIuOTk3IDguMjA0LTE5LjUxNSAyLjcyMi0xMC41NCAxLjI2OC0xNS4zNDEtLjQzMi0xNy41MTNDNzAuNzcgMy4xODUgNjQuMjA2LjA5NyA1Ni4yODcuMDAyYy00LjIyNC0uMDUyLTcuOTMzLjc4Mi05Ljg2NyAxLjM4MmEzNyAzNyAwIDAgMC01Ljc3LS41MjhjLTMuODA5LS4wNjEtNy4xNzQuNzctMTAuMDUgMi40NzZhNDYgNDYgMCAwIDAtNy4wOTgtMS43ODJDMTYuNTYxLjQxMSAxMC45NjggMS4yOTkgNi44NzYgNC4xOSAxLjkyMiA3LjY4OS0uMzc1IDEzLjc3LjA1IDIyLjI2MmMuMTM1IDIuNjk2IDEuNjQzIDEwLjkgNC4wMTggMTguNjggMS4zNjUgNC40NzIgMi44MiA4LjE4NSA0LjMyNiAxMS4wMzggMi4xMzUgNC4wNDYgNC40MTkgNi40MjggNi45ODQgNy4yODQgMS40MzguNDc5IDQuMDQ5LjgxNCA2Ljc5Ny0xLjQ3M2E2IDYgMCAwIDAgMS40MjkgMS4yM2MuNzgzLjQ5NCAxLjc0Ljg5NyAyLjY5NiAxLjEzNiAzLjQ0Ni44NjIgNi42NzQuNjQ2IDkuNDI3LS41NjFsLjA0MSAxLjM2Mi4wNiAxLjg5OWMuMTYzIDQuMDY0LjQ0IDcuMjIzIDEuMjU5IDkuNDM0LjA0NS4xMjIuMTA1LjMwNy4xNjkuNTAzLjQwOSAxLjI1MSAxLjA5MiAzLjM0NiAyLjgzIDQuOTg3IDEuOCAxLjY5OSAzLjk3OCAyLjIyIDUuOTcyIDIuMjIgMSAwIDEuOTU1LS4xMzEgMi43OTItLjMxMSAyLjk4NC0uNjM5IDYuMzczLTEuNjE0IDguODI0LTUuMTA0IDIuMzE4LTMuMyAzLjQ0NC04LjI3IDMuNjQ4LTE2LjEwMWwuMDc0LS42MzQuMDQ4LS40MTQuNTQ2LjA0OC4xNDEuMDFjMy4wMzkuMTM4IDYuNzU1LS41MDYgOS4wMzctMS41NjYgMS44MDMtLjgzNyA3LjU4Mi0zLjg4OCA2LjIyMS04LjAwNyIvPjxwYXRoIGZpbGw9IiMzMzY3OTEiIGQ9Ik03Mi4xOTUgNDguNzIzYy05LjAzNiAxLjg2NC05LjY1Ny0xLjE5NS05LjY1Ny0xLjE5NSA5LjU0MS0xNC4xNTcgMTMuNTI5LTMyLjEyNyAxMC4wODctMzYuNTI1QzYzLjIzNS0uOTk0IDQ2Ljk4MSA0LjY4IDQ2LjcxIDQuODI3bC0uMDg3LjAxNmMtMS43ODUtLjM3MS0zLjc4My0uNTkxLTYuMDI5LS42MjgtNC4wODktLjA2Ny03LjE5IDEuMDcyLTkuNTQ0IDIuODU3IDAgMC0yOC45OTUtMTEuOTQ1LTI3LjY0NyAxNS4wMjMuMjg3IDUuNzM3IDguMjIzIDQzLjQxIDE3LjY4OSAzMi4wMzEgMy40Ni00LjE2MSA2LjgwMy03LjY3OSA2LjgwMy03LjY3OSAxLjY2IDEuMTAzIDMuNjQ4IDEuNjY2IDUuNzMyIDEuNDYzbC4xNjItLjEzN2E2LjMgNi4zIDAgMCAwIC4wNjUgMS42MmMtMi40MzkgMi43MjUtMS43MjIgMy4yMDMtNi41OTcgNC4yMDYtNC45MzMgMS4wMTctMi4wMzUgMi44MjYtLjE0MyAzLjI5OSAyLjI5NC41NzQgNy42IDEuMzg2IDExLjE4NS0zLjYzM2wtLjE0My41NzNjLjk1Ni43NjUgMS42MjYgNC45NzggMS41MTQgOC43OTdzLS4xODggNi40NDEuNTY1IDguNDg5IDEuNTAzIDYuNjU2IDcuOTEyIDUuMjgyYzUuMzU1LTEuMTQ4IDguMTMtNC4xMjEgOC41MTYtOS4wODEuMjc0LTMuNTI2Ljg5NC0zLjAwNS45MzMtNi4xNThsLjQ5Ny0xLjQ5M2MuNTczLTQuNzguMDkxLTYuMzIyIDMuMzktNS42MDVsLjgwMi4wN2MyLjQyOC4xMSA1LjYwNi0uMzkxIDcuNDcxLTEuMjU3IDQuMDE2LTEuODY0IDYuMzk4LTQuOTc2IDIuNDM4LTQuMTU4Ii8+PHBhdGggZD0iTTMyLjc0NyAyNC42NmMtLjgxNC0uMTEzLTEuNTUyLS4wMDgtMS45MjUuMjc0YS43LjcgMCAwIDAtLjI5Mi40N2MtLjA0Ny4zMzYuMTg4LjcwNy4zMzMuODk4LjQwOS41NDIgMS4wMDYuOTE1IDEuNTk4Ljk5N2EyIDIgMCAwIDAgLjI1Ni4wMThjLjk4NiAwIDEuODgzLS43NjggMS45NjItMS4zMzUuMDk5LS43MS0uOTMyLTEuMTgzLTEuOTMxLTEuMzIybTI2Ljk3NS4wMjJjLS4wNzgtLjU1Ni0xLjA2OC0uNzE1LTIuMDA3LS41ODRzLTEuODQ4LjU1NC0xLjc3MiAxLjExMmMuMDYxLjQzNC44NDQgMS4xNzQgMS43NzEgMS4xNzRxLjExNyAwIC4yMzctLjAxNmMuNjE5LS4wODYgMS4wNzMtLjQ3OSAxLjI4OC0uNzA1LjMyOS0uMzQ1LjUxOC0uNzMuNDg0LS45OG0xNS40NzcgMjMuODI4Yy0uMzQ1LTEuMDQyLTEuNDUzLTEuMzc3LTMuMjk2LS45OTctNS40NzEgMS4xMjktNy40My4zNDctOC4wNzMtLjEyNyA0LjI1Mi02LjQ3OCA3Ljc1LTE0LjMwOCA5LjYzNy0yMS42MTQuODk0LTMuNDYxIDEuMzg4LTYuNjc1IDEuNDI4LTkuMjk0LjA0NS0yLjg3Ni0uNDQ1LTQuOTg4LTEuNDU1LTYuMjc5LTQuMDcyLTUuMjAzLTEwLjA0OC03Ljk5NC0xNy4yODMtOC4wNy00Ljk3My0uMDU2LTkuMTc1IDEuMjE3LTkuOTkgMS41NzVhMjUgMjUgMCAwIDAtNS42MjItLjcyMmMtMy43MzQtLjA2LTYuOTYxLjgzNC05LjYzMyAyLjY1NWE0MyA0MyAwIDAgMC03LjgyOC0yLjA1MmMtNi4zNDItMS4wMjEtMTEuMzgxLS4yNDgtMTQuOTc4IDIuMy00LjI5MSAzLjA0LTYuMjcyIDguNDc1LTUuODg4IDE2LjE1Mi4xMjkgMi41ODMgMS42MDEgMTAuNTI5IDMuOTIzIDE4LjEzOSAzLjA1NyAxMC4wMTYgNi4zOCAxNS42ODYgOS44NzcgMTYuODUyYTQuNCA0LjQgMCAwIDAgMS40MDIuMjMyYzEuMjc2IDAgMi44MzktLjU3NSA0LjQ2Ni0yLjUzMWExNjEgMTYxIDAgMCAxIDYuMTU2LTYuOTY2IDkuOSA5LjkgMCAwIDAgNC40MjkgMS4xOTFsLjAxLjEyMWMtLjMxLjM2OC0uNTY0LjY5LS43ODEuOTY1LTEuMDcgMS4zNTgtMS4yOTMgMS42NDEtNC43MzggMi4zNTEtLjk4LjIwMi0zLjU4Mi43MzgtMy42MiAyLjU2My0uMDQxIDEuOTkzIDMuMDc2IDIuODMgMy40MzEgMi45MTkgMS4yMzguMzEgMi40My40NjMgMy41NjguNDYzIDIuNzY2IDAgNS4yLS45MDkgNy4xNDUtMi42NjgtLjA2IDcuMTA2LjIzNiAxNC4xMDcgMS4wODkgMTYuMjQxLjY5OSAxLjc0NiAyLjQwNiA2LjAxNCA3Ljc5OCA2LjAxNC43OTEgMCAxLjY2Mi0uMDkyIDIuNjItLjI5NyA1LjYyNy0xLjIwNyA4LjA3MS0zLjY5NCA5LjAxNi05LjE3Ny41MDYtMi45MyAxLjM3NC05LjkyOCAxLjc4Mi0xMy42ODIuODYyLjI2OSAxLjk3MS4zOTIgMy4xNy4zOTIgMi41MDEgMCA1LjM4Ny0uNTMxIDcuMTk3LTEuMzcyIDIuMDMzLS45NDQgNS43MDItMy4yNjEgNS4wMzctNS4yNzR6TTYxLjggMjMuMTQ3Yy0uMDE5IDEuMTA4LS4xNzEgMi4xMTQtLjMzMyAzLjE2NC0uMTc0IDEuMTI5LS4zNTQgMi4yOTctLjM5OSAzLjcxNS0uMDQ1IDEuMzc5LjEyOCAyLjgxNC4yOTQgNC4yLjMzNyAyLjgwMS42ODIgNS42ODUtLjY1NSA4LjUzMWExMSAxMSAwIDAgMS0uNTkyLTEuMjE4Yy0uMTY2LS40MDMtLjUyNy0xLjA1LTEuMDI3LTEuOTQ2LTEuOTQ0LTMuNDg3LTYuNDk3LTExLjY1Mi00LjE2Ny0xNC45ODQuNjk0LS45OTIgMi40NTYtMi4wMTEgNi44NzktMS40NjN6TTU2LjQzOSA0LjM3NGM2LjQ4Mi4xNDMgMTEuNjA5IDIuNTY4IDE1LjI0IDcuMjA3IDIuNzg0IDMuNTU4LS4yODIgMTkuNzQ5LTkuMTU4IDMzLjcxNmwtLjI2OS0uMzM5LS4xMTItLjE0YzIuMjk0LTMuNzg4IDEuODQ1LTcuNTM2IDEuNDQ2LTEwLjg1OS0uMTY0LTEuMzY0LS4zMTktMi42NTItLjI4LTMuODYxLjA0MS0xLjI4My4yMS0yLjM4Mi4zNzQtMy40NDYuMjAyLTEuMzExLjQwNy0yLjY2Ny4zNS00LjI2NWExLjggMS44IDAgMCAwIC4wMzctLjYwMWMtLjE0NC0xLjUzMy0xLjg5NC02LjEyLTUuNDYyLTEwLjI3My0xLjk1MS0yLjI3MS00Ljc5Ny00LjgxMy04LjY4Mi02LjUyN2EyOS4zIDI5LjMgMCAwIDEgNi41MTUtLjYxMnpNMjAuMTY3IDUzLjI5OGMtMS43OTMgMi4xNTUtMy4wMzEgMS43NDItMy40MzggMS42MDctMi42NTMtLjg4NS01LjczLTYuNDkxLTguNDQ0LTE1LjM4Mi0yLjM0OC03LjY5My0zLjcyLTE1LjQyOC0zLjgyOS0xNy41OTctLjM0My02Ljg2IDEuMzItMTEuNjQxIDQuOTQzLTE0LjIxIDUuODk2LTQuMTgxIDE1LjU4OS0xLjY3OSAxOS40ODQtLjQwOWwtLjE3LjE2M2MtNi4zOTEgNi40NTUtNi4yNCAxNy40ODMtNi4yMjQgMTguMTU3YTIyIDIyIDAgMCAwIC4wNTEgMS4xMzVjLjExIDEuODU1LjMxNSA1LjMwNy0uMjMyIDkuMjE3LS41MDggMy42MzMuNjEyIDcuMTg5IDMuMDcyIDkuNzU2cS4zODMuMzk4Ljc5NS43NWExNjQgMTY0IDAgMCAwLTYuMDA4IDYuODE0em02LjgzLTkuMTEzYy0xLjk4My0yLjA2OS0yLjg4NC00Ljk0Ny0yLjQ3MS03Ljg5Ni41NzctNC4xMy4zNjQtNy43MjcuMjUtOS42NTlsLS4wMzktLjY5NGMuOTM0LS44MjggNS4yNjEtMy4xNDYgOC4zNDYtMi40MzkgMS40MDguMzIzIDIuMjY2IDEuMjgxIDIuNjIzIDIuOTMxIDEuODQ2IDguNTM5LjI0NCAxMi4wOTgtMS4wNDMgMTQuOTU3LS4yNjUuNTg5LS41MTYgMS4xNDYtLjczIDEuNzIybC0uMTY2LjQ0NWMtLjQyIDEuMTI2LS44MTEgMi4xNzMtMS4wNTMgMy4xNjctMi4xMDgtLjAwNi00LjE1OS0uOTA3LTUuNzE4LTIuNTM0em0uMzI0IDExLjUxNmE1IDUgMCAwIDEtMS40OTQtLjY0MmMuMjcxLS4xMjguNzU0LS4zMDEgMS41OTEtLjQ3NCA0LjA1Mi0uODM0IDQuNjc4LTEuNDIzIDYuMDQ1LTMuMTU4LjMxMy0uMzk4LjY2OS0uODQ5IDEuMTYtMS4zOTguNzMzLS44MjEgMS4wNjgtLjY4MiAxLjY3Ni0uNDMuNDkzLjIwNC45NzIuODIxIDEuMTY3IDEuNTAxLjA5Mi4zMjEuMTk1LjkzLS4xNDMgMS40MDQtMi44NTUgMy45OTctNy4wMTUgMy45NDYtMTAuMDAzIDMuMTk4em0yMS4yMDcgMTkuNzM1Yy00Ljk1NyAxLjA2Mi02LjcxMy0xLjQ2Ny03Ljg2OS00LjM1OS0uNzQ3LTEuODY3LTEuMTEzLTEwLjI4NS0uODUzLTE5LjU4MmExLjEgMS4xIDAgMCAwLS4wNDgtLjM1NiA1IDUgMCAwIDAtLjEzOS0uNjU3Yy0uMzg3LTEuMzUzLTEuMzMxLTIuNDg0LTIuNDYyLTIuOTUzLS40NS0uMTg2LTEuMjc1LS41MjgtMi4yNjctLjI3NC4yMTItLjg3MS41NzgtMS44NTUuOTc2LTIuOTIxbC4xNjctLjQ0OGMuMTg4LS41MDUuNDIzLTEuMDI5LjY3My0xLjU4MyAxLjM0Ny0yLjk5MiAzLjE5Mi03LjA5MSAxLjE5LTE2LjM1LS43NS0zLjQ2OC0zLjI1NC01LjE2MS03LjA1LTQuNzY4LTIuMjc2LjIzNS00LjM1OCAxLjE1NC01LjM5NiAxLjY4cS0uMzM0LjE2OS0uNjE4LjMyOWMuMjktMy40OTQgMS4zODUtMTAuMDI0IDUuNDgxLTE0LjE1NiAyLjU3OS0yLjYwMSA2LjAxNC0zLjg4NiAxMC4xOTktMy44MTcgOC4yNDYuMTM1IDEzLjUzNCA0LjM2NyAxNi41MTggNy44OTMgMi41NzEgMy4wMzkgMy45NjQgNi4xIDQuNTIgNy43NTEtNC4xNzktLjQyNS03LjAyMi40LTguNDYzIDIuNDYtMy4xMzUgNC40ODEgMS43MTUgMTMuMTc4IDQuMDQ2IDE3LjM1OC40MjcuNzY2Ljc5NiAxLjQyOC45MTIgMS43MDkuNzU5IDEuODM5IDEuNzQyIDMuMDY3IDIuNDU5IDMuOTY0LjIyLjI3NS40MzMuNTQxLjU5Ni43NzQtMS4yNjYuMzY1LTMuNTM5IDEuMjA4LTMuMzMyIDUuNDIyLS4xNjcgMi4xMTUtMS4zNTYgMTIuMDE2LTEuOTU5IDE1LjUxNC0uNzk3IDQuNjIxLTIuNDk3IDYuMzQzLTcuMjc5IDcuMzY4em0yMC42OTMtMjMuNjhjLTEuMjk0LjYwMS0zLjQ2IDEuMDUyLTUuNTE4IDEuMTQ4LTIuMjczLjEwNy0zLjQzLS4yNTUtMy43MDItLjQ3Ny0uMTI4LTIuNjI2Ljg1LTIuOTAxIDEuODg0LTMuMTkxLjE2My0uMDQ2LjMyMS0uMDkuNDc0LS4xNDRhNCA0IDAgMCAwIC4zMTMuMjNjMS44MjcgMS4yMDYgNS4wODUgMS4zMzYgOS42ODUuMzg2bC4wNS0uMDFjLS42Mi41OC0xLjY4MiAxLjM1OS0zLjE4NyAyLjA1OHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Postgres",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 17,
+      "name": "HR"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

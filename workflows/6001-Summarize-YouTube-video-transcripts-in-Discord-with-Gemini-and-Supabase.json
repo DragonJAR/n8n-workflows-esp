@@ -1,0 +1,1331 @@
+{
+  "id": 13749,
+  "name": "Summarize YouTube video transcripts in Discord with Gemini and Supabase",
+  "views": 48,
+  "recentViews": 1,
+  "totalViews": 48,
+  "createdAt": "2026-02-27T09:52:17.048Z",
+  "description": "# YouTube Video Transcript Summarizer — Discord Bot\n\n&gt; Paste a YouTube URL into a Discord channel and this workflow automatically extracts the transcript, uses an LLM to generate a concise summary, and stores everything in a database — all in seconds.\n\n&gt; **Self-hosted n8n only.** This workflow uses the Execute Command node to run `yt-dlp` inside the n8n container. This requires shell access, which is only available on self-hosted instances (Docker, VPS, etc.) — it will **not** work on n8n Cloud.\n\n**[Import this workflow into n8n](https://raw.githubusercontent.com/trendai-au-lab/n8n-workflow/main/workflows/youtube-video-summarizer-discord/workflow.json)**\n\n---\n\n## Prerequisites\n\n| Tool | Purpose |\n|------|---------|\n| **Discord Bot** | Listens for messages and sends replies |\n| **yt-dlp** | Downloads subtitles and video metadata (must be installed in the n8n container) |\n| **Google Gemini API** | Summarizes video transcripts (Gemini 2.5 Flash) |\n| **Supabase** | Stores video data and run logs |\n\n## Credentials\n\n| Node | Credential Type | Notes |\n|------|----------------|-------|\n| Discord Trigger | Discord Bot Trigger | Bot token with Message Content Intent enabled |\n| Discord Reply / Discord Not YouTube Reply / Discord Error Reply | Discord Bot | Same bot, used for sending messages |\n| Message a model (Gemini) | Google Gemini (PaLM) API | API key from Google AI Studio |\n| Save to Supabase / Log Run / Log Run Error | Supabase | Project URL + anon key |\n\n---\n\n## What It Does\n\nWhen a user pastes a YouTube URL into a Discord channel, the workflow:\n\n1. **Detects** the YouTube URL using RegEx (supports youtube.com, youtu.be, shorts, live)\n2. **Extracts** the video's subtitles (English and Vietnamese) and metadata using yt-dlp\n3. **Cleans** the raw VTT subtitle file into plain-text transcript\n4. **Summarizes** the transcript using an LLM (Gemini 2.5 Flash) into a TLDR + detailed summary (in the original language)\n5. **Stores** the video metadata, full transcript, and AI summary in a Supabase database\n6. **Logs** every run (success or error) to a separate `runs` table for tracking\n7. **Chunks** long summaries into Discord-safe messages (≤2000 characters each)\n8. **Replies** in Discord with the video title, stats, and the full summary\n\nNon-YouTube messages get a friendly \"not a YouTube link\" reply. Errors are caught, classified, logged to the database, and reported back to Discord.\n\n---\n\n## How It Works\n\n### Main Flow (Happy Path)\n\n```\nDiscord Trigger → Extract YouTube URL → Is YouTube URL?\n  ├─ Yes → yt-dlp Get Metadata → Parse Metadata → Read Subtitle File → Parse Transcript\n  │        → Message a model (Gemini) → Prepare Insert Data → Save to Supabase\n  │        → Prepare Success Log → Log Run → Prepare Messages for Discord → Discord Reply\n  └─ No  → Discord Not YouTube Reply\n```\n\n### Error Flow\n\n```\nError Trigger → Prepare Error Data → Log Run Error → Discord Error Reply\n```\n\n---\n\n## Node Breakdown\n\n| # | Node | Type | Description |\n|---|------|------|-------------|\n| 1 | Discord Trigger | Discord Bot Trigger | Fires on every message in the configured channel |\n| 2 | Extract YouTube URL | Code | RegEx extracts video ID from message content |\n| 3 | Is YouTube URL? | IF | Routes YouTube URLs to processing, others to rejection reply |\n| 4 | yt-dlp Get Metadata | Execute Command | Downloads subtitles (.vtt, English/Vietnamese) and prints metadata JSON |\n| 5 | Parse Metadata | Code | Extracts title, channel, views, duration via RegEx; decodes Unicode for multi-language support |\n| 6 | Read Subtitle File | Execute Command | Dynamically finds and reads the .vtt file (continueOnFail enabled) |\n| 7 | Parse Transcript | Code | Strips VTT timestamps/tags, deduplicates lines |\n| 8 | Message a model | Google Gemini | Sends transcript to Gemini 2.5 Flash for TLDR + detailed summary (in original language) |\n| 9 | Prepare Insert Data | Code | Merges summary with all metadata fields |\n| 10 | Save to Supabase | Supabase | Inserts full record into `videos` table |\n| 11 | Prepare Success Log | Code | Builds success run record |\n| 12 | Log Run | Supabase | Inserts into `runs` table |\n| 13 | Prepare Messages for Discord | Code | Chunks long summaries into Discord-safe messages (≤2000 chars) |\n| 14 | Discord Reply | Discord | Posts summary preview to channel |\n| 15 | Discord Not YouTube Reply | Discord | Replies when message isn't a YouTube link |\n| 16 | Error Trigger | Error Trigger | Catches any unhandled node failure |\n| 17 | Prepare Error Data | Code | Classifies error type and extracts context |\n| 18 | Log Run Error | Supabase | Logs error to `runs` table |\n| 19 | Discord Error Reply | Discord | Posts error message to channel |\n\n---\n\n## Setup Guide\n\n### 1. Discord Bot\n\n1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)\n2. Create a new Application → Bot\n3. Enable **Message Content Intent** under Privileged Intents\n4. Copy the Bot Token\n5. Invite the bot to your server with **Send Messages** + **Read Messages** permissions\n6. In n8n, create a **Discord Bot Trigger** credential (for listening) and a **Discord Bot** credential (for sending replies)\n7. Update the guild ID and channel ID in the Discord Trigger node and all Discord reply nodes\n\n### 2. yt-dlp\n\nyt-dlp must be installed in your n8n container. For Docker-based installs:\n\n```bash\ndocker exec -it n8n apk add --no-cache python3 py3-pip\ndocker exec -it n8n pip3 install yt-dlp\n```\n\nOptional: Place a `cookies.txt` file at `/home/node/.n8n/cookies.txt` to avoid age-gated or bot-detection issues.\n\n### 3. Google Gemini API\n\n1. Go to [Google AI Studio](https://aistudio.google.com/apikey)\n2. Click **Create API Key** and copy it\n3. In n8n, click the Gemini node → Credential → Create New\n4. Paste your API key and save\n\n### 4. Supabase\n\n1. Create a project at [supabase.com](https://supabase.com)\n2. Go to **Settings → API** and copy the **URL** and **anon key**\n3. In n8n, create a Supabase credential with your URL and API key\n4. Run the SQL below in the Supabase SQL Editor to create the required tables\n\n---\n\n## Supabase SQL\n\n```sql\n-- Videos table: stores video metadata, transcript, and AI summary\nCREATE TABLE videos (\n  video_id TEXT PRIMARY KEY,\n  title TEXT,\n  channel TEXT,\n  upload_date TEXT,\n  duration INT,\n  view_count INT,\n  description TEXT,\n  transcript TEXT,\n  ai_summary TEXT,\n  thumbnail_url TEXT,\n  channel_id TEXT,\n  date_added TIMESTAMPTZ DEFAULT now()\n);\n\n-- Runs table: logs every workflow execution (success or error)\nCREATE TABLE runs (\n  video_id TEXT PRIMARY KEY,\n  process_status TEXT NOT NULL,\n  error_type TEXT,\n  notes TEXT,\n  date_added TIMESTAMPTZ DEFAULT now()\n);\n```\n",
+  "workflow": {
+    "meta": {
+      "instanceId": "",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "1273ffea-39d3-42cc-bcb1-abd403ea3bd7",
+        "name": "Extract YouTube URL",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -576,
+          336
+        ],
+        "parameters": {
+          "jsCode": "// Extract YouTube URL from Discord message\nconst message = $input.first().json;\nconst messageContent = message.content;\n\nif (!messageContent) {\n  return [];\n}\n\n// Match youtube.com/watch?v= and youtu.be/ formats\nconst ytRegex = /(?:https?:\\/\\/)?(?:www\\.)?(?:youtube\\.com\\/(?:watch\\?v=|live\\/|shorts\\/)|youtu\\.be\\/)([a-zA-Z0-9_-]{11})(?:[&?][^\\s]*)*/;\nconst match = messageContent.match(ytRegex);\n\nif (!match) {\n  return [{\n    json: {\n      is_youtube: false,\n      channel_id: message.channelId\n    }\n  }];\n}\n\nconst videoId = match[1];\nconst videoUrl = `https://www.youtube.com/watch?v=${videoId}`;\n\nreturn [{\n  json: {\n    is_youtube: true,\n    video_id: videoId,\n    video_url: videoUrl,\n    discord_message: messageContent,\n    discord_shared_at: new Date().toISOString(),\n    channel_id: message.channelId\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "610f37f3-d1c9-491f-9fa9-eda1af30e9d6",
+        "name": "Discord Trigger",
+        "type": "n8n-nodes-discord-trigger.discordTrigger",
+        "position": [
+          -800,
+          336
+        ],
+        "parameters": {
+          "pattern": "every",
+          "guildIds": [
+            "YOUR_GUILD_ID_HERE"
+          ],
+          "channelIds": [
+            "YOUR_CHANNEL_ID_HERE"
+          ],
+          "additionalFields": {}
+        },
+        "credentials": {
+          "discordBotTriggerApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Discord Bot Trigger account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9e31fe2d-41e3-4405-8340-4a63650ea96d",
+        "name": "Is YouTube URL?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -32,
+          336
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "condition-yt-check",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true"
+                },
+                "leftValue": "={{ $json.is_youtube }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "3a55d9c6-c8b5-4170-be43-5d9b19c82b4d",
+        "name": "yt-dlp Get Metadata",
+        "type": "n8n-nodes-base.executeCommand",
+        "position": [
+          192,
+          240
+        ],
+        "parameters": {
+          "command": "=yt-dlp --js-runtime node --remote-components ejs:github --cookies /home/node/.n8n/cookies.txt --write-auto-sub --sub-lang \"en.*,vi.*\" --skip-download -o \"/tmp/yt_%(id)s\" \"{{ $node[\"Extract YouTube URL\"].json[\"video_url\"] }}\" 2>/dev/null; yt-dlp --js-runtime node --remote-components ejs:github --cookies /home/node/.n8n/cookies.txt --print \"{\\\"id\\\":%(id)#j,\\\"title\\\":%(title)#j,\\\"description\\\":%(description)#j,\\\"view_count\\\":%(view_count)s,\\\"channel\\\":%(channel)#j,\\\"upload_date\\\":%(upload_date)#j,\\\"duration\\\":%(duration)s}\" --skip-download \"{{ $node[\"Extract YouTube URL\"].json[\"video_url\"] }}\""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6121252c-8e1f-446b-9b00-48039ed9eaaa",
+        "name": "Parse Metadata",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          416,
+          240
+        ],
+        "parameters": {
+          "jsCode": "const rawOutput = $input.first().json.stdout;\n\nif (!rawOutput) {\n  throw new Error('yt-dlp returned no output — video may be private, deleted, or geo-blocked');\n}\n\n// Decode Unicode escapes from JSON string values\nfunction decodeUnicode(str) {\n  try { return JSON.parse('\"' + str + '\"'); } catch (e) { return str; }\n}\n\n// Extract fields using regex since description may break JSON\nconst getId = rawOutput.match(/\"id\":\"([^\"]+)\"/);\nconst getTitle = rawOutput.match(/\"title\":\"([^\"]+)\"/);\nconst getChannel = rawOutput.match(/\"channel\":\"([^\"]+)\"/);\nconst getDate = rawOutput.match(/\"upload_date\":\"([^\"]+)\"/);\nconst getDuration = rawOutput.match(/\"duration\":(\\d+)/);\nconst getViews = rawOutput.match(/\"view_count\":(\\d+)/);\n\nif (!getId) throw new Error('MISSING: video id not found');\nif (!getTitle) throw new Error('MISSING: title not found');\nif (!getChannel) throw new Error('MISSING: channel not found');\nif (!getDate) throw new Error('MISSING: upload_date not found');\nif (!getDuration) throw new Error('MISSING: duration not found');\nif (!getViews) throw new Error('MISSING: view_count not found');\n\n// Extract description: match up to the next known key\nconst descMatch = rawOutput.match(/\"description\":\"([\\s\\S]*?)\",\"view_count\"/);\nconst description = descMatch ? decodeUnicode(descMatch[1]) : '';\n\nconst prevData = $('Extract YouTube URL').first().json;\n\nreturn [{\n  json: {\n    video_id: getId[1],\n    title: decodeUnicode(getTitle[1]),\n    channel: decodeUnicode(getChannel[1]),\n    upload_date: getDate[1],\n    duration: parseInt(getDuration[1]),\n    view_count: parseInt(getViews[1]),\n    description: description,\n    thumbnail_url: `https://img.youtube.com/vi/${getId[1]}/maxresdefault.jpg`,\n    video_url: prevData.video_url,\n    discord_shared_at: prevData.discord_shared_at,\n    channel_id: prevData.channel_id,\n    video_id_for_subs: getId[1]\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "fd999ffd-80b4-4248-bf9a-77247fe5d9f8",
+        "name": "Read Subtitle File",
+        "type": "n8n-nodes-base.executeCommand",
+        "onError": "continueRegularOutput",
+        "position": [
+          640,
+          240
+        ],
+        "parameters": {
+          "command": "=FILE=$(ls /tmp/yt_{{ $json.video_id }}.*.vtt 2>/dev/null | head -1); [ -n \"$FILE\" ] && cat \"$FILE\" || echo \"\""
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f77139fe-ebad-4c6c-9d63-55561a004918",
+        "name": "Parse Transcript",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          864,
+          240
+        ],
+        "parameters": {
+          "jsCode": "const input = $input.first().json;\nconst prevData = $('Parse Metadata').first().json;\n\n// Check if Read Subtitle File failed (continueOnFail)\nif (input.error || !input.stdout || input.stdout.trim().length === 0) {\n  throw new Error('No subtitles available for video: ' + prevData.video_id);\n}\n\nconst vttContent = input.stdout;\nconst lines = vttContent.split('\\n');\nconst textLines = [];\nlet lastLine = \"\";\n\nfor (let line of lines) {\n    let trimmed = line.trim();\n    \n    // Skip VTT metadata and timestamps\n    if (!trimmed || \n        trimmed === 'WEBVTT' || \n        trimmed.startsWith('Kind:') || \n        trimmed.startsWith('Language:') || \n        /^(\\d{2}:)?\\d{2}:\\d{2}\\.\\d{3}/.test(trimmed) || \n        trimmed.includes('-->')) {\n        continue;\n    }\n\n    // Remove HTML-like tags (styling)\n    const cleaned = trimmed.replace(/<[^>]+>/g, '').trim();\n    \n    // Prevent duplicate adjacent lines (common in VTT)\n    if (cleaned && cleaned !== lastLine) {\n        textLines.push(cleaned);\n        lastLine = cleaned;\n    }\n}\n\nconst transcript = textLines.join(' ');\n\nreturn [{\n    json: {\n        ...prevData,\n        transcript: transcript\n    }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "26965400-999e-4dea-bdf1-c8190da03f5f",
+        "name": "Message a model",
+        "type": "@n8n/n8n-nodes-langchain.googleGemini",
+        "position": [
+          1088,
+          240
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "models/gemini-2.5-flash",
+            "cachedResultName": "models/gemini-2.5-flash"
+          },
+          "options": {},
+          "messages": {
+            "values": [
+              {
+                "content": "=Please summarize this YouTube video.\n\nVideo Title: {{ $json.title }}\nChannel: {{ $json.channel }}\n\nTranscript:\n{{ $json.transcript }}\n\nIMPORTANT: Write the summary in the SAME LANGUAGE as the transcript. Do not translate to English.\n\nProvide a concise summary of the video. Format your response exactly as follows:\n\n**TLDR**\n[Write a single paragraph, 3-4 sentence summary of the main idea here]\n\n**Summary**\n[Write a detailed 3-5 paragraph summary capturing key points, arguments, and conclusions here]\n\nWrite in clear, informative prose. No bullet points.\n"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "googlePalmApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Google Gemini (PaLM) API account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f0067574-707f-46b5-a725-8988539c20da",
+        "name": "Prepare Insert Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1440,
+          240
+        ],
+        "parameters": {
+          "jsCode": "const currentData = $('Parse Transcript').first().json;\nconst geminiOutput = $input.first().json;\n\nconst summary = geminiOutput.content.parts[0].text;\n\nif (!summary) {\n  throw new Error('MISSING: Gemini returned no summary text');\n}\n\nreturn [{\n  json: {\n    video_id: currentData.video_id,\n    title: currentData.title,\n    channel: currentData.channel,\n    upload_date: currentData.upload_date,\n    duration: currentData.duration,\n    view_count: currentData.view_count,\n    description: currentData.description,\n    transcript: currentData.transcript,\n    ai_summary: summary,\n    thumbnail_url: currentData.thumbnail_url,\n    discord_shared_at: currentData.discord_shared_at,\n    channel_id: currentData.channel_id\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b9f7473c-2bc1-4337-8efb-4b555cc8439c",
+        "name": "Save to Supabase",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          1664,
+          240
+        ],
+        "parameters": {
+          "tableId": "videos",
+          "dataToSend": "=autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5606a6df-0d30-4b1f-896f-5492ed37d048",
+        "name": "Prepare Success Log",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1888,
+          240
+        ],
+        "parameters": {
+          "jsCode": "const data = $('Prepare Insert Data').first().json;\n\nreturn [{\n  json: {\n    video_id: data.video_id,\n    process_status: 'success',\n    error_type: null,\n    notes: null\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d94f1688-aed4-4cfa-8553-77519c45fa17",
+        "name": "Log Run",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          2112,
+          240
+        ],
+        "parameters": {
+          "tableId": "runs",
+          "dataToSend": "autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "e932de7a-bc59-4523-bd96-81b8855e4cc7",
+        "name": "Discord Reply",
+        "type": "n8n-nodes-base.discord",
+        "position": [
+          2528,
+          240
+        ],
+        "webhookId": "",
+        "parameters": {
+          "content": "={{ $json.chunk }}",
+          "guildId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GUILD_ID_HERE",
+            "cachedResultUrl": "",
+            "cachedResultName": "Your Server"
+          },
+          "options": {},
+          "resource": "message",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_CHANNEL_ID_HERE",
+            "cachedResultUrl": "",
+            "cachedResultName": "your-channel"
+          }
+        },
+        "credentials": {
+          "discordBotApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Discord Bot account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ac5c0018-638c-4c15-9138-ce6989427dae",
+        "name": "Discord Not YouTube Reply",
+        "type": "n8n-nodes-base.discord",
+        "position": [
+          192,
+          432
+        ],
+        "webhookId": "",
+        "parameters": {
+          "content": "That doesn't look like a YouTube link. Please share a valid YouTube URL.",
+          "guildId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GUILD_ID_HERE",
+            "cachedResultUrl": "",
+            "cachedResultName": "Your Server"
+          },
+          "options": {},
+          "resource": "message",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_CHANNEL_ID_HERE",
+            "cachedResultUrl": "",
+            "cachedResultName": "your-channel"
+          }
+        },
+        "credentials": {
+          "discordBotApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Discord Bot account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6516263a-56ab-4892-9a54-7699850fda00",
+        "name": "Error Trigger",
+        "type": "n8n-nodes-base.errorTrigger",
+        "position": [
+          -800,
+          656
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "8fa011ac-baa2-43d0-9ed6-a731d5532d62",
+        "name": "Prepare Error Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -576,
+          656
+        ],
+        "parameters": {
+          "jsCode": "const errorData = $input.first().json;\nconst errorMessage = errorData.execution?.error?.message || 'Unknown error';\nconst errorNode = errorData.execution?.error?.node?.name || 'Unknown node';\n\n// Determine error_type based on failing node\nlet errorType = 'unknown';\nif (errorNode.includes('yt-dlp') || errorNode === 'Parse Metadata') {\n  errorType = 'yt_dlp_failed';\n} else if (errorNode === 'Parse Transcript') {\n  errorType = errorMessage.includes('No subtitles') ? 'no_subtitles' : 'transcript_error';\n} else if (errorNode.includes('model') || errorNode.includes('Gemini')) {\n  errorType = 'gemini_error';\n} else if (errorNode.includes('Supabase') || errorNode.includes('Insert')) {\n  errorType = 'supabase_error';\n} else if (errorNode.includes('Prepare')) {\n  errorType = 'gemini_error';\n}\n\n// Try to extract video_id from error message\nconst vidMatch = errorMessage.match(/(?:video:\\s*|video_id:\\s*|yt_)([a-zA-Z0-9_-]{11})/);\nconst videoId = vidMatch ? vidMatch[1] : 'unknown';\n\nreturn [{\n  json: {\n    video_id: videoId,\n    process_status: 'error',\n    error_type: errorType,\n    notes: `[${errorNode}] ${errorMessage}`\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "1c208dab-6014-4835-9a68-00a9e721a6bd",
+        "name": "Log Run Error",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          -32,
+          656
+        ],
+        "parameters": {
+          "tableId": "runs",
+          "dataToSend": "autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6ddf1a0a-ed65-45de-b758-3f8040cc026d",
+        "name": "Discord Error Reply",
+        "type": "n8n-nodes-base.discord",
+        "position": [
+          192,
+          656
+        ],
+        "webhookId": "",
+        "parameters": {
+          "content": "=Error processing video: {{ $('Prepare Error Data').first().json.notes }}",
+          "guildId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GUILD_ID_HERE",
+            "cachedResultUrl": "",
+            "cachedResultName": "Your Server"
+          },
+          "options": {},
+          "resource": "message",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_CHANNEL_ID_HERE",
+            "cachedResultUrl": "",
+            "cachedResultName": "your-channel"
+          }
+        },
+        "credentials": {
+          "discordBotApi": {
+            "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+            "name": "Discord Bot account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6dcab5da-8423-482c-b6d9-ffee1fa6c9a4",
+        "name": "Sticky Note - Overview",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1408,
+          -64
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 496,
+          "height": 892,
+          "content": "# YouTube Video Summarizer — Discord Bot\n\n## Who is this for?\nTeams or creators who want to automatically summarize YouTube videos shared in a Discord channel.\n\n## What does it do?\n- Listens for YouTube links posted in a Discord channel\n- Downloads subtitles and metadata via yt-dlp\n- Summarizes the transcript using Gemini 2.5 Flash\n- Saves the full data (metadata + transcript + summary) to Supabase\n- Replies in Discord with a summary preview\n- Logs every run (success or error) to a `runs` table\n- Replies with helpful error messages when something goes wrong\n\n## Setup Requirements\n1. **Discord Bot** with message read + send permissions\n2. **yt-dlp** installed in the n8n container (with cookies.txt)\n3. **Google Gemini API Key** (Gemini 2.5 Flash)\n4. **Supabase** project with `videos` and `runs` tables\n\n## Quick Start\n1. Import the workflow into n8n\n2. Configure Discord Bot Trigger + Discord Bot credentials\n3. Configure Gemini API credential\n4. Configure Supabase credential\n5. Create `videos` and `runs` tables in Supabase\n6. Update Discord guild/channel IDs to match your server\n7. Activate the workflow\n8. Post a YouTube link in your Discord channel!"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "48bfa715-4fed-473f-b804-ba0f735ec43b",
+        "name": "Sticky Note - Trigger",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -832,
+          32
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 720,
+          "height": 228,
+          "content": "## 1. Trigger & URL Detection\n\nListens for every message in the configured Discord channel and checks if it contains a YouTube URL.\n\n**How it works:**\n1. Discord Trigger fires on every new message\n2. Code node extracts YouTube video ID via RegEx\n3. IF node routes: YouTube URL → processing, other messages → friendly reply"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f6446181-cbbe-470a-b654-fc8274e71379",
+        "name": "Sticky Note - Video Data Extraction",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -16,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 256,
+          "content": "## 2. Video Data Extraction\n\nRuns yt-dlp to download subtitles and fetch video metadata in a single shell command.\n\n**How it works:**\n1. yt-dlp downloads auto-generated English subtitles (.vtt) to /tmp\n2. yt-dlp prints metadata JSON (title, channel, views, duration)\n3. Parse Metadata extracts fields via RegEx (handles broken JSON from descriptions)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dfb5a5b4-921a-44b8-863a-f0a34ef284f6",
+        "name": "Sticky Note - Transcript Processing",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          528,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 240,
+          "content": "## 3. Transcript Processing\n\nReads the .vtt subtitle file and cleans it into plain text.\n\n**How it works:**\n1. `cat` reads the VTT file (continueOnFail enabled)\n2. Parse Transcript strips timestamps, HTML tags, and deduplicates lines\n3. If no subtitles exist, throws a descriptive error caught by Error Trigger"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "116e832f-4c11-451c-a3bb-66680d3b7f03",
+        "name": "Sticky Note - AI Summarization",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1088,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 536,
+          "height": 240,
+          "content": "## 4. AI Summarization\n\nSends the clean transcript to Gemini 2.5 Flash for a concise summary.\n\n**How it works:**\n1. Gemini receives title, channel, and full transcript\n2. Returns 3-5 paragraphs of prose (no bullet points)\n3. Prepare Insert Data merges summary with all metadata fields"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "25b52b6c-db1c-4439-9e23-9481690c3837",
+        "name": "Sticky Note - Save & Notify",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1712,
+          -80
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 900,
+          "height": 240,
+          "content": "## 5. Save & Notify\n\nPersists data to Supabase and replies in Discord.\n\n**How it works:**\n1. Save to Supabase inserts all fields into the `videos` table\n2. Prepare Success Log builds a run record (status: success)\n3. Log Run inserts into the `runs` table\n4. Discord Reply posts a summary preview (title, duration, views, first 500 chars)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "646554d2-c672-415b-a33a-1da62f3ed27d",
+        "name": "Sticky Note - Error Handling",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -816,
+          832
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 740,
+          "height": 256,
+          "content": "## 6. Error Handling\n\nCatches any workflow crash and replies in Discord with the error details.\n\n**How it works:**\n1. Error Trigger fires on any unhandled node failure\n2. Prepare Error Data classifies the error type (yt_dlp_failed, no_subtitles, gemini_error, supabase_error)\n3. Log Run Error saves the error to the `runs` table\n4. Discord Error Reply posts the error message to the channel"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "eb2d6b48-a92c-4b0e-a778-e16fbe698b57",
+        "name": "Sticky Note - Discord Setup",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -800,
+          1120
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 440,
+          "height": 300,
+          "content": "### Discord Bot Setup\n\n1. Go to [Discord Developer Portal](https://discord.com/developers/applications)\n2. Create a new Application → Bot\n3. Enable **Message Content Intent** under Privileged Intents\n4. Copy the Bot Token\n5. Invite bot to your server with Send Messages + Read Messages permissions\n6. In n8n: Create **Discord Bot Trigger** credential (for listening)\n7. Create **Discord Bot** credential (for sending replies)\n8. Update guild ID and channel ID in Trigger + Reply nodes"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4c21a5a4-694b-4ca8-bbb1-83c9cf42915f",
+        "name": "Sticky Note - Gemini Setup",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1088,
+          496
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 400,
+          "height": 240,
+          "content": "### Gemini API Setup\n\n1. Go to [Google AI Studio](https://aistudio.google.com/apikey)\n2. Click **Create API Key**\n3. Copy the key\n4. In n8n: Click the Gemini node → Credential → Create New\n5. Paste your API key and save\n6. Model: `gemini-2.5-flash` (default)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "447e0689-b5bc-4f93-aea4-e6a27a977d3c",
+        "name": "Sticky Note - Supabase Setup",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1664,
+          496
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 440,
+          "height": 480,
+          "content": "### Supabase Setup\n\n1. Create a project at [supabase.com](https://supabase.com)\n2. Go to Settings → API → copy the **URL** and **anon key**\n3. In n8n: Create Supabase credential with URL + API key\n4. Run the SQL below to create required tables:\n\n```sql\nCREATE TABLE videos (\n  video_id TEXT PRIMARY KEY,\n  title TEXT, channel TEXT,\n  upload_date TEXT, duration INT,\n  view_count INT, description TEXT,\n  transcript TEXT, ai_summary TEXT,\n  thumbnail_url TEXT,\n  discord_shared_at TIMESTAMPTZ,\n  channel_id TEXT\n);\n\nCREATE TABLE runs (\n  video_id TEXT PRIMARY KEY,\n  process_status TEXT NOT NULL,\n  error_type TEXT, notes TEXT,\n  date_added TIMESTAMPTZ DEFAULT now()\n);\n```"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b32a9d85-67a9-4217-984c-603702b292c0",
+        "name": "Prepare Messages for Discord",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2320,
+          240
+        ],
+        "parameters": {
+          "jsCode": "// Get the full summary and title from the previous node\nconst summary = $('Prepare Insert Data').first().json.ai_summary || \"No summary available\";\nconst data = $('Prepare Insert Data').first().json;\nconst discordLimit = 2000; // Discord max message length\nconst safeLimit = 1900; // Leave some buffer\nconst chunks = [];\n\n// Create the header for the very first message\nconst header = `Video saved! **${data.title}** by **${data.channel}** | Duration: ${Math.floor(data.duration / 60)}m ${data.duration % 60}s | ${data.view_count} views ---\\n\\n`;\n\nlet remainingText = summary;\n\n// Loop through the text and break it into chunks intelligently\nwhile (remainingText.length > 0) {\n    // For the first chunk, reduce max length by the header size\n    const isFirstChunk = chunks.length === 0;\n    const maxLength = isFirstChunk ? safeLimit - header.length : safeLimit;\n\n    if (remainingText.length <= maxLength) {\n        // If the remaining text fits, add it and break\n        chunks.push({ json: { chunk: (isFirstChunk ? header : \"\") + remainingText } });\n        break;\n    }\n\n    // Find the last space within the limit to avoid breaking a word\n    let splitIndex = remainingText.lastIndexOf(\" \", maxLength);\n    \n    // If no space is found, split strictly at maxLength (fallback for long words)\n    if (splitIndex === -1) {\n        splitIndex = maxLength;\n    }\n\n    let chunkText = remainingText.substring(0, splitIndex);\n    \n    // Prepend the header only to the first chunk\n    if (isFirstChunk) {\n        chunkText = header + chunkText;\n    }\n\n    chunks.push({ json: { chunk: chunkText } });\n    \n    // Update remaining text for the next iteration\n    remainingText = remainingText.substring(splitIndex).trim();\n}\n\nreturn chunks;"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Log Run": {
+        "main": [
+          [
+            {
+              "node": "Prepare Messages for Discord",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Error Trigger": {
+        "main": [
+          [
+            {
+              "node": "Prepare Error Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log Run Error": {
+        "main": [
+          [
+            {
+              "node": "Discord Error Reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Metadata": {
+        "main": [
+          [
+            {
+              "node": "Read Subtitle File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Discord Trigger": {
+        "main": [
+          [
+            {
+              "node": "Extract YouTube URL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is YouTube URL?": {
+        "main": [
+          [
+            {
+              "node": "yt-dlp Get Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Discord Not YouTube Reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Message a model": {
+        "main": [
+          [
+            {
+              "node": "Prepare Insert Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Transcript": {
+        "main": [
+          [
+            {
+              "node": "Message a model",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save to Supabase": {
+        "main": [
+          [
+            {
+              "node": "Prepare Success Log",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Error Data": {
+        "main": [
+          [
+            {
+              "node": "Log Run Error",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read Subtitle File": {
+        "main": [
+          [
+            {
+              "node": "Parse Transcript",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract YouTube URL": {
+        "main": [
+          [
+            {
+              "node": "Is YouTube URL?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Insert Data": {
+        "main": [
+          [
+            {
+              "node": "Save to Supabase",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Success Log": {
+        "main": [
+          [
+            {
+              "node": "Log Run",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "yt-dlp Get Metadata": {
+        "main": [
+          [
+            {
+              "node": "Parse Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Messages for Discord": {
+        "main": [
+          [
+            {
+              "node": "Discord Reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 29,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 7
+      },
+      "n8n-nodes-base.discord": {
+        "count": 3
+      },
+      "n8n-nodes-base.supabase": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 10
+      },
+      "n8n-nodes-base.errorTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.executeCommand": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.googleGemini": {
+        "count": 1
+      },
+      "n8n-nodes-discord-trigger.discordTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Tristan V",
+    "username": "tristanv",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://trendai.au/"
+    ],
+    "avatar": "https://gravatar.com/avatar/0d7dfd796a3b8d7208160c5a0ebb0fa9045ad7792df9b216347daa7c64a644d8?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 12,
+      "icon": "fa:bug",
+      "name": "n8n-nodes-base.errorTrigger",
+      "codex": {
+        "data": {
+          "details": "In n8n, when a workflow execution fails, it can start another workflow. This second workflow can be any arbitrary workflow on your n8n instance. Use the Error Trigger node as your Trigger in the Error workflow.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/creating-error-workflows-in-n8n/",
+                "icon": "🌪",
+                "label": "Creating Error Workflows in n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.errortrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Error Trigger",
+        "color": "#0000FF"
+      },
+      "iconData": {
+        "icon": "bug",
+        "type": "icon"
+      },
+      "displayName": "Error Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "icon": "fa:terminal",
+      "name": "n8n-nodes-base.executeCommand",
+      "codex": {
+        "data": {
+          "alias": [
+            "Shell",
+            "Command",
+            "OS",
+            "Bash"
+          ],
+          "details": "Execute command allows you to run terminal commands on the computer/server hosting your n8n instance. Useful for executing a shell script or interacting with your n8n instance programmatically via the CLI.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executecommand/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Execute Command",
+        "color": "#886644"
+      },
+      "iconData": {
+        "icon": "terminal",
+        "type": "icon"
+      },
+      "displayName": "Execute Command",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "icon": "file:discord.svg",
+      "name": "n8n-nodes-base.discord",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.discord/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/discord/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Discord"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTk5IiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzU4NjVGMiIgZD0iTTIxNi44NTYgMTYuNTk3QTIwOC41IDIwOC41IDAgMCAwIDE2NC4wNDIgMGMtMi4yNzUgNC4xMTMtNC45MzMgOS42NDUtNi43NjYgMTQuMDQ2cS0yOS41MzgtNC40NDItNTguNTMzIDBjLTEuODMyLTQuNC00LjU1LTkuOTMzLTYuODQ2LTE0LjA0NmEyMDcuOCAyMDcuOCAwIDAgMC01Mi44NTUgMTYuNjM4QzUuNjE4IDY3LjE0Ny0zLjQ0MyAxMTYuNCAxLjA4NyAxNjQuOTU2YzIyLjE2OSAxNi41NTUgNDMuNjUzIDI2LjYxMiA2NC43NzUgMzMuMTkzQTE2MSAxNjEgMCAwIDAgNzkuNzM1IDE3NS4zYTEzNi40IDEzNi40IDAgMCAxLTIxLjg0Ni0xMC42MzIgMTA5IDEwOSAwIDAgMCA1LjM1Ni00LjIzN2M0Mi4xMjIgMTkuNzAyIDg3Ljg5IDE5LjcwMiAxMjkuNTEgMGExMzIgMTMyIDAgMCAwIDUuMzU1IDQuMjM3IDEzNiAxMzYgMCAwIDEtMjEuODg2IDEwLjY1M2M0LjAwNiA4LjAyIDguNjM4IDE1LjY3IDEzLjg3MyAyMi44NDggMjEuMTQyLTYuNTggNDIuNjQ2LTE2LjYzNyA2NC44MTUtMzMuMjEzIDUuMzE2LTU2LjI4OC05LjA4LTEwNS4wOS0zOC4wNTYtMTQ4LjM2TTg1LjQ3NCAxMzUuMDk1Yy0xMi42NDUgMC0yMy4wMTUtMTEuODA1LTIzLjAxNS0yNi4xOHMxMC4xNDktMjYuMiAyMy4wMTUtMjYuMiAyMy4yMzYgMTEuODA0IDIzLjAxNSAyNi4yYy4wMiAxNC4zNzUtMTAuMTQ4IDI2LjE4LTIzLjAxNSAyNi4xOG04NS4wNTEgMGMtMTIuNjQ1IDAtMjMuMDE0LTExLjgwNS0yMy4wMTQtMjYuMThzMTAuMTQ4LTI2LjIgMjMuMDE0LTI2LjJjMTIuODY3IDAgMjMuMjM2IDExLjgwNCAyMy4wMTUgMjYuMiAwIDE0LjM3NS0xMC4xNDggMjYuMTgtMjMuMDE1IDI2LjE4Ii8+PC9zdmc+"
+      },
+      "displayName": "Discord",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 545,
+      "icon": "file:supabase.svg",
+      "name": "n8n-nodes-base.supabase",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.supabase/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/supabase/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Supabase"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDkiIGhlaWdodD0iMTEzIiBmaWxsPSJub25lIj48cGF0aCBmaWxsPSJ1cmwoI2EpIiBkPSJNNjMuNzA4IDExMC4yODRjLTIuODYgMy42MDEtOC42NTggMS42MjgtOC43MjctMi45N2wtMS4wMDctNjcuMjUxaDQ1LjIyYzguMTkgMCAxMi43NTggOS40NiA3LjY2NSAxNS44NzR6Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZmlsbC1vcGFjaXR5PSIuMiIgZD0iTTYzLjcwOCAxMTAuMjg0Yy0yLjg2IDMuNjAxLTguNjU4IDEuNjI4LTguNzI3LTIuOTdsLTEuMDA3LTY3LjI1MWg0NS4yMmM4LjE5IDAgMTIuNzU4IDkuNDYgNy42NjUgMTUuODc0eiIvPjxwYXRoIGZpbGw9IiMzRUNGOEUiIGQ9Ik00NS4zMTcgMi4wNzFjMi44Ni0zLjYwMSA4LjY1Ny0xLjYyOCA4LjcyNiAyLjk3bC40NDIgNjcuMjUxSDkuODNjLTguMTkgMC0xMi43NTktOS40Ni03LjY2NS0xNS44NzV6Ii8+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJhIiB4MT0iNTMuOTc0IiB4Mj0iOTQuMTYzIiB5MT0iNTQuOTc0IiB5Mj0iNzEuODI5IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agc3RvcC1jb2xvcj0iIzI0OTM2MSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzNFQ0Y4RSIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iMzYuMTU2IiB4Mj0iNTQuNDg0IiB5MT0iMzAuNTc4IiB5Mj0iNjUuMDgxIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3AvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1vcGFjaXR5PSIwIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Supabase",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1309,
+      "icon": "file:gemini.svg",
+      "name": "@n8n/n8n-nodes-langchain.googleGemini",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "video",
+            "document",
+            "audio",
+            "transcribe",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.googlegemini/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Google Gemini"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyBjbGFzcz0iX2Zvb3RlclNwYXJrXzk4dWR0XzE1MSIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiB2aWV3Qm94PSIwIDAgNjQgNjQiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTU3LjA2NjcgMjguNjEwM0M1Mi4xMzU5IDI2LjQ4NzggNDcuODIxNyAyMy41NzYgNDQuMTIyMyAxOS44Nzg0QzQwLjQyNDcgMTYuMTgwOCAzNy41MTI4IDExLjg2NDkgMzUuMzkwMiA2LjkzNDJDMzQuNTc1NCA1LjA0NDQ5IDMzLjkyMDYgMy4xMDIwNCAzMy40MTg2IDEuMTEwNDlDMzMuMjU0OSAwLjQ1OTM2OCAzMi42NzExIDAuMDAxMDM3NiAzMiAwLjAwMTAzNzZDMzEuMzI4OCAwLjAwMTAzNzYgMzAuNzQ1IDAuNDU5MzY4IDMwLjU4MTMgMS4xMTA0OUMzMC4wNzkzIDMuMTAyMDQgMjkuNDI0NiA1LjA0MjY3IDI4LjYwOTcgNi45MzQyQzI2LjQ4NzIgMTEuODY0OSAyMy41NzUzIDE2LjE4MDggMTkuODc3NyAxOS44Nzg0QzE2LjE4IDIzLjU3NiAxMS44NjQgMjYuNDg3OCA2LjkzMzI3IDI4LjYxMDNDNS4wNDM1MyAyOS40MjUxIDMuMTAxMDUgMzAuMDc5OSAxLjEwOTQ3IDMwLjU4MTlDMC40NTgzMzggMzAuNzQ1NiAwIDMxLjMyOTQgMCAzMi4wMDA1QzAgMzIuNjcxNiAwLjQ1ODMzOCAzMy4yNTU1IDEuMTA5NDcgMzMuNDE5MUMzLjEwMTA1IDMzLjkyMTEgNS4wNDE3MiAzNC41NzU5IDYuOTMzMjcgMzUuMzkwN0MxMS44NjQgMzcuNTEzMiAxNi4xNzgyIDQwLjQyNTEgMTkuODc3NyA0NC4xMjI2QzIzLjU3NzEgNDcuODIwMiAyNi40ODcyIDUyLjEzNjEgMjguNjA5NyA1Ny4wNjY4QzI5LjQyNDYgNTguOTU2NSAzMC4wNzkzIDYwLjg5OSAzMC41ODEzIDYyLjg5MDVDMzAuNzQ1IDYzLjU0MTYgMzEuMzI4OCA2NCAzMiA2NEMzMi42NzExIDY0IDMzLjI1NDkgNjMuNTQxNiAzMy40MTg2IDYyLjg5MDVDMzMuOTIwNiA2MC44OTkgMzQuNTc1NCA1OC45NTgzIDM1LjM5MDIgNTcuMDY2OEMzNy41MTI4IDUyLjEzNjEgNDAuNDI0NyA0Ny44MjIgNDQuMTIyMyA0NC4xMjI2QzQ3LjgxOTkgNDAuNDI1MSA1Mi4xMzU5IDM3LjUxMzIgNTcuMDY2NyAzNS4zOTA3QzU4Ljk1NjQgMzQuNTc1OSA2MC44OTg5IDMzLjkyMTEgNjIuODkwNSAzMy40MTkxQzYzLjU0MTYgMzMuMjU1NSA2NCAzMi42NzE2IDY0IDMyLjAwMDVDNjQgMzEuMzI5NCA2My41NDE2IDMwLjc0NTYgNjIuODkwNSAzMC41ODE5QzYwLjg5ODkgMzAuMDc5OSA1OC45NTgyIDI5LjQyNTEgNTcuMDY2NyAyOC42MTAzWiIgZmlsbD0id2hpdGUiPjwvcGF0aD48bWFzayBpZD0ibWFzazBfMTA4NTlfNDg5NCIgc3R5bGU9Im1hc2stdHlwZTphbHBoYSIgbWFza1VuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeD0iMCIgeT0iMCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij48cGF0aCBkPSJNMzIgMEMzMi42NzExIDEuMTQ0ZS0wNSAzMy4yNTUzIDAuNDU4MjYzIDMzLjQxODkgMS4xMDkzOEMzMy45MjA5IDMuMTAwOTMgMzQuNTc1OCA1LjA0Mzg5IDM1LjM5MDYgNi45MzM1OUMzNy41MTMxIDExLjg2MzkgNDAuNDI0NyAxNi4xNzk2IDQ0LjEyMjEgMTkuODc3QzQ3LjgyMTUgMjMuNTc0NSA1Mi4xMzU3IDI2LjQ4NjkgNTcuMDY2NCAyOC42MDk0QzU4Ljk1OCAyOS40MjQyIDYwLjg5OSAzMC4wNzkxIDYyLjg5MDYgMzAuNTgxMUM2My41NDE1IDMwLjc0NDggNjMuOTk5OCAzMS4zMjgxIDY0IDMxLjk5OUM2NCAzMi42NzAxIDYzLjU0MTcgMzMuMjU0MiA2Mi44OTA2IDMzLjQxOEM2MC44OTkgMzMuOTE5OSA1OC45NTYxIDM0LjU3NDggNTcuMDY2NCAzNS4zODk2QzUyLjEzNTggMzcuNTEyMSA0Ny44MTk2IDQwLjQyMzcgNDQuMTIyMSA0NC4xMjExQzQwLjQyNDYgNDcuODIwNCAzNy41MTMxIDUyLjEzNDkgMzUuMzkwNiA1Ny4wNjU0QzM0LjU3NTggNTguOTU3IDMzLjkyMDkgNjAuODk4MSAzMy40MTg5IDYyLjg4OTZDMzMuMjU1MiA2My41NDA3IDMyLjY3MTEgNjMuOTk5IDMyIDYzLjk5OUMzMS4zMjg5IDYzLjk5OSAzMC43NDQ4IDYzLjU0MDcgMzAuNTgxMSA2Mi44ODk2QzMwLjA3OTEgNjAuODk4MSAyOS40MjQyIDU4Ljk1NTEgMjguNjA5NCA1Ny4wNjU0QzI2LjQ4NjkgNTIuMTM0OSAyMy41NzczIDQ3LjgxODYgMTkuODc3OSA0NC4xMjExQzE2LjE3ODYgNDAuNDIzNyAxMS44NjQyIDM3LjUxMjEgNi45MzM1OSAzNS4zODk2QzUuMDQyMDQgMzQuNTc0OCAzLjEwMDk2IDMzLjkxOTkgMS4xMDkzOCAzMy40MThDMC40NTgzMDkgMzMuMjU0MiAwIDMyLjY3MDEgMCAzMS45OTlDMC4wMDAyMDE1NDggMzEuMzI4MSAwLjQ1ODQ2MyAzMC43NDQ4IDEuMTA5MzggMzAuNTgxMUMzLjEwMDk2IDMwLjA3OTEgNS4wNDM4NiAyOS40MjQyIDYuOTMzNTkgMjguNjA5NEMxMS44NjQzIDI2LjQ4NjkgMTYuMTgwNCAyMy41NzQ1IDE5Ljg3NzkgMTkuODc3QzIzLjU3NTMgMTYuMTc5NiAyNi40ODY5IDExLjg2MzkgMjguNjA5NCA2LjkzMzU5QzI5LjQyNDIgNS4wNDIwNyAzMC4wNzkxIDMuMTAwOTMgMzAuNTgxMSAxLjEwOTM4QzMwLjc0NDggMC40NTgyNiAzMS4zMjg5IDAgMzIgMFoiIGZpbGw9ImJsYWNrIj48L3BhdGg+PHBhdGggZD0iTTMyIDBDMzIuNjcxMSAxLjE0NGUtMDUgMzMuMjU1MyAwLjQ1ODI2MyAzMy40MTg5IDEuMTA5MzhDMzMuOTIwOSAzLjEwMDkzIDM0LjU3NTggNS4wNDM4OSAzNS4zOTA2IDYuOTMzNTlDMzcuNTEzMSAxMS44NjM5IDQwLjQyNDcgMTYuMTc5NiA0NC4xMjIxIDE5Ljg3N0M0Ny44MjE1IDIzLjU3NDUgNTIuMTM1NyAyNi40ODY5IDU3LjA2NjQgMjguNjA5NEM1OC45NTggMjkuNDI0MiA2MC44OTkgMzAuMDc5MSA2Mi44OTA2IDMwLjU4MTFDNjMuNTQxNSAzMC43NDQ4IDYzLjk5OTggMzEuMzI4MSA2NCAzMS45OTlDNjQgMzIuNjcwMSA2My41NDE3IDMzLjI1NDIgNjIuODkwNiAzMy40MThDNjAuODk5IDMzLjkxOTkgNTguOTU2MSAzNC41NzQ4IDU3LjA2NjQgMzUuMzg5NkM1Mi4xMzU4IDM3LjUxMjEgNDcuODE5NiA0MC40MjM3IDQ0LjEyMjEgNDQuMTIxMUM0MC40MjQ2IDQ3LjgyMDQgMzcuNTEzMSA1Mi4xMzQ5IDM1LjM5MDYgNTcuMDY1NEMzNC41NzU4IDU4Ljk1NyAzMy45MjA5IDYwLjg5ODEgMzMuNDE4OSA2Mi44ODk2QzMzLjI1NTIgNjMuNTQwNyAzMi42NzExIDYzLjk5OSAzMiA2My45OTlDMzEuMzI4OSA2My45OTkgMzAuNzQ0OCA2My41NDA3IDMwLjU4MTEgNjIuODg5NkMzMC4wNzkxIDYwLjg5ODEgMjkuNDI0MiA1OC45NTUxIDI4LjYwOTQgNTcuMDY1NEMyNi40ODY5IDUyLjEzNDkgMjMuNTc3MyA0Ny44MTg2IDE5Ljg3NzkgNDQuMTIxMUMxNi4xNzg2IDQwLjQyMzcgMTEuODY0MiAzNy41MTIxIDYuOTMzNTkgMzUuMzg5NkM1LjA0MjA0IDM0LjU3NDggMy4xMDA5NiAzMy45MTk5IDEuMTA5MzggMzMuNDE4QzAuNDU4MzA5IDMzLjI1NDIgMCAzMi42NzAxIDAgMzEuOTk5QzAuMDAwMjAxNTQ4IDMxLjMyODEgMC40NTg0NjMgMzAuNzQ0OCAxLjEwOTM4IDMwLjU4MTFDMy4xMDA5NiAzMC4wNzkxIDUuMDQzODYgMjkuNDI0MiA2LjkzMzU5IDI4LjYwOTRDMTEuODY0MyAyNi40ODY5IDE2LjE4MDQgMjMuNTc0NSAxOS44Nzc5IDE5Ljg3N0MyMy41NzUzIDE2LjE3OTYgMjYuNDg2OSAxMS44NjM5IDI4LjYwOTQgNi45MzM1OUMyOS40MjQyIDUuMDQyMDcgMzAuMDc5MSAzLjEwMDkzIDMwLjU4MTEgMS4xMDkzOEMzMC43NDQ4IDAuNDU4MjYgMzEuMzI4OSAwIDMyIDBaIiBmaWxsPSJ1cmwoI3BhaW50MF9saW5lYXJfMTA4NTlfNDg5NCkiPjwvcGF0aD48L21hc2s+PGcgbWFzaz0idXJsKCNtYXNrMF8xMDg1OV80ODk0KSI+PGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjBfZl8xMDg1OV80ODk0KSI+PGVsbGlwc2UgY3g9IjE0LjIwODQiIGN5PSIxNi43MTY0IiByeD0iMTQuMjA4NCIgcnk9IjE2LjcxNjQiIHRyYW5zZm9ybT0ibWF0cml4KDAuOTQyMzQzIDAuMzM0NjQ5IC0wLjMzNDY1NiAwLjk0MjM0IC03Ljk3OSAxMy43NzM1KSIgZmlsbD0iI0ZGRTQzMiI+PC9lbGxpcHNlPjwvZz48ZyBmaWx0ZXI9InVybCgjZmlsdGVyMV9mXzEwODU5XzQ4OTQpIj48ZWxsaXBzZSBjeD0iMjcuMDU0MyIgY3k9IjIuNTUxMTQiIHJ4PSIxOC4zOTQ0IiByeT0iMTguNzk4NSIgZmlsbD0iI0ZDNDEzRCI+PC9lbGxpcHNlPjwvZz48ZyBmaWx0ZXI9InVybCgjZmlsdGVyMl9mXzEwODU5XzQ4OTQpIj48ZWxsaXBzZSBjeD0iMTkuMjI0NSIgY3k9IjI0LjkwNDIiIHJ4PSIxOS4yMjQ1IiByeT0iMjQuOTA0MiIgdHJhbnNmb3JtPSJtYXRyaXgoMC45OTg4MDcgLTAuMDQ4ODI1NCAwLjA0ODgyNjYgMC45OTg4MDcgLTEuNzI3NzggMzIuNjU3MykiIGZpbGw9IiMwMEI5NUMiPjwvZWxsaXBzZT48L2c+PGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjNfZl8xMDg1OV80ODk0KSI+PGVsbGlwc2UgY3g9IjE5LjIyNDUiIGN5PSIyNC45MDQyIiByeD0iMTkuMjI0NSIgcnk9IjI0LjkwNDIiIHRyYW5zZm9ybT0ibWF0cml4KDAuOTk4ODA3IC0wLjA0ODgyNTQgMC4wNDg4MjY2IDAuOTk4ODA3IC0xLjcyNzc4IDMyLjY1NzMpIiBmaWxsPSIjMDBCOTVDIj48L2VsbGlwc2U+PC9nPjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI0X2ZfMTA4NTlfNDg5NCkiPjxlbGxpcHNlIGN4PSIxOC44NDI5IiBjeT0iMjAuNzQ0MSIgcng9IjE4Ljg0MjkiIHJ5PSIyMC43NDQxIiB0cmFuc2Zvcm09Im1hdHJpeCgwLjg1NDMwMSAtMC41MTk3NzkgMC41MTk3OSAwLjg1NDI5NCAtNy4xMzU3NCA0Ny41MDc4KSIgZmlsbD0iIzAwQjk1QyI+PC9lbGxpcHNlPjwvZz48ZyBmaWx0ZXI9InVybCgjZmlsdGVyNV9mXzEwODU5XzQ4OTQpIj48ZWxsaXBzZSBjeD0iNjYuNDYxNyIgY3k9IjI0Ljk3NyIgcng9IjE4LjA5MzMiIHJ5PSIxNy40MjI5IiBmaWxsPSIjMzE4NkZGIj48L2VsbGlwc2U+PC9nPjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI2X2ZfMTA4NTlfNDg5NCkiPjxlbGxpcHNlIGN4PSIyMC45MjkyIiBjeT0iMjIuMDc1MiIgcng9IjIwLjkyOTIiIHJ5PSIyMi4wNzUyIiB0cmFuc2Zvcm09Im1hdHJpeCgwLjc5NTk5IDAuNjA1MzEgLTAuNjA1MzIgMC43OTU5ODIgLTIuODE4ODUgLTcuNDMzMjMpIiBmaWxsPSIjRkJCQzA0Ij48L2VsbGlwc2U+PC9nPjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI3X2ZfMTA4NTlfNDg5NCkiPjxlbGxpcHNlIGN4PSIyNC4xMzExIiBjeT0iMjIuMjkxOSIgcng9IjI0LjEzMTEiIHJ5PSIyMi4yOTE5IiB0cmFuc2Zvcm09Im1hdHJpeCgwLjgyNDAzNyAwLjU2NjUzNiAtMC41NjY1NDYgMC44MjQwMyAzOS42MzM4IDAuMzEwNjA4KSIgZmlsbD0iIzMxODZGRiI+PC9lbGxpcHNlPjwvZz48ZyBmaWx0ZXI9InVybCgjZmlsdGVyOF9mXzEwODU5XzQ4OTQpIj48cGF0aCBkPSJNNTQuMjI1NSAtMi4zMDQwM0M1Ny4wMTk1IDEuNDk0NjIgNTMuNDI5NCA4Ljg4MDQgNDYuMjA2OCAxNC4xOTI2QzM4Ljk4NDIgMTkuNTA0OCAzMC44NjQyIDIwLjczMTggMjguMDcwMiAxNi45MzMxQzI1LjI3NjIgMTMuMTM0NSAyOC44NjYzIDUuNzQ4NjcgMzYuMDg4OSAwLjQzNjQ4NkM0My4zMTE1IC00Ljg3NTcgNTEuNDMxNSAtNi4xMDI2NyA1NC4yMjU1IC0yLjMwNDAzWiIgZmlsbD0iIzc0OUJGRiI+PC9wYXRoPjwvZz48ZyBmaWx0ZXI9InVybCgjZmlsdGVyOV9mXzEwODU5XzQ4OTQpIj48ZWxsaXBzZSBjeD0iMjcuNTg1MyIgY3k9IjE3LjE0NzgiIHJ4PSIyNy41ODUzIiByeT0iMTcuMTQ3OCIgdHJhbnNmb3JtPSJtYXRyaXgoMC43MzMxNjYgLTAuNjgwMDQ5IDAuNjgwMDYxIDAuNzMzMTU1IC0xMi4yNTgzIDkuNDk2OTUpIiBmaWxsPSIjRkM0MTNEIj48L2VsbGlwc2U+PC9nPjxnIGZpbHRlcj0idXJsKCNmaWx0ZXIxMF9mXzEwODU5XzQ4OTQpIj48ZWxsaXBzZSBjeD0iMTQuNzgxOSIgY3k9IjguNTk2MzciIHJ4PSIxNC43ODE5IiByeT0iOC41OTYzNyIgdHJhbnNmb3JtPSJtYXRyaXgoMC44MTMxODYgMC41ODIwMDQgLTAuNTgyMDE2IDAuODEzMTc3IDYuMzc4NDIgMzAuNTExKSIgZmlsbD0iI0ZGRUU0OCI+PC9lbGxpcHNlPjwvZz48L2c+PGRlZnM+PGZpbHRlciBpZD0iZmlsdGVyMF9mXzEwODU5XzQ4OTQiIHg9Ii0xOS42MTgiIHk9IjEyLjkwMjciIHdpZHRoPSIzOC44NjgxIiBoZWlnaHQ9IjQyLjc1NjIiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj48ZmVGbG9vZCBmbG9vZC1vcGFjaXR5PSIwIiByZXN1bHQ9IkJhY2tncm91bmRJbWFnZUZpeCI+PC9mZUZsb29kPjxmZUJsZW5kIG1vZGU9Im5vcm1hbCIgaW49IlNvdXJjZUdyYXBoaWMiIGluMj0iQmFja2dyb3VuZEltYWdlRml4IiByZXN1bHQ9InNoYXBlIj48L2ZlQmxlbmQ+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMi40NTk2NSIgcmVzdWx0PSJlZmZlY3QxX2ZvcmVncm91bmRCbHVyXzEwODU5XzQ4OTQiPjwvZmVHYXVzc2lhbkJsdXI+PC9maWx0ZXI+PGZpbHRlciBpZD0iZmlsdGVyMV9mXzEwODU5XzQ4OTQiIHg9Ii0xNS4xMjIzIiB5PSItNDAuMDI5NiIgd2lkdGg9Ijg0LjM1MzMiIGhlaWdodD0iODUuMTYxNSIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPjxmZUZsb29kIGZsb29kLW9wYWNpdHk9IjAiIHJlc3VsdD0iQmFja2dyb3VuZEltYWdlRml4Ij48L2ZlRmxvb2Q+PGZlQmxlbmQgbW9kZT0ibm9ybWFsIiBpbj0iU291cmNlR3JhcGhpYyIgaW4yPSJCYWNrZ3JvdW5kSW1hZ2VGaXgiIHJlc3VsdD0ic2hhcGUiPjwvZmVCbGVuZD48ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIxMS44OTExIiByZXN1bHQ9ImVmZmVjdDFfZm9yZWdyb3VuZEJsdXJfMTA4NTlfNDg5NCI+PC9mZUdhdXNzaWFuQmx1cj48L2ZpbHRlcj48ZmlsdGVyIGlkPSJmaWx0ZXIyX2ZfMTA4NTlfNDg5NCIgeD0iLTIwLjc2ODIiIHk9IjExLjQ4MzUiIHdpZHRoPSI3OC45MTYxIiBoZWlnaHQ9IjkwLjIxOTYiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj48ZmVGbG9vZCBmbG9vZC1vcGFjaXR5PSIwIiByZXN1bHQ9IkJhY2tncm91bmRJbWFnZUZpeCI+PC9mZUZsb29kPjxmZUJsZW5kIG1vZGU9Im5vcm1hbCIgaW49IlNvdXJjZUdyYXBoaWMiIGluMj0iQmFja2dyb3VuZEltYWdlRml4IiByZXN1bHQ9InNoYXBlIj48L2ZlQmxlbmQ+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTAuMTA4NiIgcmVzdWx0PSJlZmZlY3QxX2ZvcmVncm91bmRCbHVyXzEwODU5XzQ4OTQiPjwvZmVHYXVzc2lhbkJsdXI+PC9maWx0ZXI+PGZpbHRlciBpZD0iZmlsdGVyM19mXzEwODU5XzQ4OTQiIHg9Ii0yMC43NjgyIiB5PSIxMS40ODM1IiB3aWR0aD0iNzguOTE2MSIgaGVpZ2h0PSI5MC4yMTk2IiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+PGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiPjwvZmVGbG9vZD48ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluPSJTb3VyY2VHcmFwaGljIiBpbjI9IkJhY2tncm91bmRJbWFnZUZpeCIgcmVzdWx0PSJzaGFwZSI+PC9mZUJsZW5kPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjEwLjEwODYiIHJlc3VsdD0iZWZmZWN0MV9mb3JlZ3JvdW5kQmx1cl8xMDg1OV80ODk0Ij48L2ZlR2F1c3NpYW5CbHVyPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9ImZpbHRlcjRfZl8xMDg1OV80ODk0IiB4PSItMTkuODUiIHk9IjE0Ljk2NjQiIHdpZHRoPSI3OS4xODg2IiBoZWlnaHQ9IjgwLjkzNzgiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj48ZmVGbG9vZCBmbG9vZC1vcGFjaXR5PSIwIiByZXN1bHQ9IkJhY2tncm91bmRJbWFnZUZpeCI+PC9mZUZsb29kPjxmZUJsZW5kIG1vZGU9Im5vcm1hbCIgaW49IlNvdXJjZUdyYXBoaWMiIGluMj0iQmFja2dyb3VuZEltYWdlRml4IiByZXN1bHQ9InNoYXBlIj48L2ZlQmxlbmQ+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTAuMTA4NiIgcmVzdWx0PSJlZmZlY3QxX2ZvcmVncm91bmRCbHVyXzEwODU5XzQ4OTQiPjwvZmVHYXVzc2lhbkJsdXI+PC9maWx0ZXI+PGZpbHRlciBpZD0iZmlsdGVyNV9mXzEwODU5XzQ4OTQiIHg9IjI5LjE1NjEiIHk9Ii0xMS42NTgyIiB3aWR0aD0iNzQuNjExMSIgaGVpZ2h0PSI3My4yNzAzIiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+PGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiPjwvZmVGbG9vZD48ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluPSJTb3VyY2VHcmFwaGljIiBpbjI9IkJhY2tncm91bmRJbWFnZUZpeCIgcmVzdWx0PSJzaGFwZSI+PC9mZUJsZW5kPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjkuNjA2MTMiIHJlc3VsdD0iZWZmZWN0MV9mb3JlZ3JvdW5kQmx1cl8xMDg1OV80ODk0Ij48L2ZlR2F1c3NpYW5CbHVyPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9ImZpbHRlcjZfZl8xMDg1OV80ODk0IiB4PSItMzguMjkxIiB5PSItMTYuMjY4NyIgd2lkdGg9Ijc3LjUzOCIgaGVpZ2h0PSI3OC4xNTEzIiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+PGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiPjwvZmVGbG9vZD48ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluPSJTb3VyY2VHcmFwaGljIiBpbjI9IkJhY2tncm91bmRJbWFnZUZpeCIgcmVzdWx0PSJzaGFwZSI+PC9mZUJsZW5kPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjguNzA1OTEiIHJlc3VsdD0iZWZmZWN0MV9mb3JlZ3JvdW5kQmx1cl8xMDg1OV80ODk0Ij48L2ZlR2F1c3NpYW5CbHVyPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9ImZpbHRlcjdfZl8xMDg1OV80ODk0IiB4PSI3Ljc4MDM4IiB5PSItNi4wOTgxIiB3aWR0aD0iNzguMjE4MSIgaGVpZ2h0PSI3Ni44OTgyIiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+PGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiPjwvZmVGbG9vZD48ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluPSJTb3VyY2VHcmFwaGljIiBpbjI9IkJhY2tncm91bmRJbWFnZUZpeCIgcmVzdWx0PSJzaGFwZSI+PC9mZUJsZW5kPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjcuNzc0NzMiIHJlc3VsdD0iZWZmZWN0MV9mb3JlZ3JvdW5kQmx1cl8xMDg1OV80ODk0Ij48L2ZlR2F1c3NpYW5CbHVyPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9ImZpbHRlcjhfZl8xMDg1OV80ODk0IiB4PSIxMy4yMDgyIiB5PSItMTguNDI1IiB3aWR0aD0iNTUuODc5MyIgaGVpZ2h0PSI1MS40NzkxIiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+PGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiPjwvZmVGbG9vZD48ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluPSJTb3VyY2VHcmFwaGljIiBpbjI9IkJhY2tncm91bmRJbWFnZUZpeCIgcmVzdWx0PSJzaGFwZSI+PC9mZUJsZW5kPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjYuOTU2OTQiIHJlc3VsdD0iZWZmZWN0MV9mb3JlZ3JvdW5kQmx1cl8xMDg1OV80ODk0Ij48L2ZlR2F1c3NpYW5CbHVyPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9ImZpbHRlcjlfZl8xMDg1OV80ODk0IiB4PSItMTUuNDczOSIgeT0iLTMxLjAyNzIiIHdpZHRoPSI3MC4yMDM0IiBoZWlnaHQ9IjY4LjY3MzUiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj48ZmVGbG9vZCBmbG9vZC1vcGFjaXR5PSIwIiByZXN1bHQ9IkJhY2tncm91bmRJbWFnZUZpeCI+PC9mZUZsb29kPjxmZUJsZW5kIG1vZGU9Im5vcm1hbCIgaW49IlNvdXJjZUdyYXBoaWMiIGluMj0iQmFja2dyb3VuZEltYWdlRml4IiByZXN1bHQ9InNoYXBlIj48L2ZlQmxlbmQ+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iNS44NzU5OCIgcmVzdWx0PSJlZmZlY3QxX2ZvcmVncm91bmRCbHVyXzEwODU5XzQ4OTQiPjwvZmVHYXVzc2lhbkJsdXI+PC9maWx0ZXI+PGZpbHRlciBpZD0iZmlsdGVyMTBfZl8xMDg1OV80ODk0IiB4PSItMTQuMTczIiB5PSIyMC40NzQiIHdpZHRoPSI1NS4xMzczIiBoZWlnaHQ9IjUxLjI2MSIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPjxmZUZsb29kIGZsb29kLW9wYWNpdHk9IjAiIHJlc3VsdD0iQmFja2dyb3VuZEltYWdlRml4Ij48L2ZlRmxvb2Q+PGZlQmxlbmQgbW9kZT0ibm9ybWFsIiBpbj0iU291cmNlR3JhcGhpYyIgaW4yPSJCYWNrZ3JvdW5kSW1hZ2VGaXgiIHJlc3VsdD0ic2hhcGUiPjwvZmVCbGVuZD48ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSI3LjI3MjUzIiByZXN1bHQ9ImVmZmVjdDFfZm9yZWdyb3VuZEJsdXJfMTA4NTlfNDg5NCI+PC9mZUdhdXNzaWFuQmx1cj48L2ZpbHRlcj48bGluZWFyR3JhZGllbnQgaWQ9InBhaW50MF9saW5lYXJfMTA4NTlfNDg5NCIgeDE9IjE4LjE5MzEiIHkxPSI0Mi44MjEiIHgyPSI1MS40MzM1IiB5Mj0iMTQuNzk1OSIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPjxzdG9wIHN0b3AtY29sb3I9IiM0ODkzRkMiPjwvc3RvcD48c3RvcCBvZmZzZXQ9IjAuMjciIHN0b3AtY29sb3I9IiM0ODkzRkMiPjwvc3RvcD48c3RvcCBvZmZzZXQ9IjAuNzc2OTgxIiBzdG9wLWNvbG9yPSIjOTY5REZGIj48L3N0b3A+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjQkQ5OUZFIj48L3N0b3A+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PC9zdmc+Cg=="
+      },
+      "displayName": "Google Gemini",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 31,
+      "name": "Content Creation"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

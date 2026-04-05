@@ -1,0 +1,5233 @@
+{
+  "id": 13062,
+  "name": "Send candidate outcome emails and SMS and notify referrers with Airtable",
+  "views": 6,
+  "recentViews": 0,
+  "totalViews": 6,
+  "createdAt": "2026-01-28T12:06:47.618Z",
+  "description": "**How it works**\n\nThis workflow automates post-event and post-course communications for candidates, while also notifying referring partners at the correct milestones.\n\nThe workflow is triggered when Airtable updates timestamp fields related to Info Event Outcome or Course Outcome. Airtable controls when the workflow runs, and n8n controls what happens next. This separation avoids race conditions and keeps the system reliable.\n\nAfter triggering, the workflow normalizes record data and determines exactly one action path using a centralized Code node. Based on the outcome, it sends the correct candidate email and SMS, and optionally notifies the referring person. Each message is sent only once using checkbox “sent” flags stored in Airtable.\n\n**Setup steps**\n\nConnect Airtable and select the table containing candidate records.\n\nEnsure Airtable includes timestamp fields for Info Event Outcome and Course Outcome updates.\n\nEnsure checkbox fields exist to track which messages have already been sent.\n\nConnect your email provider (Brevo) and SMS provider.\n\nCustomize message content inside the Email and SMS nodes if needed.\n\nInitial setup typically takes 15–20 minutes.\n\n**When to use this template**\n\nYou need reliable post-event and post-course messaging\n\nYou want to notify referring partners automatically\n\nYou must prevent duplicate emails or SMS",
+  "workflow": {
+    "id": "9IrbnlGFKNh2EIqty18x-",
+    "meta": {
+      "instanceId": "8c9556f02fcb7ec149e2983bac6c292ec5d9a1076f6d2d2d9d5aabc9fe6a862d"
+    },
+    "name": "wf3",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "97230906-69dc-4afc-bfee-e9807082da69",
+        "name": "Tag eventType = info",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          864,
+          1008
+        ],
+        "parameters": {
+          "values": {
+            "string": [
+              {
+                "name": "eventType",
+                "value": "info"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "bc36d017-1ce4-4c4b-b209-421555cdbe56",
+        "name": "Tag eventType = course",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          864,
+          1200
+        ],
+        "parameters": {
+          "values": {
+            "string": [
+              {
+                "name": "eventType",
+                "value": "course"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c93fa83a-4ffb-4971-8d13-d3a79b5762aa",
+        "name": "Merge — Any Trigger",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          1088,
+          1104
+        ],
+        "parameters": {},
+        "typeVersion": 2
+      },
+      {
+        "id": "54ade592-b443-4be0-b709-56b328668725",
+        "name": "Code — Normalize + Decide Action",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1312,
+          1104
+        ],
+        "parameters": {
+          "jsCode": "function safeStr(v) {\n  return (v ?? '').toString().trim();\n}\n\nfunction normalizeBool(v) {\n  return v === true || v === 'checked' || v === 'true' || v === 1;\n}\n\nfunction toE164(phoneRaw) {\n  const p = safeStr(phoneRaw);\n  if (!p) return '';\n  return p.startsWith('+') ? p : `+${p}`;\n}\n\nreturn items.map((item) => {\n  const r = item.json || {};\n  const f = r.fields || {};\n\n  const eventType = safeStr(r.eventType); // 'info' | 'course'\n  const recordId = r.id;\n\n  const firstName = safeStr(f['First  Name'] ?? f['First Name'] ?? f['First Name ']);\n  const email = safeStr(f['Email']);\n  const phoneE164 = toE164(f['Phone Number']);\n\n  const referrerEmail = safeStr(f['Referrer Email'] ?? f['Referring Person Email']);\n\n  const infoOutcome = safeStr(f['Info Event Outcome']);   // Attended / Did Not Attend / Rescheduled\n  const courseOutcome = safeStr(f['Course Outcome']);     // Started / Did Not Start/Withdrawn / Completed\n\n  // Sent flags (candidate)\n  const postInfoAttendedSent = normalizeBool(f['Post-Info Attended Sent']);\n  const postInfoNoShowSent = normalizeBool(f['Post-Info NoShow Sent']);\n  const courseOutcomeMsgSent = normalizeBool(f['Course Outcome Message Sent']);\n\n  // Sent flags (referrer)\n  const referrerInfoNotified = normalizeBool(f['Referrer Notified – Info Outcome']);\n  const referrerCourseStartNotified = normalizeBool(f['Referrer Notified – Course Start']); // NEW FIELD\n  const referrerCourseEndNotified = normalizeBool(f['Referrer Notified – Course Outcome']); // reuse existing for end notification\n\n  // Normalize course outcome to a key for templates\n  let courseOutcomeKey = '';\n  if (courseOutcome === 'Started') courseOutcomeKey = 'started';\n  else if (courseOutcome === 'Did Not Start/Withdrawn') courseOutcomeKey = 'not_started_withdrawn';\n  else if (courseOutcome === 'Completed') courseOutcomeKey = 'completed';\n  else courseOutcomeKey = courseOutcome ? 'other' : '';\n\n  // Decide ONE action route (candidate messaging)\n  let action = 'none';\n\n  if (eventType === 'info') {\n    if (infoOutcome === 'Attended' && !postInfoAttendedSent) action = 'info_attended';\n    else if (infoOutcome === 'Did Not Attend' && !postInfoNoShowSent) action = 'info_noshow';\n    // Rescheduled => none\n  }\n\n  if (eventType === 'course') {\n    if (courseOutcomeKey && !courseOutcomeMsgSent) action = 'course';\n  }\n\n  // Referrer notifications (separate from candidate messaging)\n  const notifyReferrerInfo =\n    eventType === 'info' &&\n    !!referrerEmail &&\n    !referrerInfoNotified &&\n    (infoOutcome === 'Attended' || infoOutcome === 'Did Not Attend');\n\n  // NEW: referrer course start notification (only when Started)\n  const notifyReferrerCourseStart =\n    eventType === 'course' &&\n    !!referrerEmail &&\n    !referrerCourseStartNotified &&\n    courseOutcomeKey === 'started';\n\n  // NEW: referrer course end notification (only when Completed OR Withdrawn/Did Not Start)\n  const notifyReferrerCourseEnd =\n    eventType === 'course' &&\n    !!referrerEmail &&\n    !referrerCourseEndNotified &&\n    (courseOutcomeKey === 'completed' || courseOutcomeKey === 'not_started_withdrawn');\n\n  return {\n    json: {\n      recordId,\n      eventType,\n      action,\n\n      firstName,\n      email,\n      phoneE164,\n      referrerEmail,\n\n      infoOutcome,\n      courseOutcome,\n      courseOutcomeKey,\n\n      hasEmail: !!email,\n      hasPhone: !!phoneE164,\n\n      notifyReferrerInfo,\n      notifyReferrerCourseStart,\n      notifyReferrerCourseEnd,\n\n      applyLink: 'https://www.morestarts.co.uk/welding-course/',\n      senderName: 'Morestarts',\n      senderEmail: 'user@example.com'\n    }\n  };\n});\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f81f1c42-5553-42d8-88cb-ee1f6571ff26",
+        "name": "Switch — Route Action",
+        "type": "n8n-nodes-base.switch",
+        "position": [
+          1536,
+          1088
+        ],
+        "parameters": {
+          "rules": {
+            "rules": [
+              {
+                "value2": "info_attended",
+                "outputKey": "output 0"
+              },
+              {
+                "value2": "info_noshow",
+                "outputKey": "output 1"
+              },
+              {
+                "value2": "course",
+                "outputKey": "output 2"
+              }
+            ]
+          },
+          "value1": "={{ $json.action }}",
+          "dataType": "string"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "bcc5ebd1-56db-47a0-b149-91625024f2b0",
+        "name": "WF6 Complete",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2880,
+          1104
+        ],
+        "parameters": {
+          "values": {
+            "string": [
+              {
+                "name": "status",
+                "value": "WF6 Complete"
+              }
+            ]
+          },
+          "options": {},
+          "keepOnlySet": true
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ed248688-095b-4cf9-af96-3934175c7135",
+        "name": "Airtable Trigger — Info Outcome Updated At1",
+        "type": "n8n-nodes-base.airtableTrigger",
+        "position": [
+          640,
+          1008
+        ],
+        "parameters": {
+          "baseId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_id"
+          },
+          "tableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_table_id"
+          },
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          },
+          "triggerField": "InfoOutcomeUpdatedAt_TMP",
+          "authentication": "airtableTokenApi",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "76b54aad-41af-4ed2-a536-1b04e4b7c555",
+        "name": "Course Outcome Updated At",
+        "type": "n8n-nodes-base.airtableTrigger",
+        "position": [
+          640,
+          1200
+        ],
+        "parameters": {
+          "baseId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_ID"
+          },
+          "tableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Table_ID"
+          },
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          },
+          "triggerField": "Course Outcome Updated At",
+          "authentication": "airtableTokenApi",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d042e3ab-1a45-4bbd-a45b-67fc387816e9",
+        "name": "Attended email",
+        "type": "n8n-nodes-base.sendInBlue",
+        "position": [
+          1760,
+          912
+        ],
+        "parameters": {
+          "sender": "user@example.com",
+          "subject": "Course Place Confirmed",
+          "receipients": "={{ $json.email }}",
+          "textContent": "=Hi {{ $json.firstName || $json.fields['First Name'] }},\n\nThank you for attending the info event at [course name].\n\nWe are pleased to confirm that your place on the course is secure, and we look forward to welcoming you on Monday.\n\nIf you have changed your mind for any reason, please let us know as soon as possible by emailing sender@gmail.com\n\nYour name\n",
+          "requestOptions": {},
+          "additionalFields": {}
+        },
+        "credentials": {
+          "sendInBlueApi": {
+            "id": "credential-id",
+            "name": "onboarding workflow token 1/23/2026"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "91c4425d-91a0-4210-9e71-84fe60dd63f0",
+        "name": "Course outcome email",
+        "type": "n8n-nodes-base.sendInBlue",
+        "position": [
+          1760,
+          1488
+        ],
+        "parameters": {
+          "sender": "user@example.com",
+          "subject": "={{ \n  $json.courseOutcomeKey === 'started' ? 'Welcome to the Course' :\n  $json.courseOutcomeKey === 'not_started_withdrawn' ? 'Course Update' :\n  $json.courseOutcomeKey === 'completed' ? 'Congratulations on Completing the Course' :\n  'Course Update'\n}}\n",
+          "receipients": "={{ $json.email }}",
+          "textContent": "={{\n  $json.courseOutcomeKey === 'started'\n    ? `Hi ${$json.firstName || 'there'},\n\nWelcome to the coursename, Course name at Academy name.\n\nWe are pleased to confirm that you have successfully started the course and wish you every success.\n\nIf you have any questions during the course, please get in touch.\n\nsendername`\n    : $json.courseOutcomeKey === 'not_started_withdrawn'\n      ? `Hi ${$json.firstName || 'there'},\n\nWe noticed that you did not start or withdrew from the Course name.\n\nIf you would like to join a future course or discuss your options, please contact us as soon as possible.\n\nsendername`\n      : $json.courseOutcomeKey === 'completed'\n        ? `Hi ${$json.firstName || 'there'},\n\nCongratulations on successfully completing the Course name.\n\nWe wish you every success moving forward and thank you for training with coursename.\n\nsendername`\n        : `Hi ${$json.firstName || 'there'},\n\nCourse update.\n\nsendername`\n}}\n",
+          "requestOptions": {},
+          "additionalFields": {}
+        },
+        "credentials": {
+          "sendInBlueApi": {
+            "id": "credential-id",
+            "name": "onboarding workflow token 1/23/2026"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "639245b4-65ca-48b4-964d-1240219619b6",
+        "name": "Airtable — Commit Post-Info Attended Sent",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          1984,
+          816
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base-ID"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Table_ID"
+          },
+          "columns": {
+            "value": {
+              "id": "={{ $('Airtable Trigger — Info Outcome Updated At1').item.json.id }}"
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "First  Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First  Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "DWP Work Coach or Employer Advisor Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "DWP Work Coach or Employer Advisor Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Job Center",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "DE - Alfreton",
+                    "value": "DE - Alfreton"
+                  },
+                  {
+                    "name": "DE - Matlock",
+                    "value": "DE - Matlock"
+                  },
+                  {
+                    "name": "DE - Chesterfield",
+                    "value": "DE - Chesterfield"
+                  },
+                  {
+                    "name": "DE - Belper",
+                    "value": "DE - Belper"
+                  },
+                  {
+                    "name": "DE - Heanor",
+                    "value": "DE - Heanor"
+                  },
+                  {
+                    "name": "DE - Ilkeston",
+                    "value": "DE - Ilkeston"
+                  },
+                  {
+                    "name": "DE - Derby",
+                    "value": "DE - Derby"
+                  },
+                  {
+                    "name": "NG - Mansfield",
+                    "value": "NG - Mansfield"
+                  },
+                  {
+                    "name": "NG - Ashfield",
+                    "value": "NG - Ashfield"
+                  },
+                  {
+                    "name": "NG - Shirebrook",
+                    "value": "NG - Shirebrook"
+                  },
+                  {
+                    "name": "NG - Nottingham",
+                    "value": "NG - Nottingham"
+                  },
+                  {
+                    "name": "NG - Beeston",
+                    "value": "NG - Beeston"
+                  },
+                  {
+                    "name": "NG - Long Eaton",
+                    "value": "NG - Long Eaton"
+                  },
+                  {
+                    "name": "NG - Arnold",
+                    "value": "NG - Arnold"
+                  },
+                  {
+                    "name": "NG - Bulwell",
+                    "value": "NG - Bulwell"
+                  },
+                  {
+                    "name": "Other...",
+                    "value": "Other..."
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Job Center",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Phone Number",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Phone Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nationality",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Nationality",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes",
+                    "value": "Yes"
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "I have lived in England",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Most/All of my life",
+                    "value": "Most/All of my life"
+                  },
+                  {
+                    "name": "Under 3 Years",
+                    "value": "Under 3 Years"
+                  },
+                  {
+                    "name": "More than 3 Years / Less than 5 years",
+                    "value": "More than 3 Years / Less than 5 years"
+                  },
+                  {
+                    "name": "More than 5 years",
+                    "value": "More than 5 years"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "I have lived in England",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes ",
+                    "value": "Yes "
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  },
+                  {
+                    "name": "Prefer Not To Say (You won't be able to do the course)",
+                    "value": "Prefer Not To Say (You won't be able to do the course)"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Approved",
+                    "value": "Approved"
+                  },
+                  {
+                    "name": "Rejected",
+                    "value": "Rejected"
+                  },
+                  {
+                    "name": "Pending",
+                    "value": "Pending"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Decision",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Next Info Event time",
+                "type": "dateTime",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Next Info Event time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Send Outreach Now",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Send Outreach Now",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reffering Person's Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reffering Person's Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course List Pipeline",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course List Pipeline",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Leads",
+                    "value": "Leads"
+                  },
+                  {
+                    "name": "Applied",
+                    "value": "Applied"
+                  },
+                  {
+                    "name": "Confirmed",
+                    "value": "Confirmed"
+                  },
+                  {
+                    "name": "Closed",
+                    "value": "Closed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Event Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Attended",
+                    "value": "Attended"
+                  },
+                  {
+                    "name": "Did Not Attend",
+                    "value": "Did Not Attend"
+                  },
+                  {
+                    "name": "Rescheduled",
+                    "value": "Rescheduled"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Event Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Started",
+                    "value": "Started"
+                  },
+                  {
+                    "name": "Did Not Start/Withdrawn",
+                    "value": "Did Not Start/Withdrawn"
+                  },
+                  {
+                    "name": "Completed",
+                    "value": "Completed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Application Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Application Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 1 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 1 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 2 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 2 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Urgent Call Required",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Urgent Call Required",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Info Event",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Info Event",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Course Start",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Course Start",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last modified time",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Last modified time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Outreach Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Triggered At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Triggered At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision Updated At v2",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Decision Updated At v2",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Approved Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Approved Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Rejection Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Rejection Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "From field: Info Event Scheduled Date",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "From field: Info Event Scheduled Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 1d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 1d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 3d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 3d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "InfoOutcomeUpdatedAt_TMP",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "InfoOutcomeUpdatedAt_TMP",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Updated At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Course Outcome Updated At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info Attended Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info Attended Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info NoShow Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info NoShow Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Message Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome Message Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a52644f3-0c4e-4e3b-ab6e-f5013b10091c",
+        "name": "Airtable — Commit Post-Info NoShow Sent",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          1984,
+          1200
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_Id"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Table_Id"
+          },
+          "columns": {
+            "value": {
+              "id": "={{ $('Airtable Trigger — Info Outcome Updated At1').item.json.id }}",
+              "Post-Info NoShow Sent": true
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "First  Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First  Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "DWP Work Coach or Employer Advisor Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "DWP Work Coach or Employer Advisor Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Job Center",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "DE - Alfreton",
+                    "value": "DE - Alfreton"
+                  },
+                  {
+                    "name": "DE - Matlock",
+                    "value": "DE - Matlock"
+                  },
+                  {
+                    "name": "DE - Chesterfield",
+                    "value": "DE - Chesterfield"
+                  },
+                  {
+                    "name": "DE - Belper",
+                    "value": "DE - Belper"
+                  },
+                  {
+                    "name": "DE - Heanor",
+                    "value": "DE - Heanor"
+                  },
+                  {
+                    "name": "DE - Ilkeston",
+                    "value": "DE - Ilkeston"
+                  },
+                  {
+                    "name": "DE - Derby",
+                    "value": "DE - Derby"
+                  },
+                  {
+                    "name": "NG - Mansfield",
+                    "value": "NG - Mansfield"
+                  },
+                  {
+                    "name": "NG - Ashfield",
+                    "value": "NG - Ashfield"
+                  },
+                  {
+                    "name": "NG - Shirebrook",
+                    "value": "NG - Shirebrook"
+                  },
+                  {
+                    "name": "NG - Nottingham",
+                    "value": "NG - Nottingham"
+                  },
+                  {
+                    "name": "NG - Beeston",
+                    "value": "NG - Beeston"
+                  },
+                  {
+                    "name": "NG - Long Eaton",
+                    "value": "NG - Long Eaton"
+                  },
+                  {
+                    "name": "NG - Arnold",
+                    "value": "NG - Arnold"
+                  },
+                  {
+                    "name": "NG - Bulwell",
+                    "value": "NG - Bulwell"
+                  },
+                  {
+                    "name": "Other...",
+                    "value": "Other..."
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Job Center",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Phone Number",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Phone Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nationality",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Nationality",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes",
+                    "value": "Yes"
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "I have lived in England",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Most/All of my life",
+                    "value": "Most/All of my life"
+                  },
+                  {
+                    "name": "Under 3 Years",
+                    "value": "Under 3 Years"
+                  },
+                  {
+                    "name": "More than 3 Years / Less than 5 years",
+                    "value": "More than 3 Years / Less than 5 years"
+                  },
+                  {
+                    "name": "More than 5 years",
+                    "value": "More than 5 years"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "I have lived in England",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes ",
+                    "value": "Yes "
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  },
+                  {
+                    "name": "Prefer Not To Say (You won't be able to do the course)",
+                    "value": "Prefer Not To Say (You won't be able to do the course)"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Approved",
+                    "value": "Approved"
+                  },
+                  {
+                    "name": "Rejected",
+                    "value": "Rejected"
+                  },
+                  {
+                    "name": "Pending",
+                    "value": "Pending"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Decision",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Next Info Event time",
+                "type": "dateTime",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Next Info Event time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Send Outreach Now",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Send Outreach Now",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reffering Person's Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reffering Person's Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course List Pipeline",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course List Pipeline",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Leads",
+                    "value": "Leads"
+                  },
+                  {
+                    "name": "Applied",
+                    "value": "Applied"
+                  },
+                  {
+                    "name": "Confirmed",
+                    "value": "Confirmed"
+                  },
+                  {
+                    "name": "Closed",
+                    "value": "Closed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Event Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Attended",
+                    "value": "Attended"
+                  },
+                  {
+                    "name": "Did Not Attend",
+                    "value": "Did Not Attend"
+                  },
+                  {
+                    "name": "Rescheduled",
+                    "value": "Rescheduled"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Event Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Started",
+                    "value": "Started"
+                  },
+                  {
+                    "name": "Did Not Start/Withdrawn",
+                    "value": "Did Not Start/Withdrawn"
+                  },
+                  {
+                    "name": "Completed",
+                    "value": "Completed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Application Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Application Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 1 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 1 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 2 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 2 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Urgent Call Required",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Urgent Call Required",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Info Event",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Info Event",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Course Start",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Course Start",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last modified time",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Last modified time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Outreach Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Triggered At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Triggered At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision Updated At v2",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Decision Updated At v2",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Approved Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Approved Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Rejection Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Rejection Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "From field: Info Event Scheduled Date",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "From field: Info Event Scheduled Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 1d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 1d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 3d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 3d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "InfoOutcomeUpdatedAt_TMP",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "InfoOutcomeUpdatedAt_TMP",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Updated At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Course Outcome Updated At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info Attended Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info Attended Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info NoShow Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info NoShow Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Message Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome Message Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "fb1e4931-84a9-4f6a-84a0-695d8eb8b413",
+        "name": "Brevo Email — Referrer Course Outcome1",
+        "type": "n8n-nodes-base.sendInBlue",
+        "position": [
+          2432,
+          1488
+        ],
+        "parameters": {
+          "sender": "user@example.com",
+          "subject": "Candidate Course Outcome Update",
+          "receipients": "={{ $('Merge — Any Trigger').item.json.fields['Reffering Person\\'s Email'] }}",
+          "textContent": "={{`Hello,\n\nThis is an update regarding your referred candidate ${$json.firstName || ''}.\n\nCourse Outcome: $json.fields['Course Outcome']\n\nsendername`}}\n",
+          "requestOptions": {},
+          "additionalFields": {}
+        },
+        "credentials": {
+          "sendInBlueApi": {
+            "id": "credential-id",
+            "name": "onboarding workflow token 1/23/2026"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f4d5957a-caf1-419b-9ac5-aa98d885020b",
+        "name": "Airtable — Commit Course Outcome Message Sent1",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          1984,
+          1488
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_Id"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_Id"
+          },
+          "columns": {
+            "value": {
+              "id": "={{ $('Course Outcome Updated At').item.json.id }}",
+              "Course Outcome Message Sent": false
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "First  Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First  Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "DWP Work Coach or Employer Advisor Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "DWP Work Coach or Employer Advisor Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Job Center",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "DE - Alfreton",
+                    "value": "DE - Alfreton"
+                  },
+                  {
+                    "name": "DE - Matlock",
+                    "value": "DE - Matlock"
+                  },
+                  {
+                    "name": "DE - Chesterfield",
+                    "value": "DE - Chesterfield"
+                  },
+                  {
+                    "name": "DE - Belper",
+                    "value": "DE - Belper"
+                  },
+                  {
+                    "name": "DE - Heanor",
+                    "value": "DE - Heanor"
+                  },
+                  {
+                    "name": "DE - Ilkeston",
+                    "value": "DE - Ilkeston"
+                  },
+                  {
+                    "name": "DE - Derby",
+                    "value": "DE - Derby"
+                  },
+                  {
+                    "name": "NG - Mansfield",
+                    "value": "NG - Mansfield"
+                  },
+                  {
+                    "name": "NG - Ashfield",
+                    "value": "NG - Ashfield"
+                  },
+                  {
+                    "name": "NG - Shirebrook",
+                    "value": "NG - Shirebrook"
+                  },
+                  {
+                    "name": "NG - Nottingham",
+                    "value": "NG - Nottingham"
+                  },
+                  {
+                    "name": "NG - Beeston",
+                    "value": "NG - Beeston"
+                  },
+                  {
+                    "name": "NG - Long Eaton",
+                    "value": "NG - Long Eaton"
+                  },
+                  {
+                    "name": "NG - Arnold",
+                    "value": "NG - Arnold"
+                  },
+                  {
+                    "name": "NG - Bulwell",
+                    "value": "NG - Bulwell"
+                  },
+                  {
+                    "name": "Other...",
+                    "value": "Other..."
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Job Center",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Phone Number",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Phone Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nationality",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Nationality",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes",
+                    "value": "Yes"
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "I have lived in England",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Most/All of my life",
+                    "value": "Most/All of my life"
+                  },
+                  {
+                    "name": "Under 3 Years",
+                    "value": "Under 3 Years"
+                  },
+                  {
+                    "name": "More than 3 Years / Less than 5 years",
+                    "value": "More than 3 Years / Less than 5 years"
+                  },
+                  {
+                    "name": "More than 5 years",
+                    "value": "More than 5 years"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "I have lived in England",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes ",
+                    "value": "Yes "
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  },
+                  {
+                    "name": "Prefer Not To Say (You won't be able to do the course)",
+                    "value": "Prefer Not To Say (You won't be able to do the course)"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Approved",
+                    "value": "Approved"
+                  },
+                  {
+                    "name": "Rejected",
+                    "value": "Rejected"
+                  },
+                  {
+                    "name": "Pending",
+                    "value": "Pending"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Decision",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Next Info Event time",
+                "type": "dateTime",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Next Info Event time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Send Outreach Now",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Send Outreach Now",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reffering Person's Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reffering Person's Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course List Pipeline",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course List Pipeline",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Leads",
+                    "value": "Leads"
+                  },
+                  {
+                    "name": "Applied",
+                    "value": "Applied"
+                  },
+                  {
+                    "name": "Confirmed",
+                    "value": "Confirmed"
+                  },
+                  {
+                    "name": "Closed",
+                    "value": "Closed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Event Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Attended",
+                    "value": "Attended"
+                  },
+                  {
+                    "name": "Did Not Attend",
+                    "value": "Did Not Attend"
+                  },
+                  {
+                    "name": "Rescheduled",
+                    "value": "Rescheduled"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Event Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Started",
+                    "value": "Started"
+                  },
+                  {
+                    "name": "Did Not Start/Withdrawn",
+                    "value": "Did Not Start/Withdrawn"
+                  },
+                  {
+                    "name": "Completed",
+                    "value": "Completed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Application Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Application Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 1 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 1 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 2 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 2 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Urgent Call Required",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Urgent Call Required",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Info Event",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Info Event",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Course Start",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Course Start",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last modified time",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Last modified time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Outreach Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Triggered At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Triggered At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision Updated At v2",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Decision Updated At v2",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Approved Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Approved Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Rejection Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Rejection Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "From field: Info Event Scheduled Date",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "From field: Info Event Scheduled Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 1d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 1d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 3d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 3d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "InfoOutcomeUpdatedAt_TMP",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "InfoOutcomeUpdatedAt_TMP",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Updated At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Course Outcome Updated At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info Attended Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info Attended Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info NoShow Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info NoShow Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Message Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome Message Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "703c43f4-22b3-4bfb-9e7a-ff33cabfe9f8",
+        "name": "Referrer notified course start",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          2656,
+          1488
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_Id"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Table_Id"
+          },
+          "columns": {
+            "value": {
+              "id": "={{ $('Course Outcome Updated At').item.json.id }}",
+              "Referrer Notified – Course Start": true
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "First  Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First  Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "DWP Work Coach or Employer Advisor Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "DWP Work Coach or Employer Advisor Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Job Center",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "DE - Alfreton",
+                    "value": "DE - Alfreton"
+                  },
+                  {
+                    "name": "DE - Matlock",
+                    "value": "DE - Matlock"
+                  },
+                  {
+                    "name": "DE - Chesterfield",
+                    "value": "DE - Chesterfield"
+                  },
+                  {
+                    "name": "DE - Belper",
+                    "value": "DE - Belper"
+                  },
+                  {
+                    "name": "DE - Heanor",
+                    "value": "DE - Heanor"
+                  },
+                  {
+                    "name": "DE - Ilkeston",
+                    "value": "DE - Ilkeston"
+                  },
+                  {
+                    "name": "DE - Derby",
+                    "value": "DE - Derby"
+                  },
+                  {
+                    "name": "NG - Mansfield",
+                    "value": "NG - Mansfield"
+                  },
+                  {
+                    "name": "NG - Ashfield",
+                    "value": "NG - Ashfield"
+                  },
+                  {
+                    "name": "NG - Shirebrook",
+                    "value": "NG - Shirebrook"
+                  },
+                  {
+                    "name": "NG - Nottingham",
+                    "value": "NG - Nottingham"
+                  },
+                  {
+                    "name": "NG - Beeston",
+                    "value": "NG - Beeston"
+                  },
+                  {
+                    "name": "NG - Long Eaton",
+                    "value": "NG - Long Eaton"
+                  },
+                  {
+                    "name": "NG - Arnold",
+                    "value": "NG - Arnold"
+                  },
+                  {
+                    "name": "NG - Bulwell",
+                    "value": "NG - Bulwell"
+                  },
+                  {
+                    "name": "Other...",
+                    "value": "Other..."
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Job Center",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Phone Number",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Phone Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nationality",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Nationality",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes",
+                    "value": "Yes"
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "I have lived in England",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Most/All of my life",
+                    "value": "Most/All of my life"
+                  },
+                  {
+                    "name": "Under 3 Years",
+                    "value": "Under 3 Years"
+                  },
+                  {
+                    "name": "More than 3 Years / Less than 5 years",
+                    "value": "More than 3 Years / Less than 5 years"
+                  },
+                  {
+                    "name": "More than 5 years",
+                    "value": "More than 5 years"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "I have lived in England",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes ",
+                    "value": "Yes "
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  },
+                  {
+                    "name": "Prefer Not To Say (You won't be able to do the course)",
+                    "value": "Prefer Not To Say (You won't be able to do the course)"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Approved",
+                    "value": "Approved"
+                  },
+                  {
+                    "name": "Rejected",
+                    "value": "Rejected"
+                  },
+                  {
+                    "name": "Pending",
+                    "value": "Pending"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Decision",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Next Info Event time",
+                "type": "dateTime",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Next Info Event time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Send Outreach Now",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Send Outreach Now",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reffering Person's Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reffering Person's Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course List Pipeline",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course List Pipeline",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Leads",
+                    "value": "Leads"
+                  },
+                  {
+                    "name": "Applied",
+                    "value": "Applied"
+                  },
+                  {
+                    "name": "Confirmed",
+                    "value": "Confirmed"
+                  },
+                  {
+                    "name": "Closed",
+                    "value": "Closed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Event Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Attended",
+                    "value": "Attended"
+                  },
+                  {
+                    "name": "Did Not Attend",
+                    "value": "Did Not Attend"
+                  },
+                  {
+                    "name": "Rescheduled",
+                    "value": "Rescheduled"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Event Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Started",
+                    "value": "Started"
+                  },
+                  {
+                    "name": "Did Not Start/Withdrawn",
+                    "value": "Did Not Start/Withdrawn"
+                  },
+                  {
+                    "name": "Completed",
+                    "value": "Completed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Application Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Application Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 1 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 1 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 2 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 2 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Urgent Call Required",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Urgent Call Required",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Info Event",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Info Event",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Course Start",
+                "type": "boolean",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Course Start",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last modified time",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Last modified time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Outreach Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Triggered At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Triggered At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision Updated At v2",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Decision Updated At v2",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Approved Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Approved Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Rejection Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Rejection Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 1d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 1d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 3d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 3d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "InfoOutcomeUpdatedAt_TMP",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "InfoOutcomeUpdatedAt_TMP",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Updated At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Course Outcome Updated At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info Attended Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info Attended Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info NoShow Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info NoShow Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Message Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome Message Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e26e1e6d-39e4-4df8-82c6-ecf5ba44eaa9",
+        "name": "Airtable — Commit Referrer Notified (Info) [No-Show branch]",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          2432,
+          1008
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Base_Id"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Your_Table_Id"
+          },
+          "columns": {
+            "value": {
+              "id": "={{ $('Airtable Trigger — Info Outcome Updated At1').item.json.id }}",
+              "Referrer Notified – Info Event": true
+            },
+            "schema": [
+              {
+                "id": "id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": true,
+                "required": false,
+                "displayName": "id",
+                "defaultMatch": true
+              },
+              {
+                "id": "First  Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "First  Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Last Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "For funding purposes, please confirm your age. (You must be 19 or over as of 31st August 2025)",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "DWP Work Coach or Employer Advisor Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "DWP Work Coach or Employer Advisor Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Job Center",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "DE - Alfreton",
+                    "value": "DE - Alfreton"
+                  },
+                  {
+                    "name": "DE - Matlock",
+                    "value": "DE - Matlock"
+                  },
+                  {
+                    "name": "DE - Chesterfield",
+                    "value": "DE - Chesterfield"
+                  },
+                  {
+                    "name": "DE - Belper",
+                    "value": "DE - Belper"
+                  },
+                  {
+                    "name": "DE - Heanor",
+                    "value": "DE - Heanor"
+                  },
+                  {
+                    "name": "DE - Ilkeston",
+                    "value": "DE - Ilkeston"
+                  },
+                  {
+                    "name": "DE - Derby",
+                    "value": "DE - Derby"
+                  },
+                  {
+                    "name": "NG - Mansfield",
+                    "value": "NG - Mansfield"
+                  },
+                  {
+                    "name": "NG - Ashfield",
+                    "value": "NG - Ashfield"
+                  },
+                  {
+                    "name": "NG - Shirebrook",
+                    "value": "NG - Shirebrook"
+                  },
+                  {
+                    "name": "NG - Nottingham",
+                    "value": "NG - Nottingham"
+                  },
+                  {
+                    "name": "NG - Beeston",
+                    "value": "NG - Beeston"
+                  },
+                  {
+                    "name": "NG - Long Eaton",
+                    "value": "NG - Long Eaton"
+                  },
+                  {
+                    "name": "NG - Arnold",
+                    "value": "NG - Arnold"
+                  },
+                  {
+                    "name": "NG - Bulwell",
+                    "value": "NG - Bulwell"
+                  },
+                  {
+                    "name": "Other...",
+                    "value": "Other..."
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Job Center",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Phone Number",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Phone Number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Nationality",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Nationality",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes",
+                    "value": "Yes"
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Are you in receipt of either Universal Credit, JSA or ESA?",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "I have lived in England",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Most/All of my life",
+                    "value": "Most/All of my life"
+                  },
+                  {
+                    "name": "Under 3 Years",
+                    "value": "Under 3 Years"
+                  },
+                  {
+                    "name": "More than 3 Years / Less than 5 years",
+                    "value": "More than 3 Years / Less than 5 years"
+                  },
+                  {
+                    "name": "More than 5 years",
+                    "value": "More than 5 years"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "I have lived in England",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Yes ",
+                    "value": "Yes "
+                  },
+                  {
+                    "name": "No",
+                    "value": "No"
+                  },
+                  {
+                    "name": "Prefer Not To Say (You won't be able to do the course)",
+                    "value": "Prefer Not To Say (You won't be able to do the course)"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Do you have any unspent criminal convictions and/or limitations that restrict you from being in the presence of under 18's",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Morestarts will not share this data with any third party organisation other than Qualitrain Ltd, who delivers the course. By clicking Submit, you acknowledge and accept the above terms and wish to proceed with submitting the application.",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Approved",
+                    "value": "Approved"
+                  },
+                  {
+                    "name": "Rejected",
+                    "value": "Rejected"
+                  },
+                  {
+                    "name": "Pending",
+                    "value": "Pending"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Decision",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Next Info Event time",
+                "type": "dateTime",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Next Info Event time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Send Outreach Now",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Send Outreach Now",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reffering Person's Email",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reffering Person's Email",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course List Pipeline",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course List Pipeline",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Leads",
+                    "value": "Leads"
+                  },
+                  {
+                    "name": "Applied",
+                    "value": "Applied"
+                  },
+                  {
+                    "name": "Confirmed",
+                    "value": "Confirmed"
+                  },
+                  {
+                    "name": "Closed",
+                    "value": "Closed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Event Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Attended",
+                    "value": "Attended"
+                  },
+                  {
+                    "name": "Did Not Attend",
+                    "value": "Did Not Attend"
+                  },
+                  {
+                    "name": "Rescheduled",
+                    "value": "Rescheduled"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Event Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "Started",
+                    "value": "Started"
+                  },
+                  {
+                    "name": "Did Not Start/Withdrawn",
+                    "value": "Did Not Start/Withdrawn"
+                  },
+                  {
+                    "name": "Completed",
+                    "value": "Completed"
+                  }
+                ],
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Application Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Application Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 1 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 1 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reminder 2 Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Reminder 2 Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Urgent Call Required",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Urgent Call Required",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Info Event",
+                "type": "boolean",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Info Event",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Referrer Notified – Course Start",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Referrer Notified – Course Start",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Last modified time",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Last modified time",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Outreach Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Outreach Triggered At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Outreach Triggered At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Decision Updated At v2",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Decision Updated At v2",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Approved Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Approved Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Approved Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Rejection Email Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Rejection Email Sent At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Rejection Email Sent At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 1d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 1d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Info Reminder 3d Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Info Reminder 3d Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "InfoOutcomeUpdatedAt_TMP",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "InfoOutcomeUpdatedAt_TMP",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Updated At",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "Course Outcome Updated At",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info Attended Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info Attended Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Post-Info NoShow Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Post-Info NoShow Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Course Outcome Message Sent",
+                "type": "boolean",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Course Outcome Message Sent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "Airtable Personal Access Token account"
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "93c839f4-1699-48c4-9bc5-6b15b22bd876",
+        "name": "Brevo Email — Referrer Info Outcome",
+        "type": "n8n-nodes-base.sendInBlue",
+        "position": [
+          2208,
+          1008
+        ],
+        "parameters": {
+          "sender": "user@example.com",
+          "subject": "Candidate Info Event Outcome",
+          "receipients": "={{ $json.fields['Reffering Person\\'s Email'] }}\n",
+          "textContent": "={{`Hello,\n\nThis is an update regarding your referred candidate ${$json.firstName || ''}.\n\nInfo Event Outcome: ${$json.infoOutcome || ''}\n\nsendername`}}\n",
+          "requestOptions": {},
+          "additionalFields": {}
+        },
+        "credentials": {
+          "sendInBlueApi": {
+            "id": "credential-id",
+            "name": "onboarding workflow token 1/23/2026"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "65d24c37-49ff-4f59-90af-21b854fbd081",
+        "name": "Attended sms1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1760,
+          720
+        ],
+        "parameters": {
+          "url": "https://api.brevo.com/v3/transactionalSMS/send",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"sender\": \"sendername\",\n  \"recipient\": \"{{ $json.phoneE164 || $json.fields['Phone Number'] }}\",\n  \"content\": \"Hi {{ $json.firstName || $json.fields['First  Name'] }},\\n\\nI am pleased to confirm your place on the course it secure and we look forward to having you start on Monday.\\n\\nIf you have changed your mind for any reason, and no longer want to do the course, please let us know ASAP by emailing sender@gmail.com .\\n\\nsendername\",\n  \"type\": \"transactional\"\n}\n",
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "accept",
+                "value": "application/json"
+              },
+              {
+                "name": "api-key",
+                "value": "YOUR-API-KEY"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "feeda266-fa94-4f81-9d6d-509cd33dab15",
+        "name": "If1",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          2208,
+          1488
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "1f2b4d35-d052-4f67-9bce-8cc3fd957868",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "=={{ $json.notifyReferrerCourseStart }}\n",
+                "rightValue": ""
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "6a3bcccc-bbe3-4d51-b586-1ec25bb5e3dd",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          48,
+          176
+        ],
+        "parameters": {
+          "width": 368,
+          "height": 864,
+          "content": "## Candidate outcomes and referrer notifications\n\n## How it works\n\nThis workflow automates post-event and post-course communications for candidates, while also notifying referring partners at the correct milestones.\n\nThe workflow is triggered when Airtable updates timestamp fields related to Info Event Outcomes or Course Outcomes. Airtable controls when the workflow runs, and n8n controls what happens next. This separation avoids race conditions and keeps the system reliable.\n\nOnce triggered, the workflow normalizes record data and determines exactly one action path using a centralized Code node. Based on the outcome, it sends the appropriate candidate email and SMS, and optionally notifies the referring person. Each message is sent only once using checkbox “sent” flags stored in Airtable.\n\n## Setup steps\n\nConnect Airtable and select the table containing candidate records.\n\nEnsure Airtable includes timestamp fields for outcome updates.\n\nEnsure all “sent” fields are checkbox fields.\n\nConnect your email and SMS providers.\n\nCustomize message content in the Email and SMS nodes if needed."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3882dd9b-d6fc-4f5a-a333-498d7556f520",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          608,
+          800
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 512,
+          "content": "## Trigger & Event Detection\nWatches Airtable-managed timestamp fields for outcome changes.\nAirtable controls when the workflow runs."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "45e6a764-3d8e-4958-a7f2-452fd62790a9",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1248,
+          864
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 352,
+          "content": "## Normalize & Decide Action\nCentral logic layer that normalizes fields and outputs one action path.\nPrevents fragile IF chains."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7f891657-972e-4676-8171-1113593a6f16",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1680,
+          448
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 352,
+          "content": "## Candidate Messaging — Info Event Outcomes\nHandles post-info-event emails and SMS for attended and no-show outcomes.\nEach message is sent once only."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "61f43fb4-03fb-4ffc-b25c-d42225e2f75d",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1456,
+          1312
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 336,
+          "content": "## Candidate Messaging — Course Outcomes\n\nSends course outcome messages (started, withdrawn, completed).\nContent is driven by normalized outcome keys."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6e8e5889-947d-4486-95ac-dd5d8697178d",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2160,
+          720
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 352,
+          "content": "## Referrer Notifications\nNotifies referring partners when candidates progress or exit the course.\nRuns independently from candidate messaging."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d5d5d71d-455f-43d4-b819-3da1cc58d5fe",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2528,
+          1168
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 352,
+          "content": "## Commit Flags & Complete\nWrites “sent” flags back to Airtable and ends the workflow.\nGuarantees idempotency across retries."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e446da07-26c9-41dc-af94-aa70a5018bf7",
+        "name": "Did Not Attended sms",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1760,
+          1104
+        ],
+        "parameters": {
+          "url": "https://api.brevo.com/v3/transactionalSMS/send",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"sender\": \"sendername\",\n  \"recipient\": \"{{ $json.phoneE164 || $json.fields['Phone Number'] }}\",\n  \"content\": \"Hi {{ $json.firstName || $json.fields['First  Name'] }},\\n\\nAs you did not attend the info event at coursename, you have been removed from the course list.\\n\\nIf you are still interested in the next course, please call or text us on +12345678 as soon as possible.\\n\\nsendername\",\n  \"type\": \"transactional\"\n}\n",
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "accept",
+                "value": "application/json"
+              },
+              {
+                "name": "api-key",
+                "value": "YOUR-API-KEY"
+              },
+              {
+                "name": "content-type",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "80e6e60d-846b-496f-85a3-6dcf882b2ad2",
+        "name": "Did Not Attended email",
+        "type": "n8n-nodes-base.sendInBlue",
+        "position": [
+          1760,
+          1296
+        ],
+        "parameters": {
+          "sender": "Sender@gmail",
+          "subject": "Course Update",
+          "receipients": "={{ $json.email }}",
+          "textContent": "=Hi {{ $json.firstName || $json.fields['First Name'] }},\n\nAs you did not attend the info event at course name, you have been removed from the course list.\n\nIf you would still like to join a future course, please contact us as soon as possible by calling or texting +12345678.\n\nsender name\n",
+          "requestOptions": {},
+          "additionalFields": {}
+        },
+        "credentials": {
+          "sendInBlueApi": {
+            "id": "credential-id",
+            "name": "onboarding workflow token 1/23/2026"
+          }
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "bd2cdc34-ee23-4135-8084-6d0c4ea18362",
+    "connections": {
+      "If1": {
+        "main": [
+          [
+            {
+              "node": "Brevo Email — Referrer Course Outcome1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Attended sms1": {
+        "main": [
+          [
+            {
+              "node": "Airtable — Commit Post-Info Attended Sent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Attended email": {
+        "main": [
+          [
+            {
+              "node": "Airtable — Commit Post-Info Attended Sent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Course outcome email": {
+        "main": [
+          [
+            {
+              "node": "Airtable — Commit Course Outcome Message Sent1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Did Not Attended sms": {
+        "main": [
+          [
+            {
+              "node": "Airtable — Commit Post-Info NoShow Sent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Tag eventType = info": {
+        "main": [
+          [
+            {
+              "node": "Merge — Any Trigger",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge — Any Trigger": {
+        "main": [
+          [
+            {
+              "node": "Code — Normalize + Decide Action",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Did Not Attended email": {
+        "main": [
+          [
+            {
+              "node": "Airtable — Commit Post-Info NoShow Sent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Tag eventType = course": {
+        "main": [
+          [
+            {
+              "node": "Merge — Any Trigger",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Switch — Route Action": {
+        "main": [
+          [
+            {
+              "node": "Attended email",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Attended sms1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Did Not Attended sms",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Did Not Attended email",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Course outcome email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Course Outcome Updated At": {
+        "main": [
+          [
+            {
+              "node": "Tag eventType = course",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Referrer notified course start": {
+        "main": [
+          [
+            {
+              "node": "WF6 Complete",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code — Normalize + Decide Action": {
+        "main": [
+          [
+            {
+              "node": "Switch — Route Action",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Brevo Email — Referrer Info Outcome": {
+        "main": [
+          [
+            {
+              "node": "Airtable — Commit Referrer Notified (Info) [No-Show branch]",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Brevo Email — Referrer Course Outcome1": {
+        "main": [
+          [
+            {
+              "node": "Referrer notified course start",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Airtable — Commit Post-Info NoShow Sent": {
+        "main": [
+          [
+            {
+              "node": "Brevo Email — Referrer Info Outcome",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Airtable — Commit Post-Info Attended Sent": {
+        "main": [
+          [
+            {
+              "node": "Brevo Email — Referrer Info Outcome",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Airtable Trigger — Info Outcome Updated At1": {
+        "main": [
+          [
+            {
+              "node": "Tag eventType = info",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Airtable — Commit Course Outcome Message Sent1": {
+        "main": [
+          [
+            {
+              "node": "If1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Airtable — Commit Referrer Notified (Info) [No-Show branch]": {
+        "main": [
+          [
+            {
+              "node": "WF6 Complete",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 28,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.set": {
+        "count": 3
+      },
+      "n8n-nodes-base.code": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.switch": {
+        "count": 1
+      },
+      "n8n-nodes-base.airtable": {
+        "count": 5
+      },
+      "n8n-nodes-base.sendInBlue": {
+        "count": 5
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.airtableTrigger": {
+        "count": 2
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Jasurbek",
+    "username": "jasurbeknematov",
+    "bio": "AI automation specialist building production-ready n8n workflows that eliminate manual work and reduce operational complexity. I design reliable systems using Airtable, email, SMS, and AI, with strong idempotency and real-world edge cases handled properly. All templates here are adapted from live client implementations and built for practical, day-to-day use in production.",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/c7899fd7d1e90f52cf7ca996a1c5928f5d06dea82552d4ba59921ce2efb4e979?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 2,
+      "icon": "file:airtable.svg",
+      "name": "n8n-nodes-base.airtable",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-sms-the-low-code-way-with-airtable-twilio-programmable-sms-and-n8n/",
+                "icon": "📱",
+                "label": "Sending SMS the Low-Code Way with Airtable, Twilio Programmable SMS, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automating-conference-organization-processes-with-n8n/",
+                "icon": "🙋‍♀️",
+                "label": "Automating Conference Organization Processes with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.airtable/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/airtable/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Airtable"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMTcwIj48cGF0aCBmaWxsPSIjZmNiNDAwIiBkPSJNODkgNC44IDE2LjIgMzQuOWMtNC4xIDEuNy00IDcuNC4xIDkuMWw3My4yIDI5YzYuNCAyLjYgMTMuNiAyLjYgMjAgMGw3My4yLTI5YzQuMS0xLjYgNC4xLTcuNC4xLTkuMWwtNzMtMzAuMUMxMDMuMiAyIDk1LjcgMiA4OSA0LjgiLz48cGF0aCBmaWxsPSIjMThiZmZmIiBkPSJNMTA1LjkgODguOXY3Mi41YzAgMy40IDMuNSA1LjggNi43IDQuNWw4MS42LTMxLjdjMS45LS43IDMuMS0yLjUgMy4xLTQuNVY1Ny4yYzAtMy40LTMuNS01LjgtNi43LTQuNUwxMDkgODQuM2MtMS45LjgtMy4xIDIuNi0zLjEgNC42Ii8+PHBhdGggZmlsbD0iI2Y4MmI2MCIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctMi41IDEuMkw5LjEgMTMwYy0zLjIgMS42LTcuNC0uOC03LjQtNC40VjU3LjVjMC0xLjMuNy0yLjQgMS42LTMuM3EuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNSA0LjMgNy4xLjUgOC45Ii8+PHBhdGggZmlsbD0iI2JhMWU0NSIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctNTkuNC01MHEuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNCA0LjMgNyAuNSA4LjgiLz48L3N2Zz4="
+      },
+      "displayName": "Airtable",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.switch",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "If",
+            "Path",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Branch",
+            "Case"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Switch",
+        "color": "#506000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "Switch",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 408,
+      "icon": "file:airtable.svg",
+      "name": "n8n-nodes-base.airtableTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.airtabletrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/airtable/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Airtable Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMTcwIj48cGF0aCBmaWxsPSIjZmNiNDAwIiBkPSJNODkgNC44IDE2LjIgMzQuOWMtNC4xIDEuNy00IDcuNC4xIDkuMWw3My4yIDI5YzYuNCAyLjYgMTMuNiAyLjYgMjAgMGw3My4yLTI5YzQuMS0xLjYgNC4xLTcuNC4xLTkuMWwtNzMtMzAuMUMxMDMuMiAyIDk1LjcgMiA4OSA0LjgiLz48cGF0aCBmaWxsPSIjMThiZmZmIiBkPSJNMTA1LjkgODguOXY3Mi41YzAgMy40IDMuNSA1LjggNi43IDQuNWw4MS42LTMxLjdjMS45LS43IDMuMS0yLjUgMy4xLTQuNVY1Ny4yYzAtMy40LTMuNS01LjgtNi43LTQuNUwxMDkgODQuM2MtMS45LjgtMy4xIDIuNi0zLjEgNC42Ii8+PHBhdGggZmlsbD0iI2Y4MmI2MCIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctMi41IDEuMkw5LjEgMTMwYy0zLjIgMS42LTcuNC0uOC03LjQtNC40VjU3LjVjMC0xLjMuNy0yLjQgMS42LTMuM3EuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNSA0LjMgNy4xLjUgOC45Ii8+PHBhdGggZmlsbD0iI2JhMWU0NSIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctNTkuNC01MHEuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNCA0LjMgNyAuNSA4LjgiLz48L3N2Zz4="
+      },
+      "displayName": "Airtable Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 820,
+      "icon": "file:brevo.svg",
+      "name": "n8n-nodes-base.sendInBlue",
+      "codex": {
+        "data": {
+          "alias": [
+            "sendinblue"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.brevo/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/brevo/"
+              }
+            ]
+          },
+          "categories": [
+            "Marketing",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Brevo"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iMjQiIGN5PSIyNCIgcj0iMjQiIGZpbGw9IiMwQjk5NkUiLz48cGF0aCBmaWxsPSIjZmZmIiBkPSJNMzEuNTA0IDIxLjgxYzEuNDgzLTEuNDU0IDIuMTc5LTMuMTMzIDIuMTc5LTUuMTc1IDAtNC4yMi0zLjEwNi03LjAzNS03Ljc4Ny03LjAzNUgxNC40djMwaDkuMjdDMzAuNzE4IDM5LjYgMzYgMzUuMjg5IDM2IDI5LjU3YzAtMy4xMzItMS42MjItNS45NDUtNC40OTYtNy43Nm0tMTIuOTMyLTguMzA4aDYuODZjMi4zMTcgMCAzLjg0OCAxLjMxNiAzLjg0OCAzLjMxMyAwIDIuMjY5LTEuOTkzIDMuOTk0LTYuMDcyIDUuMzEtMi43ODEuODYxLTQuMDMyIDEuNTg4LTQuNDk2IDIuNDUxbC0uMTQuMDAyem00LjcyNyAyMi4xOTZoLTQuNzI3di00LjYzYzAtMi4wNDIgMS43NjItNC4wMzkgNC4yMTktNC44MSAyLjE3OS0uNzI3IDMuOTg1LTEuNDU0IDUuNTE2LTIuMjI0IDIuMDM5IDEuMTgxIDMuMjkgMy4yMjIgMy4yOSA1LjM1NiAwIDMuNjMtMy41MjMgNi4zMDgtOC4yOTggNi4zMDgiLz48L3N2Zz4="
+      },
+      "displayName": "Brevo",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 27,
+          "name": "Marketing"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 38,
+      "name": "Lead Nurturing"
+    }
+  ],
+  "image": []
+}

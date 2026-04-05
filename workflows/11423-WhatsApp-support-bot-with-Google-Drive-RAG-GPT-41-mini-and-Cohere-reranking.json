@@ -1,0 +1,2072 @@
+{
+  "id": 9043,
+  "name": "WhatsApp support bot with Google Drive RAG, GPT-4.1-mini and Cohere reranking",
+  "views": 924,
+  "recentViews": 0,
+  "totalViews": 924,
+  "createdAt": "2025-09-28T12:09:25.137Z",
+  "description": "# WhatsApp RAG Agent (Text + Voice) with Weekly Google Drive Sync\n\n**One-line summary :** Answers WhatsApp in under 100 words, understands voice notes, and retrieves trusted answers from your Google Drive docs (RAG) kept fresh weekly.\n\n---\n\n## What this template does\n\n* **Reply to WhatsApp messages** in a polite, human tone with **≤100 words**.\n* **Understands text and voice notes**: auto-downloads audio and transcribes to text.\n* **Retrieves answers from your knowledge base (RAG)**: Google Drive docs → chunk → embed → store in Supabase → rerank with Cohere.\n* **Keeps short-term memory** across the conversation to avoid repetition.\n* **Weekly doc sync** from a selected Google Drive folder so non-technical staff can update content without touching n8n.\n\n---\n\n## Why it matters\n\n* **Zero busywork:** Update a Google Doc; the bot learns it on the next sync.\n* **Trustworthy answers:** Responses come from **your** vetted docs, not random web text.\n* **Voice-first friendly:** Handles the WhatsApp reality of “send a voice note.”\n* **Safer by design:** Guardrails—no pricing unless in KB, no pushy sales, no medical advice.\n\n---\n\n## Triggers\n\n* **WhatsApp Trigger:** Receives incoming messages (text or audio).\n* **Google Drive Trigger (weekly):** Detects new/updated files in the chosen folder for ingestion.\n\n---\n\n## App credentials required\n\n* **WhatsApp Business Cloud** (App ID, Token, Phone Number ID)\n* **OpenAI** (Chat + Embeddings)\n* **Cohere** (Rerank)\n* **Supabase** (SUPABASE_URL, ANON_KEY)\n* **Google Drive** (OAuth2) + target Folder ID\n\n---\n\n## Suggested environment variables\n\n```bash\nWHATSAPP_APP_ID=\nWHATSAPP_TOKEN=\nWHATSAPP_PHONE_NUMBER_ID=\nOPENAI_API_KEY=\nCOHERE_API_KEY=\nSUPABASE_URL=\nSUPABASE_ANON_KEY=\nGDRIVE_FOLDER_ID=\nRAG_TABLE_NAME=\"documents\"     # table to store vectors/metadata\nMAX_ANSWER_WORDS=100            # guardrail for concise replies\n```\n\n---\n\n## Architecture overview\n\n* **Answer-time lane (RAG Tool):**\n\n  1. Receive WhatsApp message → 2) Transcribe audio if present → 3) Maintain short-term memory → 4) Retrieve from Supabase vectors (topK) → 5) Rerank with Cohere → 6) Compose ≤100-word reply with sources → 7) Send on WhatsApp.\n* **Ingest lane (Weekly Sync):**\n  A) Detect Drive file updates → B) Download & convert (Docs → text/plain) → C) Chunk (size/overlap) → D) Embed with OpenAI → E) Upsert to Supabase with metadata & hashes.\n\n---\n\n## How it works (node rundown)\n\n| #  | Node                                        | Key Inputs                      | Key Outputs                       |\n| -- | ------------------------------------------- | ------------------------------- | --------------------------------- |\n| 1  | **WhatsApp Trigger**                        | Incoming message                | Raw WhatsApp payload              |\n| 2  | **Switch** (Attachment presence/type)       | Payload                         | Route: **Text** or **Audio**      |\n| 3  | **HTTP Request** (Audio path)               | `attachments[0].data_url`       | Audio file                        |\n| 4  | **OpenAI – Translate/ASR**                  | Audio file                      | Transcribed text                  |\n| 5  | **Merge**                                   | Text path + Audio path          | Unified text message              |\n| 6  | **Simple Memory**                           | Recent turns                    | Short-term context                |\n| 7  | **OpenAI Chat Model**                       | Prompt + message + memory       | Draft answer (tool calls allowed) |\n| 8  | **Supabase Vector Tool (retrieve-as-tool)** | Query text, `topK=10`           | Candidate KB passages             |\n| 9  | **Cohere Reranker**                         | Candidates                      | Re-ranked context                 |\n| 10 | **Send WhatsApp Message**                   | `to`, `body`                    | Reply sent                        |\n| 11 | **Google Drive Trigger (weekly)**           | Folder ID, `fileUpdated`        | Changed files                     |\n| 12 | **Set (File Id)**                           | id from trigger                 | File ref                          |\n| 13 | **Google Drive – Download File**            | Id (Docs→txt)                   | Raw text                          |\n| 14 | **Character Text Splitter**                 | `chunkSize=2000`, `overlap=300` | Chunks                            |\n| 15 | **Default Data Loader**                     | Binary→Document                 | Clean docs                        |\n| 16 | **OpenAI Embeddings (ingest)**              | Chunks                          | Vectors                           |\n| 17 | **Supabase Vector Store (insert)**          | Table: `documents`              | Upserted KB                       |\n\n**Notes**\n\n* The **KB Tool** is the combo of steps 8–9–7 at answer time (retrieve → rerank → answer).\n* The **Ingest lane** is steps 11–17 (weekly sync of your Drive folder).\n\n---\n\n## Setup (7‑minute sprint)\n\n1. **Import the workflow** JSON.\n2. **Connect credentials:** WhatsApp, OpenAI, Cohere, Supabase, Google Drive.\n3. **Google Drive Trigger:** paste your **Folder ID**; keep `fileUpdated` event.\n4. **Download File:** ensure Google Docs convert to **text/plain**.\n5. **Supabase Vector Store (insert):** set table name to **`documents`** (or your schema).\n6. **Character Text Splitter:** keep `chunkSize=2000`, `overlap=300` (balanced recall/latency).\n7. **Retrieve-as-tool:** set `topK=10` and **enable reranker**.\n8. **Send WhatsApp Message** mapping:\n\n   * **Recipient**: `{{$(\"WhatsApp Trigger\").item.json.messages[0].from}}`\n   * **Body**: `{{$json.output}}`\n9. **Test:**\n\n   * Send a **text** and a **voice note** to your WhatsApp number → confirm concise answers.\n   * Drop a Google Doc into the watched folder → verify it’s chunked/embedded on the next weekly poll (or run ingest nodes once manually).\n\n---\n\n## Prompt, tone & guardrails\n\n* **System prompt:**\n\n  * Be polite, human, and concise (**≤ `MAX_ANSWER_WORDS`**).\n  * Cite or reference **only** the KB content; if unknown, say so and offer to escalate.\n  * **No prices** unless present in the KB. **No medical advice.**\n* **Temperature:** start at **0.2** for factual replies.\n* **Memory window:** keep a short rolling buffer (e.g., last 4–6 turns).\n\n---\n\n## Data model (minimum viable)\n\nTable **`documents`** (example columns):\n\n* `id` (uuid)\n* `source_url` (text)\n* `title` (text)\n* `chunk` (text)\n* `embedding` (vector/float[] depending on extension)\n* `chunk_hash` (text)\n* `updated_at` (timestamp)\n\n**Indexes**\n\n* Unique index on `chunk_hash` to dedupe\n* Index on `updated_at` for syncs\n\n---\n\n## Observability & ops\n\n* Log **question**, **selected chunk ids/hashes**, and **final response** to a DB/Sheet for QA.\n* Add a **low-confidence** route (score threshold) → Slack/Telegram escalation to a human.\n* Track **latency** and **token usage** to tune `topK` and chunk sizes.\n\n---\n\n## Customization\n\n* **Latency vs quality:** try `topK=6–8` and `chunkSize=1200` for speed.\n* **Languages:** ASR node can be swapped for native multilingual output.\n* **Escalation:** add channel handoff on low confidence or no KB hits.\n* **Sync cadence:** change Drive Trigger to **daily** if content updates frequently.\n\n---\n\n## Safety & compliance\n\n* **No medical advice.** If uncertain or clinical, ask to schedule a consult or refer to the right department.\n* **PII:** Don’t log full phone numbers in plaintext analytics; hash where possible.\n* **Prices & rates:** Only answer if present in the KB; otherwise hand off to front desk.\n\n---\n\n## Troubleshooting\n\n* **No reply sent:** Ensure **Send message** node reads `{{$json.output}}` (Agent’s response property).\n* **Audio path failing:** Confirm `attachments[0].data_url` exists and HTTP node fetches a valid file.\n* **KB not updating:** Manually execute the ingest lane; check rows in Supabase.\n* **Irrelevant answers:** Lower temperature to **0.2**, increase overlap to **400**, and verify Drive docs are clean and structured.\n\n---\n\n## Categories & tags\n\n* **Categories:** AI, Customer Support, Healthcare Ops, RAG, WhatsApp\n* **Tags:** WhatsApp, RAG, Google Drive, Supabase, OpenAI, Cohere, Voice Notes\n\n---\n\n## Pricing (rough, BYO keys)\n\n* **n8n:** self-host free; n8n.cloud billed by plan.\n* **OpenAI, Cohere:** usage-based by tokens/calls.\n* **Supabase:** free tier + usage; vector storage billed by size.\n* **WhatsApp Cloud:** Meta pricing per conversation.\n\n---\n\n## Nodes used in workflow\n\n**WhatsApp Trigger**, **Switch**, **HTTP Request**, **OpenAI (ASR + Chat + Embeddings)**, **Merge**, **Simple Memory**, **Supabase Vector Tool (retrieve)**, **Cohere Reranker**, **Google Drive Trigger**, **Set**, **Google Drive – Download**, **Character Text Splitter**, **Default Data Loader**.\n\n",
+  "workflow": {
+    "meta": {
+      "instanceId": "4554bb68a996ee908e0483a438b45e0b09c0f719ece2f844818367ebd1e83f3d",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "8b12986e-ee9a-4320-a8c1-408611d5206e",
+        "name": "Supabase Vector Store",
+        "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+        "position": [
+          608,
+          0
+        ],
+        "parameters": {
+          "mode": "insert",
+          "options": {
+            "queryName": "match_documents"
+          },
+          "tableName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "documents",
+            "cachedResultName": "documents"
+          }
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "credential-id",
+            "name": "supabaseApi Credential"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "fc078081-e9fa-47ce-8ddb-aa1ece9c8971",
+        "name": "Google Drive Trigger",
+        "type": "n8n-nodes-base.googleDriveTrigger",
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "event": "fileUpdated",
+          "options": {},
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyWeek",
+                "weekday": "0"
+              }
+            ]
+          },
+          "triggerOn": "specificFolder",
+          "folderToWatch": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1JCjixUoufxZRiFatfq-Nihr_vYRVoo2r",
+            "cachedResultUrl": "https://drive.google.com/drive/folders/1JCjixUoufxZRiFatfq-Nihr_vYRVoo2r",
+            "cachedResultName": "Holistic care"
+          }
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "25499c2f-015c-4ce2-814f-e5aa74b71882",
+        "name": "Edit Fields",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          208,
+          0
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "c33387a9-a6ed-485a-8ed9-c3fdb646de3a",
+                "name": "id",
+                "type": "string",
+                "value": "={{ $json.id }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "26d8fbde-cbbb-4a9d-b3e8-aaa3c6707faa",
+        "name": "Download file",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          416,
+          0
+        ],
+        "parameters": {
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.id }}"
+          },
+          "options": {
+            "googleFileConversion": {
+              "conversion": {
+                "docsToFormat": "text/plain"
+              }
+            }
+          },
+          "operation": "download"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "0a652935-f8e0-4c2b-94a1-a30448337aae",
+        "name": "Embeddings OpenAI",
+        "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "position": [
+          560,
+          176
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "1082a42a-6116-441b-8a55-4cacaf400e85",
+        "name": "Default Data Loader",
+        "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+        "position": [
+          704,
+          144
+        ],
+        "parameters": {
+          "options": {},
+          "dataType": "binary",
+          "textSplittingMode": "custom"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "e92c1b20-a752-44f6-b590-0a5a24898576",
+        "name": "Character Text Splitter",
+        "type": "@n8n/n8n-nodes-langchain.textSplitterCharacterTextSplitter",
+        "position": [
+          832,
+          272
+        ],
+        "parameters": {
+          "chunkSize": 2000,
+          "separator": ".",
+          "chunkOverlap": 300
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "00a4a495-5a62-4c31-814d-66406e3d95e9",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -112,
+          -64
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 1200,
+          "height": 464,
+          "content": "## Add documents to vector store\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fc14c2fb-e1c6-4e49-86eb-e54a96ac8a33",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          656,
+          -400
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "gpt-4.1-mini"
+          },
+          "options": {
+            "temperature": 0.3
+          }
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "eb8661ab-23d3-42a1-a63f-f9034195f8c0",
+        "name": "AI Agent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "onError": "continueRegularOutput",
+        "position": [
+          688,
+          -592
+        ],
+        "parameters": {
+          "text": "={{ $json['text '] }}",
+          "options": {
+            "systemMessage": "=SYSTEM ROLE\nYou are intelligent and the best customer support agent for **HolistiCare (DHA, Lahore)**.\nTone: concise, friendly, courteous, professional. No emojis. Spartan wording.Be sympathetic and empathetic with the customer. \n\nCONTEXT \n\nHolistiCare is a multi-specialty clinic in DHA Phase 3, Lahore, providing care across: Dermatology/Aesthetics, Dentistry, Physiotherapy (incl. Hijama), Psychology & Psychiatry, Nutrition/Weight Loss, Pediatrics, Orthopedics, Gastroenterology, Urology, Neurology, Eye/Optometry, Internal Medicine/Diabetology/Endocrinology/Pulmonology, Gynecology, and Lab Testing.\n- The customer are frustrated and want good treatment always treat them in a way they feel appriciated \n- only converse with the user and provide them with information in a friendly  manner \n- Ask the problems in a polite  way and address them with a solution \n\n\ntool: 'Knowledge_base'\ndescription: use this tool to address user symtopms and their queries regarding the clinic and their symptoms. make sure the output is not more than a single paragraph \n\nBehaviour\n- Always try to sound like a human have two way communication with the user\n- Do not bombard them information guide them towards their needs and then provide them with a solution  \n- do not draft an appointment message only address the customer query in a loving manner \n- Do not push the user to make an appointment  \n- Only make an appointment when asked for \n- do not mention booking appointment if not asked \n\n\nGUARDRAILS\n- keep the replies under 100 words always \n- Keep replies short and non-repetitive.\n- Do **not** quote prices unless explicitly provided by the clinic in the 'Knowlege_base' tool\n- Do **not** provide medical advice; recommend a consult when needed.If not in the 'Knowledge_base'\n- If user insists on an unavailable service/doctor → suggest nearest department or route to front desk.\n- Prefer WhatsApp/phone handoff upon any ambiguity the agent cannot resolve quickly.\n\n\n"
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "741188c9-3dfc-47e4-942b-604a8d248fda",
+        "name": "Switch",
+        "type": "n8n-nodes-base.switch",
+        "position": [
+          -16,
+          -592
+        ],
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "c0d70293-1022-4319-8103-fff749a376de",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.messages[0].type }}",
+                      "rightValue": "text"
+                    }
+                  ]
+                }
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "257bc935-a8ea-4a41-83c5-a1c1fecb5198",
+                      "operator": {
+                        "name": "filter.operator.equals",
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.messages[0].type }}",
+                      "rightValue": "audio"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "options": {}
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "4d5613df-dbba-480a-9698-2cd7b83fd86a",
+        "name": "HTTP Request",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -144,
+          -432
+        ],
+        "parameters": {
+          "url": "=https://graph.facebook.com/v21.0/{{ $('WhatsApp Trigger').item.json.messages[0].audio.id }}\n",
+          "options": {
+            "response": {
+              "response": {}
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "access_token",
+                "value": "Your acces token here "
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "33301513-6459-4b63-a795-611f7d2bba4e",
+        "name": "Translate a recording",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          240,
+          -432
+        ],
+        "parameters": {
+          "options": {},
+          "resource": "audio",
+          "operation": "translate"
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "ef1a43cf-6fac-4d86-8fe5-a025a478b825",
+        "name": "Merge",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          240,
+          -592
+        ],
+        "parameters": {},
+        "typeVersion": 3.2
+      },
+      {
+        "id": "2c97521c-21f5-4ba0-bf97-e16086f3252e",
+        "name": "Embeddings OpenAI1",
+        "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "position": [
+          912,
+          -256
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "4cc88c06-dd23-483b-95f6-097690e33a38",
+        "name": "Reranker Cohere",
+        "type": "@n8n/n8n-nodes-langchain.rerankerCohere",
+        "position": [
+          1072,
+          -256
+        ],
+        "parameters": {},
+        "credentials": {
+          "cohereApi": {
+            "id": "credential-id",
+            "name": "cohereApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6842e6d5-691b-4588-b33d-71c941c0ab54",
+        "name": "Send message",
+        "type": "n8n-nodes-base.whatsApp",
+        "position": [
+          1152,
+          -592
+        ],
+        "webhookId": "9e097e1c-7c81-4286-bb05-df6b1e05d219",
+        "parameters": {
+          "textBody": "={{ $json.output }}",
+          "operation": "send",
+          "phoneNumberId": "668904212970806",
+          "additionalFields": {},
+          "recipientPhoneNumber": "={{ $('WhatsApp Trigger').item.json.messages[0].from }}"
+        },
+        "credentials": {
+          "whatsAppApi": {
+            "id": "credential-id",
+            "name": "whatsAppApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "102f55f1-a7e9-425d-b4a7-ec7a78e57344",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -464,
+          -768
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 1856,
+          "height": 656,
+          "content": "## Ai agent "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "900a3b8d-9095-4dd4-a3b2-d2104168e174",
+        "name": "WhatsApp Trigger",
+        "type": "n8n-nodes-base.whatsAppTrigger",
+        "position": [
+          -272,
+          -592
+        ],
+        "webhookId": "3e4086bf-8e46-4489-9844-657dc6f96f73",
+        "parameters": {
+          "options": {},
+          "updates": [
+            "messages"
+          ]
+        },
+        "credentials": {
+          "whatsAppTriggerApi": {
+            "id": "credential-id",
+            "name": "whatsAppTriggerApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cb6d7ba3-b42c-4644-ab1f-db72269491f5",
+        "name": "Kknowledge_base",
+        "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+        "position": [
+          880,
+          -400
+        ],
+        "parameters": {
+          "mode": "retrieve-as-tool",
+          "topK": 10,
+          "options": {
+            "queryName": "match_documents"
+          },
+          "tableName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "documents",
+            "cachedResultName": "documents"
+          },
+          "useReranker": true,
+          "toolDescription": "Use this tool to address customer queries regarding their symptoms and their queries regarding the clinic. "
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "credential-id",
+            "name": "supabaseApi Credential"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "d0f0ece2-9bc5-49aa-aaf2-5132826b8f48",
+        "name": "Simple Memory",
+        "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+        "position": [
+          592,
+          -240
+        ],
+        "parameters": {
+          "sessionKey": "={{ $json.Phone }}",
+          "sessionIdType": "customKey"
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "6c1938a5-2674-4061-b5df-f48d34778273",
+        "name": "HTTP Request1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          64,
+          -432
+        ],
+        "parameters": {
+          "url": "={{ $json.url }}",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "file"
+              }
+            }
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE access token here "
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "030178e3-1fe6-4ab9-bc3f-e83cbbbb4b8f",
+        "name": "Edit Fields1",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          416,
+          -592
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "29681984-eb3c-4c26-8de4-41fe8171abe2",
+                "name": "Phone",
+                "type": "string",
+                "value": "={{ $('WhatsApp Trigger').item.json.messages[0].from }}"
+              },
+              {
+                "id": "8d05b1e7-6035-42b2-8919-677ecd82fcbd",
+                "name": "text ",
+                "type": "string",
+                "value": "={{ $json.text }}{{ $json.messages[0].text.body }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "de45d6c0-1b61-4b0f-90de-d259838b60d4",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1264,
+          -3280
+        ],
+        "parameters": {
+          "width": 768,
+          "height": 3136,
+          "content": "#  WhatsApp → AI Agent (OpenAI + Supabase KB) → Reply\n\nThis workflow turns incoming **WhatsApp** messages (text or audio) into **short, friendly clinic replies** using an AI Agent with memory and a Supabase-powered knowledge base. It enforces guardrails (≤100 words, no pricing unless in KB, no hard sells).\n\n---\n\n## 0) What you need ready\n\n* **n8n**: running with a public URL.\n* **Meta WhatsApp Business**:\n\n  * A phone number connected to the app.\n  * **Webhook verified** to your n8n WhatsApp Trigger node (Production URL).\n* **Credentials** configured in n8n:\n\n  * **WhatsApp Trigger** (App ID, Secret, Verify Token).\n  * **WhatsApp Send** (Phone Number ID + Access Token) for `Send message` node.\n  * **OpenAI** (for Chat + Transcription) → used by `OpenAI Chat Model` and `Translate a recording`.\n  * **Supabase** (URL + Key) → used by `Kknowledge_base` (vector store).\n  * **Cohere** (optional but wired) for reranking.\n* **Supabase Table**: `documents` populated with clinic FAQs/policies/services (chunked & embedded). Keep it accurate—**agent won’t invent prices or services**.\n\n---\n\n## 1) How the flow runs (high level)\n\n1. **Inbound** → `WhatsApp Trigger` receives a user message.\n2. **Branch** → `Switch` checks `messages[0].type`:\n\n   * `text` → goes straight to `Merge` → `Edit Fields1`.\n   * `audio` → fetch media (`HTTP Request` → `HTTP Request1`) → `Translate a recording` (speech→text) → into `Merge`.\n3. **Normalize fields** → `Edit Fields1` sets:\n\n   * `Phone` = sender phone\n   * `text` = unified message text (either the typed text or transcription)\n4. **Agent runtime**:\n\n   * `OpenAI Chat Model` (gpt-4.1-mini, temp 0.3) provides reasoning/response engine.\n   * **Memory** → `Simple Memory` uses `Phone` to keep short conversational context per user.\n   * **Knowledge Tool** → `Kknowledge_base` (Supabase vector search, topK=10, with Cohere reranker) is available to the agent **as a tool** for grounding answers.\n   * **Agent** → `AI Agent` applies the clinic-specific system prompt and guardrails to produce **≤100 words** replies.\n5. **Deliver** → `Send message` replies on WhatsApp with `{{$json.output}}`.\n\n---\n\n## 2) One-time setup checks\n\n* **WhatsApp Trigger**: subscribe to `messages` updates; set Verify Token; use the **Production** webhook URL in Meta.\n* **Switch** node**: rules check exactly `text` or `audio` on `messages[0].type`.\n* **Audio path**:\n\n  * `HTTP Request` GET media metadata from Graph API using `messages[0].audio.id` + `access_token` query.\n  * `HTTP Request1` downloads the file using returned `url` and `Authorization: Bearer <PAGE_ACCESS_TOKEN>` header.\n  * `Translate a recording` uses your **OpenAI** credential (Whisper/translate) to output text.\n* **Edit Fields1**: confirm the expressions:\n\n  ```\n  Phone   = {{$('WhatsApp Trigger').item.json.messages[0].from}}\n  text    = {{$json.text}}{{$json.messages[0].text.body}}\n  ```\n\n  This concatenates either transcription (`$json.text`) or typed text.\n* **Agent**:\n\n  * `OpenAI Chat Model`: model `gpt-4.1-mini`, temperature `0.3`.\n  * `AI Agent` system message includes tone/guardrails for **HolistiCare (DHA, Lahore)**.\n  * **Connect** Memory (`Simple Memory` with `sessionKey = {{$json.Phone}}`) and Tool (`Kknowledge_base`) to the Agent.\n* **Supabase KB** (`Kknowledge_base`): mode `retrieve-as-tool`, table `documents`, `topK=10`, `useReranker=true`. Ensure embeddings in your table align with the model you indexed with.\n* **Reranker Cohere** (optional): wired into the KB for better results; needs valid key.\n* **Send message**: Set `phoneNumberId` and credential to your WhatsApp Business account; recipient is `{{$('WhatsApp Trigger').item.json.messages[0].from}}`.\n\n---\n\n## 3) Guardrails the agent follows (baked in)\n\n* ≤100 words, concise, human, empathetic, no emojis.\n* No prices unless present in **Knowledge_base**.\n* No medical advice; suggest consult when needed.\n* Don’t push bookings; only book if asked.\n* Prefer quick handoff to WhatsApp/phone if unclear.\n\n---\n\n## 4) How to test end‑to‑end (fast)\n\n1. In Meta, send a **text** WhatsApp message to your business number.\n2. Check n8n exec: should follow **text path** → Agent → reply ≤100 words.\n3. Send an **audio** note: verify **audio path** → download → transcribe → Agent → reply.\n4. Ask for **price** not in KB: agent should **avoid quoting** and suggest contacting front desk.\n5. Ask for a **service** not offered: agent should route to nearest department or front desk.\n\n---\n\n## 5) Customization quick wins\n\n* **Tone**: adjust in the Agent system message (keep length & guardrails).\n* **Word limit**: change the guardrail in the system message and test.\n* **Memory window**: configure `Simple Memory` buffer length for more/less context.\n* **Stronger grounding**: lower `topK` or tighten KB content; consider domain tags in your Supabase documents.\n* **Switch language**: rely on OpenAI translate path for audio; for text, add language detection pre‑step if needed.\n\n---\n\n## 6) Troubleshooting\n\n* **No trigger**: ensure Meta webhook points to the **Production** URL of `WhatsApp Trigger` and events are subscribed.\n* **Audio fails to download**: check Graph `access_token` and that `HTTP Request1` sends `Authorization: Bearer <PAGE_ACCESS_TOKEN>`.\n* **Transcription empty**: confirm `Translate a recording` credential and response mapping into `Merge`.\n* **Agent ignores KB**: verify `Kknowledge_base` is connected as a **tool** to `AI Agent` and your Supabase table has data.\n* **Long replies**: tighten the system prompt; reduce temperature; add “strictly under 100 words” at the end.\n* **No outgoing message**: check `Send message` phoneNumberId, token, and WhatsApp Business permissions.\n\n---\n\n## 7) Mental model\n\nWhatsApp in → (text OR audio→text) → normalize → Agent (OpenAI) + Memory + KB tool → short, safe reply → WhatsApp out. Keep the KB clean and the agent stays honest. ✅\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3d285ec3-4284-4fa9-8dd2-32d756bf5bab",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1392,
+          -624
+        ],
+        "parameters": {
+          "width": 1152,
+          "height": 2224,
+          "content": "# : Auto‑ingest Google Drive docs into a Supabase Vector Store (for your KB)\n\nThis workflow watches a Google Drive **folder** and, when a file is updated, it **downloads → chunks → embeds → inserts** the text into a Supabase **`documents`** table for retrieval‑augmented agents.\n\n---\n\n## 0) What you need ready\n\n* **n8n** publicly reachable.\n* **Google Drive** OAuth credential with access to the watched folder.\n* **Supabase** project with a `documents` table that your vector store node is configured to use.\n* **OpenAI** API key (for embeddings).\n\n---\n\n## 1) How it runs (bird’s‑eye)\n\n1. **Trigger** → `Google Drive Trigger` polls **weekly (Sunday)** for `fileUpdated` events in the specified folder.\n2. **Capture file id** → `Edit Fields` sets `id = {{$json.id}}` for clean passing.\n3. **Download** → `Download file` pulls the file by id. If it’s a Google Doc/Sheet/Slide, it **converts Docs to `text/plain`** per options.\n4. **(Optional) Chunking** → `Character Text Splitter` defines chunk strategy (size **2000**, overlap **300**) and feeds `Default Data Loader`.\n5. **Embed + Insert** →\n\n   * `Embeddings OpenAI` provides the embedding model to the vector pipeline.\n   * `Default Data Loader` hands doc parts to the **`Supabase Vector Store`** (mode **insert**) which writes rows into **`documents`**.\n\n> Result: your updated Drive file is indexed for semantic search in Supabase.\n\n---\n\n## 2) One‑time setup checks\n\n* **Google Drive Trigger**\n\n  * `Trigger on`: **Specific folder** → confirm the folder id is correct.\n  * `Event`: **fileUpdated** (fires when a file changes in that folder or its children).\n  * `Poll schedule`: weekly; adjust if you want faster ingestion.\n* **Download file**\n\n  * `operation`: download by file id.\n  * **Google Docs conversion**: set to `docsToFormat: text/plain` (already set). Non‑Docs (PDF, .txt, .md) are downloaded as is.\n* **Character Text Splitter**\n\n  * `separator`: `.`\n  * `chunkSize`: **2000** | `chunkOverlap`: **300** (safe defaults; tune for your model).\n* **Embeddings OpenAI**\n\n  * Make sure the credential points to the right key; pick a modern embedding model (e.g., `text-embedding-3-small` or your preferred).\n* **Supabase Vector Store**\n\n  * `mode`: **insert**\n  * `tableName`: **documents**\n  * Has Supabase URL + service key in credentials.\n  * `options.queryName`: **match_documents** (the RPC you’ll use at query time).\n\n---\n\n## 3) Supported files & tips\n\n* **Google Docs** → auto‑converted to plain text.\n* **Plain text/Markdown** → ingests directly.\n* **PDF/Images** → not OCR’d by default. Add an OCR/parse step if needed before chunking.\n* Keep content clean: remove boilerplate headers/footers in source to avoid noisy chunks.\n\n---\n\n## 4) Customization quick wins\n\n* **Faster indexing**: change the trigger to `everyHour` or `every15Minutes`.\n* **Selective ingest**: filter by mimeType or filename in the trigger, or add a `Switch` node.\n* **Metadata**: add a `Set` node to attach `source`, `path`, `version`, `updatedAt` and map these to Supabase columns.\n* **De‑duplication**: before insert, call a Supabase function to upsert by `(source, doc_id, chunk_id)`.\n* **Chunking**: for Q&A docs, smaller chunks (e.g., 800/120 overlap) may give tighter hits.\n* **Embeddings model**: stay consistent between **index** and **query** pipelines to avoid vector mismatch.\n\n---\n\n## 5) Troubleshooting (fast)\n\n* **No events**: the file wasn’t actually “updated,” or polling window too wide; shorten schedule or manually bump file versions.\n* **Blank text**: conversion failed or binary file not supported; add a converter/OCR step.\n* **Insert errors**: check Supabase row size/column mapping; ensure your table schema matches what the node sends.\n* **Bad retrieval**: adjust chunking, ensure the same embedding model is used at query time, and verify you’re calling `match_documents` with sensible `topK`.\n\n---\n\n## 6) Mental model\n\nDrive update → Download (+convert) → Split → Embed → Insert into Supabase. Once this is solid, your chatbot/agent can query `match_documents` and stay fresh without manual uploads. ✅\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Merge": {
+        "main": [
+          [
+            {
+              "node": "Edit Fields1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Switch": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "HTTP Request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Agent": {
+        "main": [
+          [
+            {
+              "node": "Send message",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Edit Fields": {
+        "main": [
+          [
+            {
+              "node": "Download file",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Edit Fields1": {
+        "main": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request": {
+        "main": [
+          [
+            {
+              "node": "HTTP Request1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download file": {
+        "main": [
+          [
+            {
+              "node": "Supabase Vector Store",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request1": {
+        "main": [
+          [
+            {
+              "node": "Translate a recording",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Simple Memory": {
+        "ai_memory": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_memory",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Kknowledge_base": {
+        "ai_tool": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Reranker Cohere": {
+        "ai_reranker": [
+          [
+            {
+              "node": "Kknowledge_base",
+              "type": "ai_reranker",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WhatsApp Trigger": {
+        "main": [
+          [
+            {
+              "node": "Switch",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Embeddings OpenAI": {
+        "ai_embedding": [
+          [
+            {
+              "node": "Supabase Vector Store",
+              "type": "ai_embedding",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Embeddings OpenAI1": {
+        "ai_embedding": [
+          [
+            {
+              "node": "Kknowledge_base",
+              "type": "ai_embedding",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Default Data Loader": {
+        "ai_document": [
+          [
+            {
+              "node": "Supabase Vector Store",
+              "type": "ai_document",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Drive Trigger": {
+        "main": [
+          [
+            {
+              "node": "Edit Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Translate a recording": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Character Text Splitter": {
+        "ai_textSplitter": [
+          [
+            {
+              "node": "Default Data Loader",
+              "type": "ai_textSplitter",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 25,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.switch": {
+        "count": 1
+      },
+      "n8n-nodes-base.whatsApp": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.googleDrive": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.whatsAppTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleDriveTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.rerankerCohere": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.embeddingsOpenAi": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.memoryBufferWindow": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.vectorStoreSupabase": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.documentDefaultDataLoader": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.textSplitterCharacterTextSplitter": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Basil Irfan",
+    "username": "basil",
+    "bio": "",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/7f297b98d7b226d7f957568fef42758e711fd3c73d49ec5c69a6720a666b574b?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googledrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Drive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.switch",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "If",
+            "Path",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Branch",
+            "Case"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Switch",
+        "color": "#506000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "Switch",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 531,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDriveTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.googledrivetrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Google Drive Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 827,
+      "icon": "file:whatsapp.svg",
+      "name": "n8n-nodes-base.whatsApp",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.whatsapp/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/whatsapp/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "WhatsApp Business Cloud"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0ibTQuODY4IDQzLjMwMyAyLjY5NC05LjgzNWExOC45NCAxOC45NCAwIDAgMS0yLjUzNS05LjQ4OUM1LjAzMiAxMy41MTQgMTMuNTQ4IDUgMjQuMDE0IDVhMTguODcgMTguODcgMCAwIDEgMTMuNDMgNS41NjZBMTguODcgMTguODcgMCAwIDEgNDMgMjMuOTk0Yy0uMDA0IDEwLjQ2NS04LjUyMiAxOC45OC0xOC45ODYgMTguOThoLS4wMDhhMTkgMTkgMCAwIDEtOS4wNzMtMi4zMTF6Ii8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQuODY4IDQzLjgwM2EuNS41IDAgMCAxLS40ODItLjYzMWwyLjYzOS05LjYzNmExOS41IDE5LjUgMCAwIDEtMi40OTctOS41NTZDNC41MzIgMTMuMjM4IDEzLjI3MyA0LjUgMjQuMDE0IDQuNWExOS4zNyAxOS4zNyAwIDAgMSAxMy43ODQgNS43MTNBMTkuMzYgMTkuMzYgMCAwIDEgNDMuNSAyMy45OTRjLS4wMDQgMTAuNzQxLTguNzQ2IDE5LjQ4LTE5LjQ4NiAxOS40OGExOS41NCAxOS41NCAwIDAgMS05LjE0NC0yLjI3N2wtOS44NzUgMi41ODlhLjUuNSAwIDAgMS0uMTI3LjAxNyIvPjxwYXRoIGZpbGw9IiNjZmQ4ZGMiIGQ9Ik0yNC4wMTQgNWExOC44NyAxOC44NyAwIDAgMSAxMy40MyA1LjU2NkExOC44NyAxOC44NyAwIDAgMSA0MyAyMy45OTRjLS4wMDQgMTAuNDY1LTguNTIyIDE4Ljk4LTE4Ljk4NiAxOC45OGgtLjAwOGExOSAxOSAwIDAgMS05LjA3My0yLjMxMWwtMTAuMDY1IDIuNjQgMi42OTQtOS44MzVhMTguOTQgMTguOTQgMCAwIDEtMi41MzUtOS40ODlDNS4wMzIgMTMuNTE0IDEzLjU0OCA1IDI0LjAxNCA1bTAtMUMxMi45OTggNCA0LjAzMiAxMi45NjIgNC4wMjcgMjMuOTc5YTIwIDIwIDAgMCAwIDIuNDYxIDkuNjIyTDMuOTAzIDQzLjA0YS45OTguOTk4IDAgMCAwIDEuMjE5IDEuMjMxbDkuNjg3LTIuNTRhMjAgMjAgMCAwIDAgOS4xOTcgMi4yNDRjMTEuMDI0IDAgMTkuOTktOC45NjMgMTkuOTk1LTE5Ljk4QTE5Ljg2IDE5Ljg2IDAgMCAwIDM4LjE1MyA5Ljg2IDE5Ljg3IDE5Ljg3IDAgMCAwIDI0LjAxNCA0Ii8+PHBhdGggZmlsbD0iIzQwYzM1MSIgZD0iTTM1LjE3NiAxMi44MzJhMTUuNjcgMTUuNjcgMCAwIDAtMTEuMTU3LTQuNjI2Yy04LjcwNCAwLTE1Ljc4MyA3LjA3Ni0xNS43ODcgMTUuNzc0YTE1Ljc0IDE1Ljc0IDAgMCAwIDIuNDEzIDguMzk2bC4zNzYuNTk3LTEuNTk1IDUuODIxIDUuOTczLTEuNTY2LjU3Ny4zNDJhMTUuNzUgMTUuNzUgMCAwIDAgOC4wMzIgMi4xOTloLjAwNmM4LjY5OCAwIDE1Ljc3Ny03LjA3NyAxNS43OC0xNS43NzZhMTUuNjggMTUuNjggMCAwIDAtNC42MTgtMTEuMTYxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE5LjI2OCAxNi4wNDVjLS4zNTUtLjc5LS43MjktLjgwNi0xLjA2OC0uODItLjI3Ny0uMDEyLS41OTMtLjAxMS0uOTA5LS4wMTFzLS44My4xMTktMS4yNjUuNTk0LTEuNjYxIDEuNjIyLTEuNjYxIDMuOTU2IDEuNyA0LjU5IDEuOTM3IDQuOTA2IDMuMjgyIDUuMjU5IDguMTA0IDcuMTYxYzQuMDA3IDEuNTggNC44MjMgMS4yNjYgNS42OTMgMS4xODdzMi44MDctMS4xNDcgMy4yMDItMi4yNTUuMzk1LTIuMDU3LjI3Ny0yLjI1NWMtLjExOS0uMTk4LS40MzUtLjMxNi0uOTA5LS41NTRzLTIuODA3LTEuMzg1LTMuMjQyLTEuNTQzLS43NTEtLjIzNy0xLjA2OC4yMzhjLS4zMTYuNDc0LTEuMjI1IDEuNTQzLTEuNTAyIDEuODU5cy0uNTU0LjM1Ny0xLjAyOC4xMTktMi4wMDItLjczOC0zLjgxNS0yLjM1NGMtMS40MS0xLjI1Ny0yLjM2Mi0yLjgxLTIuNjM5LTMuMjg1LS4yNzctLjQ3NC0uMDMtLjczMS4yMDgtLjk2OC4yMTMtLjIxMy40NzQtLjU1NC43MTItLjgzMS4yMzctLjI3Ny4zMTYtLjQ3NS40NzQtLjc5MXMuMDc5LS41OTQtLjA0LS44MzFjLS4xMTctLjIzOC0xLjAzOS0yLjU4NC0xLjQ2MS0zLjUyMiIvPjwvc3ZnPg=="
+      },
+      "displayName": "WhatsApp Business Cloud",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1141,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.embeddingsopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Embeddings"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Embeddings OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Embeddings OpenAI",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1163,
+      "icon": "fa:database",
+      "name": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.memorybufferwindow/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Memory"
+            ],
+            "Memory": [
+              "For beginners"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Simple Memory"
+      },
+      "iconData": {
+        "icon": "database",
+        "type": "icon"
+      },
+      "displayName": "Simple Memory",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1189,
+      "icon": "fa:grip-lines-vertical",
+      "name": "@n8n/n8n-nodes-langchain.textSplitterCharacterTextSplitter",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.textsplittercharactertextsplitter/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Text Splitters"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Character Text Splitter"
+      },
+      "iconData": {
+        "icon": "grip-lines-vertical",
+        "type": "icon"
+      },
+      "displayName": "Character Text Splitter",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1231,
+      "icon": "file:supabase.svg",
+      "name": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.vectorstoresupabase/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Vector Stores",
+              "Tools",
+              "Root Nodes"
+            ],
+            "Tools": [
+              "Other Tools"
+            ],
+            "Vector Stores": [
+              "Other Vector Stores"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Supabase Vector Store"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDkiIGhlaWdodD0iMTEzIiBmaWxsPSJub25lIj48cGF0aCBmaWxsPSJ1cmwoI2EpIiBkPSJNNjMuNzA4IDExMC4yODRjLTIuODYgMy42MDEtOC42NTggMS42MjgtOC43MjctMi45N2wtMS4wMDctNjcuMjUxaDQ1LjIyYzguMTkgMCAxMi43NTggOS40NiA3LjY2NSAxNS44NzR6Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZmlsbC1vcGFjaXR5PSIuMiIgZD0iTTYzLjcwOCAxMTAuMjg0Yy0yLjg2IDMuNjAxLTguNjU4IDEuNjI4LTguNzI3LTIuOTdsLTEuMDA3LTY3LjI1MWg0NS4yMmM4LjE5IDAgMTIuNzU4IDkuNDYgNy42NjUgMTUuODc0eiIvPjxwYXRoIGZpbGw9IiMzRUNGOEUiIGQ9Ik00NS4zMTcgMi4wNzFjMi44Ni0zLjYwMSA4LjY1Ny0xLjYyOCA4LjcyNiAyLjk3bC40NDIgNjcuMjUxSDkuODNjLTguMTkgMC0xMi43NTktOS40Ni03LjY2NS0xNS44NzV6Ii8+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJhIiB4MT0iNTMuOTc0IiB4Mj0iOTQuMTYzIiB5MT0iNTQuOTc0IiB5Mj0iNzEuODI5IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agc3RvcC1jb2xvcj0iIzI0OTM2MSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzNFQ0Y4RSIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iMzYuMTU2IiB4Mj0iNTQuNDg0IiB5MT0iMzAuNTc4IiB5Mj0iNjUuMDgxIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3AvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1vcGFjaXR5PSIwIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Supabase Vector Store",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1243,
+      "icon": "file:binary.svg",
+      "name": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.documentdefaultdataloader/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Document Loaders"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Default Data Loader"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI3NjgiIGhlaWdodD0iMTAyNCI+PHBhdGggZmlsbD0iIzdEN0Q4NyIgZD0iTTAgOTYwVjY0aDU3NmwxOTIgMTkydjcwNHptNzA0LTY0MEw1MTIgMTI4SDY0djc2OGg2NDB6TTMyMCA1MTJIMTI4VjI1NmgxOTJ6bS02NC0xOTJoLTY0djEyOGg2NHptMCA0NDhoNjR2NjRIMTI4di02NGg2NFY2NDBoLTY0di02NGgxMjh6bTI1Ni0zMjBoNjR2NjRIMzg0di02NGg2NFYzMjBoLTY0di02NGgxMjh6bTY0IDM4NEgzODRWNTc2aDE5MnptLTY0LTE5MmgtNjR2MTI4aDY0eiIvPjwvc3ZnPg=="
+      },
+      "displayName": "Default Data Loader",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1260,
+      "icon": "file:whatsapp.svg",
+      "name": "n8n-nodes-base.whatsAppTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.whatsapptrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/whatsapp/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "WhatsApp Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0ibTQuODY4IDQzLjMwMyAyLjY5NC05LjgzNWExOC45NCAxOC45NCAwIDAgMS0yLjUzNS05LjQ4OUM1LjAzMiAxMy41MTQgMTMuNTQ4IDUgMjQuMDE0IDVhMTguODcgMTguODcgMCAwIDEgMTMuNDMgNS41NjZBMTguODcgMTguODcgMCAwIDEgNDMgMjMuOTk0Yy0uMDA0IDEwLjQ2NS04LjUyMiAxOC45OC0xOC45ODYgMTguOThoLS4wMDhhMTkgMTkgMCAwIDEtOS4wNzMtMi4zMTF6Ii8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQuODY4IDQzLjgwM2EuNS41IDAgMCAxLS40ODItLjYzMWwyLjYzOS05LjYzNmExOS41IDE5LjUgMCAwIDEtMi40OTctOS41NTZDNC41MzIgMTMuMjM4IDEzLjI3MyA0LjUgMjQuMDE0IDQuNWExOS4zNyAxOS4zNyAwIDAgMSAxMy43ODQgNS43MTNBMTkuMzYgMTkuMzYgMCAwIDEgNDMuNSAyMy45OTRjLS4wMDQgMTAuNzQxLTguNzQ2IDE5LjQ4LTE5LjQ4NiAxOS40OGExOS41NCAxOS41NCAwIDAgMS05LjE0NC0yLjI3N2wtOS44NzUgMi41ODlhLjUuNSAwIDAgMS0uMTI3LjAxNyIvPjxwYXRoIGZpbGw9IiNjZmQ4ZGMiIGQ9Ik0yNC4wMTQgNWExOC44NyAxOC44NyAwIDAgMSAxMy40MyA1LjU2NkExOC44NyAxOC44NyAwIDAgMSA0MyAyMy45OTRjLS4wMDQgMTAuNDY1LTguNTIyIDE4Ljk4LTE4Ljk4NiAxOC45OGgtLjAwOGExOSAxOSAwIDAgMS05LjA3My0yLjMxMWwtMTAuMDY1IDIuNjQgMi42OTQtOS44MzVhMTguOTQgMTguOTQgMCAwIDEtMi41MzUtOS40ODlDNS4wMzIgMTMuNTE0IDEzLjU0OCA1IDI0LjAxNCA1bTAtMUMxMi45OTggNCA0LjAzMiAxMi45NjIgNC4wMjcgMjMuOTc5YTIwIDIwIDAgMCAwIDIuNDYxIDkuNjIyTDMuOTAzIDQzLjA0YS45OTguOTk4IDAgMCAwIDEuMjE5IDEuMjMxbDkuNjg3LTIuNTRhMjAgMjAgMCAwIDAgOS4xOTcgMi4yNDRjMTEuMDI0IDAgMTkuOTktOC45NjMgMTkuOTk1LTE5Ljk4QTE5Ljg2IDE5Ljg2IDAgMCAwIDM4LjE1MyA5Ljg2IDE5Ljg3IDE5Ljg3IDAgMCAwIDI0LjAxNCA0Ii8+PHBhdGggZmlsbD0iIzQwYzM1MSIgZD0iTTM1LjE3NiAxMi44MzJhMTUuNjcgMTUuNjcgMCAwIDAtMTEuMTU3LTQuNjI2Yy04LjcwNCAwLTE1Ljc4MyA3LjA3Ni0xNS43ODcgMTUuNzc0YTE1Ljc0IDE1Ljc0IDAgMCAwIDIuNDEzIDguMzk2bC4zNzYuNTk3LTEuNTk1IDUuODIxIDUuOTczLTEuNTY2LjU3Ny4zNDJhMTUuNzUgMTUuNzUgMCAwIDAgOC4wMzIgMi4xOTloLjAwNmM4LjY5OCAwIDE1Ljc3Ny03LjA3NyAxNS43OC0xNS43NzZhMTUuNjggMTUuNjggMCAwIDAtNC42MTgtMTEuMTYxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE5LjI2OCAxNi4wNDVjLS4zNTUtLjc5LS43MjktLjgwNi0xLjA2OC0uODItLjI3Ny0uMDEyLS41OTMtLjAxMS0uOTA5LS4wMTFzLS44My4xMTktMS4yNjUuNTk0LTEuNjYxIDEuNjIyLTEuNjYxIDMuOTU2IDEuNyA0LjU5IDEuOTM3IDQuOTA2IDMuMjgyIDUuMjU5IDguMTA0IDcuMTYxYzQuMDA3IDEuNTggNC44MjMgMS4yNjYgNS42OTMgMS4xODdzMi44MDctMS4xNDcgMy4yMDItMi4yNTUuMzk1LTIuMDU3LjI3Ny0yLjI1NWMtLjExOS0uMTk4LS40MzUtLjMxNi0uOTA5LS41NTRzLTIuODA3LTEuMzg1LTMuMjQyLTEuNTQzLS43NTEtLjIzNy0xLjA2OC4yMzhjLS4zMTYuNDc0LTEuMjI1IDEuNTQzLTEuNTAyIDEuODU5cy0uNTU0LjM1Ny0xLjAyOC4xMTktMi4wMDItLjczOC0zLjgxNS0yLjM1NGMtMS40MS0xLjI1Ny0yLjM2Mi0yLjgxLTIuNjM5LTMuMjg1LS4yNzctLjQ3NC0uMDMtLjczMS4yMDgtLjk2OC4yMTMtLjIxMy40NzQtLjU1NC43MTItLjgzMS4yMzctLjI3Ny4zMTYtLjQ3NS40NzQtLjc5MXMuMDc5LS41OTQtLjA0LS44MzFjLS4xMTctLjIzOC0xLjAzOS0yLjU4NC0xLjQ2MS0zLjUyMiIvPjwvc3ZnPg=="
+      },
+      "displayName": "WhatsApp Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 1305,
+      "icon": "file:cohere.svg",
+      "name": "@n8n/n8n-nodes-langchain.rerankerCohere",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.rerankercohere/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Rerankers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Reranker Cohere"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMi45NiAyMy44NEMxNC4wMjY3IDIzLjg0IDE2LjE2IDIzLjc4NjcgMTkuMTQ2NyAyMi41NkMyMi42MTMzIDIxLjEyIDI5LjQ0IDE4LjU2IDM0LjQgMTUuODkzM0MzNy44NjY3IDE0LjAyNjcgMzkuMzYgMTEuNTczMyAzOS4zNiA4LjI2NjY3QzM5LjM2IDMuNzMzMzMgMzUuNjggMCAzMS4wOTMzIDBIMTEuODkzM0M1LjMzMzMzIDAgMCA1LjMzMzMzIDAgMTEuODkzM0MwIDE4LjQ1MzMgNS4wMTMzMyAyMy44NCAxMi45NiAyMy44NFoiIGZpbGw9IiMzOTU5NEQiLz4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xNi4yMTM0IDMxLjk5OTlDMTYuMjEzNCAyOC43OTk5IDE4LjEzMzQgMjUuODY2NiAyMS4xMiAyNC42Mzk5TDI3LjE0NjcgMjIuMTMzM0MzMy4yOCAxOS42MjY2IDQwIDI0LjEwNjYgNDAgMzAuNzE5OUM0MCAzNS44Mzk5IDM1Ljg0IDM5Ljk5OTkgMzAuNzIgMzkuOTk5OUgyNC4xNkMxOS43ODY3IDM5Ljk5OTkgMTYuMjEzNCAzNi40MjY2IDE2LjIxMzQgMzEuOTk5OVoiIGZpbGw9IiNEMThFRTIiLz4KPHBhdGggZD0iTTYuODggMjUuMzg2N0MzLjA5MzMzIDI1LjM4NjcgMCAyOC40ODAxIDAgMzIuMjY2N1YzMy4xNzM0QzAgMzYuOTA2NyAzLjA5MzMzIDQwLjAwMDEgNi44OCA0MC4wMDAxQzEwLjY2NjcgNDAuMDAwMSAxMy43NiAzNi45MDY3IDEzLjc2IDMzLjEyMDFWMzIuMjEzNEMxMy43MDY3IDI4LjQ4MDEgMTAuNjY2NyAyNS4zODY3IDYuODggMjUuMzg2N1oiIGZpbGw9IiNGRjc3NTkiLz4KPC9zdmc+Cg=="
+      },
+      "displayName": "Reranker Cohere",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 40,
+      "name": "Support Chatbot"
+    },
+    {
+      "id": 48,
+      "name": "AI RAG"
+    }
+  ],
+  "image": []
+}

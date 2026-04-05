@@ -1,0 +1,1508 @@
+{
+  "id": 8042,
+  "name": "Version control n8n workflows in GitLab with customer tag organization",
+  "views": 1386,
+  "recentViews": 0,
+  "totalViews": 1386,
+  "createdAt": "2025-08-29T20:58:27.777Z",
+  "description": "## How it works\n- Triggers manually or on schedule (03:00 daily by default)  \n- Fetches workflows tagged `backup-workflows` via n8n API  \n- Normalizes workflow names and applies `[client: NAME]` tag convention  \n- Prepares JSON in the same structure as an n8n UI export  \n- Checks GitLab repository:  \n  - Create new file if missing  \n  - Update file if content differs  \n  - Skip if unchanged  \n- Logs results with recap (created, updated, unchanged, total)  \n\n## Set up steps\n- Configure your GitLab credentials in n8n  \n- Create a repository and branch for workflow backups  \n- Set global variables (owner, project, branch, backup path)  \n- Tag workflows to include with `backup-workflows`  \n- Run manually once to test, then enable the schedule  ",
+  "workflow": {
+    "id": "lqAMFCGhYpl6i0Kg",
+    "meta": {
+      "instanceId": "349b88c12bdc8f9e6e74ffcb3e46eb3d44a721bf354e94b04baaf67413d41cbb",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Client-Organized Workflow Backup (n8n + GitLab)",
+    "tags": [
+      {
+        "id": "U9GFvr98FHfV6LSA",
+        "name": "backup-workflows",
+        "createdAt": "2025-08-20T16:32:01.267Z",
+        "updatedAt": "2025-08-21T19:09:58.119Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "2aaa2725-24b6-46bb-9f9e-153049095183",
+        "name": "When clicking ‘Execute workflow’",
+        "type": "n8n-nodes-base.manualTrigger",
+        "notes": "Manual trigger for testing the workflow execution.",
+        "position": [
+          -1136,
+          -128
+        ],
+        "parameters": {},
+        "notesInFlow": true,
+        "typeVersion": 1
+      },
+      {
+        "id": "a6a535bb-a39c-43e7-8121-16187772dacd",
+        "name": "Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "notes": "Runs the workflow daily at 03:00 (server time).",
+        "position": [
+          -1136,
+          64
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "triggerAtHour": 3
+              }
+            ]
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 1.2
+      },
+      {
+        "id": "da551fd3-0e10-47f8-8325-5ca0b7bd375d",
+        "name": "Prepare Workflow JSON for UI-Compatible Export",
+        "type": "n8n-nodes-base.code",
+        "notes": "Cleans and normalizes workflow JSON to match n8n export format (only required fields).",
+        "position": [
+          1056,
+          32
+        ],
+        "parameters": {
+          "jsCode": "// ---------------------------------------------------------------------------\n// n8n Code Node - Prepare Workflow JSON for UI-Compatible Export\n// ---------------------------------------------------------------------------\n//\n// GOAL: Produce an output *identical* to the workflow JSON downloaded from\n// the n8n UI → Same fields, same structure, same order.\n// ---------------------------------------------------------------------------\n\nreturn $input.all().map(item => {\n    const w = item.json;\n\n    // Keep exactly the fields that appear in a native n8n export\n    // And ensure they are in the correct order\n    const cleaned = {\n        name: w.name,                        // Workflow name\n        nodes: w.nodes || [],               // Workflow nodes\n        pinData: w.pinData || {},           // Pinned node data (empty if not set)\n        connections: w.connections || {},   // Workflow connections\n        active: w.active ?? false,          // Default false like exported UI\n        settings: w.settings || {},         // Workflow-level settings\n        versionId: w.versionId || \"\",       // Keep version ID if present\n        meta: w.meta || {},                 // Additional meta info\n        id: w.id,                           // Workflow unique ID\n        tags: w.tags || []                  // Array of tags\n    };\n\n    // Return the cleaned JSON, ready for export or GitLab storage\n    return {\n        json: cleaned\n    };\n});"
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "092317f4-3c1e-4c9b-af35-fdeabc9e578f",
+        "name": "Clean & Normalize Workflow Name",
+        "type": "n8n-nodes-base.code",
+        "notes": "Cleans and normalizes workflow name: applies client tag (uppercase) or removes it if missing.",
+        "position": [
+          800,
+          32
+        ],
+        "parameters": {
+          "jsCode": "// ---------------------------------------------------------------------------\n// n8n Code Node - Clean & Normalize Workflow Name\n// ---------------------------------------------------------------------------\n//\n// GOAL: Standardize workflow names by properly formatting [client] tags.\n//\n// - Detects any existing [client] tags in the name.\n// - If a client value exists → Normalize to `[client : NAME]`.\n// - If the tag exists but is empty → Remove it completely.\n// - If no tag is present → Leave the name unchanged.\n//\n// Output structure matches the original item, only the `name` is updated.\n// ---------------------------------------------------------------------------\n\nreturn $input.all().map(item => {\n    const w = item.json;\n\n    // Regex to match patterns like:\n    // [clientXYZ], [client: XYZ], [client : xyz], [client xyz]\n    // [ Client: XYZ] with optional space after [\n    // Also matches empty tags: [client], [client:], [client : ]\n    const clientTag = /\\[\\s*client\\s*:?\\s*([^\\]\\r\\n]*)\\]/i;\n\n    let name = String(w.name || \"\").trim();\n    const match = name.match(clientTag);\n\n    if (match) {\n        // Extract raw client value from the tag\n        const rawClient = match[1] ? match[1].trim() : \"\";\n\n        if (rawClient) {\n            // Normalize client name to uppercase\n            const clientName = rawClient.toUpperCase();\n\n            // Remove the original tag completely\n            name = name.replace(clientTag, \"\").trim();\n\n            // Rebuild the name with the normalized format\n            name = `[client : ${clientName}] ${name}`;\n        } else {\n            // If tag exists but has no value → remove it entirely\n            name = name.replace(clientTag, \"\").trim();\n        }\n    }\n\n    // Return the updated workflow JSON (only name is modified)\n    return {\n        json: {\n            ...w,\n            name\n        }\n    };\n});"
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "4bed4024-392c-4027-907c-0f534dea3466",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          656,
+          -640
+        ],
+        "parameters": {
+          "width": 912,
+          "height": 912,
+          "content": "\n\n## 🟨 Prepare Workflow Data 🛠️\n\n### 🎯 Goal\nClean and prepare workflow data for a consistent and stable GitLab export.  \nThe GitLab file path is always based on the workflow **ID** (rename-proof).  \nThe normalized name is only used for readability and commit messages.\n\n### 🔗 Nodes\n- **Normalize Workflow Name** → standardizes the workflow name and `[client: ...]` tag for readability and logging.  \n- **Prepare Workflow JSON for UI-Compatible Export** → outputs the workflow JSON in the same format as an n8n UI export (includes `id`, `name`, nodes, tags, etc.).  \n- **Prepare GitLab File Path** → generates the final storage path for GitLab backups using the workflow **ID** (e.g. `workflow_definitions/<workflowId>.json`).\n\n### ✅ Best Practices\n- 📂 Always use the workflow ID for file naming to ensure stability, even if names change.  \n- 👀 Keep JSON human-readable and re-import friendly.  \n\n### 📤 Key Outputs\n- `id` (from exported workflow JSON)  \n- `gitlab_file_path` (constructed path based on workflow ID)  \n- Full workflow JSON ready for GitLab commit\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "91eb911b-8a50-4db7-b987-c79ee6cc6e67",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -240,
+          -640
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 806,
+          "height": 912,
+          "content": "\n\n## 🟩 Gather Workflows from n8n 📂\n\n### 🎯 Goal  \nIdentify which workflows should be backed up, using tag-based filtering directly in the API call.\n\n### 🔗 Node  \nFetch Workflows from n8n → retrieves only workflows tagged with backup-workflows (filter applied via Tags).\n\n### ✅ Best practices  \n🏷️ Tag all critical workflows with backup-workflows to include them in backups.  \n🔍 Audit tags regularly for naming consistency and completeness.  \n\n### 📤 Key outputs  \nFiltered list of workflows selected for backup.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "33a61637-4c62-4349-8a55-115ca7b5adbc",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1264,
+          -640
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 934,
+          "height": 912,
+          "content": "\n\n## 🟪 Start / Trigger & Configure ⚡\n\n### 🎯 Goal\nStart the backup manually or via CRON schedule and initialize GitLab + execution variables.  \n\n### 🔗 Nodes\n- **When clicking 'Execute workflow'** → manual run.  \n- **Schedule Trigger** → scheduled execution (e.g. `0 3 * * *`).  \n- **Set Global GitLab Variables** → defines owner, project, storage path, tag filter, execution type & timestamp.  \n\n### ✅ Best practices\n- 🧪 Run manually once after workflow changes.  \n- 🔐 Keep GitLab credentials encrypted in n8n.  \n\n### 📤 Key outputs\n- `execution_type` = `Manual` | `Scheduled`  \n- `execution_time` = ISO timestamp  \n- [ISO timestamp](https://crontab.guru/examples.html)\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a8d0f8cc-70c5-4713-bb03-8d219feedbae",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1664,
+          -1648
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 896,
+          "height": 1920,
+          "content": "\n\n## 🟩 GitLab File Management 📑\n\n### 🎯 Goal\nCompare the current workflow version with the GitLab repository and decide whether to create, update, or skip.  \nThe GitLab file path is always derived from the **workflow ID**, ensuring stability even if names change.\n\n### 🔗 Nodes\n- **Fetch Existing File in GitLab** → tries to read the current file.  \n  - If it exists → passes to **Compare Workflow with GitLab Version**.  \n  - If it does not exist → uses the *error output* (On Error → Continue) and passes directly to **Create New File in GitLab**.  \n- **Compare Workflow with GitLab Version** → checks for JSON content differences.  \n- **Create New File in GitLab** → creates the file if not found.  \n- **Update Existing File in GitLab** → updates only if JSON content differs.\n\n### ✅ Best practices\n- 📝 Use one commit per workflow for better traceability.  \n- 🚫 Avoid unnecessary commits with strict JSON comparison.  \n- 🔒 Always rely on the workflow **ID** for file paths, never on the workflow name.\n\n### 📤 Key outputs\n- Action performed: `created` | `updated` | `unchanged`\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a0718c04-0981-472d-86f1-d96412dc4b79",
+        "name": "Fetch Workflows from n8n",
+        "type": "n8n-nodes-base.n8n",
+        "notes": "Fetches only workflows tagged \"backup-workflows\" via n8n API.",
+        "position": [
+          112,
+          -32
+        ],
+        "parameters": {
+          "filters": {
+            "tags": "={{ $json.tag_backup }}"
+          },
+          "requestOptions": {}
+        },
+        "credentials": {
+          "n8nApi": {
+            "id": "credential-id",
+            "name": "n8nApi Credential"
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 1
+      },
+      {
+        "id": "79f360ed-86cc-40fe-a105-b3ef23120e97",
+        "name": "Fetch Existing File from GitLab",
+        "type": "n8n-nodes-base.gitlab",
+        "notes": "Fetches the existing workflow backup file from GitLab.",
+        "onError": "continueErrorOutput",
+        "position": [
+          1824,
+          -32
+        ],
+        "parameters": {
+          "owner": "={{ $('Set Global GitLab Variables').item.json.gitlab_owner }}",
+          "filePath": "={{ $json.gitlab_file_path }}",
+          "resource": "file",
+          "operation": "get",
+          "repository": "={{ $('Set Global GitLab Variables').item.json.gitlab_project }}",
+          "asBinaryProperty": false,
+          "additionalParameters": {
+            "reference": "={{ $('Set Global GitLab Variables').item.json.gitlab_branch }}"
+          }
+        },
+        "credentials": {
+          "gitlabApi": {
+            "id": "credential-id",
+            "name": "gitlabApi Credential"
+          }
+        },
+        "executeOnce": false,
+        "notesInFlow": true,
+        "retryOnFail": false,
+        "typeVersion": 1,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "15cd412a-dd8f-4b71-ab54-849a6a535af8",
+        "name": "Update Existing File in GitLab",
+        "type": "n8n-nodes-base.gitlab",
+        "notes": "Updates the existing workflow backup file in GitLab with the latest JSON export.",
+        "position": [
+          2320,
+          -208
+        ],
+        "parameters": {
+          "owner": "={{ $('Set Global GitLab Variables').item.json.gitlab_owner }}",
+          "branch": "={{ $(\"Set Global GitLab Variables\").item.json.gitlab_branch }}",
+          "filePath": "={{ $json.file_path || $(\"Prepare GitLab File Path\").item.json.gitlab_file_path }}",
+          "resource": "file",
+          "operation": "edit",
+          "repository": "={{ $('Set Global GitLab Variables').item.json.gitlab_project }}",
+          "fileContent": "={{ JSON.stringify($(\"Prepare Workflow JSON for UI-Compatible Export\").item.json, null, 2) }}",
+          "commitMessage": "={{ \"Update backup for workflow: \" \n    + $(\"Clean & Normalize Workflow Name\").item.json.name \n    + \" (\" \n    + ($json.file_path || $(\"Prepare GitLab File Path\").item.json.gitlab_file_path) \n    + \")\" \n}}"
+        },
+        "credentials": {
+          "gitlabApi": {
+            "id": "credential-id",
+            "name": "gitlabApi Credential"
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 1
+      },
+      {
+        "id": "da9f550c-bd0f-4bc2-b221-cab11a8d7be6",
+        "name": "Create New File in GitLab",
+        "type": "n8n-nodes-base.gitlab",
+        "notes": "Creates a new workflow backup file in GitLab if it does not already exist.",
+        "position": [
+          2096,
+          64
+        ],
+        "parameters": {
+          "owner": "={{ $('Set Global GitLab Variables').item.json.gitlab_owner }}",
+          "branch": "={{ $('Set Global GitLab Variables').item.json.gitlab_branch }}",
+          "filePath": "={{ $json.gitlab_file_path }}",
+          "resource": "file",
+          "repository": "={{ $('Set Global GitLab Variables').item.json.gitlab_project }}",
+          "fileContent": "={{ JSON.stringify($(\"Prepare Workflow JSON for UI-Compatible Export\").item.json, null, 2) }}",
+          "commitMessage": "={{ \"Add backup for workflow: \" \n   + $(\"Clean & Normalize Workflow Name\").item.json.name \n   + \" (\" \n   + ($json.gitlab_file_path || $(\"Prepare GitLab File Path\").item.json.gitlab_file_path) \n   + \")\" }}"
+        },
+        "credentials": {
+          "gitlabApi": {
+            "id": "credential-id",
+            "name": "gitlabApi Credential"
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 1
+      },
+      {
+        "id": "5ddc1294-9b87-42d8-93b8-f5e695dbf8bb",
+        "name": "Normalize Backup Output",
+        "type": "n8n-nodes-base.set",
+        "notes": "Normalizes backup output: adds GitLab path, branch, owner, project, execution type & timestamp.",
+        "position": [
+          3392,
+          -16
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "46c0d9f1-dfe1-4ada-b7e5-0148badac474",
+                "name": "status",
+                "type": "string",
+                "value": "={{ $json.status }}"
+              },
+              {
+                "id": "5810a928-6341-4600-8d8a-147c7b003c79",
+                "name": "workflow_name",
+                "type": "string",
+                "value": "={{ $(\"Prepare Workflow JSON for UI-Compatible Export\").item.json.name }}"
+              },
+              {
+                "id": "d25b1d07-589c-4b02-ae3e-90d3e292dec8",
+                "name": "file_path",
+                "type": "string",
+                "value": "={{ $(\"Prepare GitLab File Path\").item.json.gitlab_file_path }}"
+              },
+              {
+                "id": "226b5ec1-c8e1-43e9-b621-44e8e87328da",
+                "name": "branch",
+                "type": "string",
+                "value": "={{ $(\"Set Global GitLab Variables\").item.json.gitlab_branch }}"
+              },
+              {
+                "id": "596584fb-4c78-4863-909c-728409de7e48",
+                "name": "gitlab_owner",
+                "type": "string",
+                "value": "={{ $(\"Set Global GitLab Variables\").item.json.gitlab_owner }}"
+              },
+              {
+                "id": "c8db01a0-5ca5-4bff-be3f-fe9fe0f5fc7b",
+                "name": "gitlab_project",
+                "type": "string",
+                "value": "={{ $(\"Set Global GitLab Variables\").item.json.gitlab_project }}"
+              },
+              {
+                "id": "c8d1166c-c5b0-44a3-9740-6ae0c5b077b8",
+                "name": "execution_type",
+                "type": "string",
+                "value": "={{ $(\"Set Global GitLab Variables\").item.json.execution_type }}"
+              },
+              {
+                "id": "5ef4679e-0125-419b-b154-b2562198c616",
+                "name": "execution_time",
+                "type": "string",
+                "value": "={{ $now }}"
+              }
+            ]
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 3.4
+      },
+      {
+        "id": "9939f6ff-8915-47f3-8a87-6ff204fd2c0d",
+        "name": "Set Global GitLab Variables",
+        "type": "n8n-nodes-base.set",
+        "notes": "Defines global GitLab variables (owner, project, branch, paths, tags, execution type) for reuse across the workflow.",
+        "position": [
+          -640,
+          -32
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "d3a64cab-d823-4bfb-9ff8-3f00f1bd0942",
+                "name": "gitlab_owner",
+                "type": "string",
+                "value": "n8n-ainexusone"
+              },
+              {
+                "id": "c13bd+1234567890e-94394bd818d6",
+                "name": "gitlab_project",
+                "type": "string",
+                "value": "n8n_workflow_backups"
+              },
+              {
+                "id": "2c58ec25-1e33-406c-821a-62eff539f2db",
+                "name": "gitlab_workflow_path",
+                "type": "string",
+                "value": "workflow_definitions"
+              },
+              {
+                "id": "1517ca87-dba2-4411-af85-8d2c91e7aa42",
+                "name": "gitlab_branch",
+                "type": "string",
+                "value": "main"
+              },
+              {
+                "id": "39a0387d-8195-4c49-9831-c87f77758cdd",
+                "name": "tag_backup",
+                "type": "string",
+                "value": "backup-workflows"
+              },
+              {
+                "id": "3357bb93-0e45-4a8d-aced-ebe5b7e93ef8",
+                "name": "execution_type",
+                "type": "string",
+                "value": "={{ ( $('Schedule Trigger').isExecuted) ? 'Scheduled' : 'Manual' }}"
+              }
+            ]
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 3.4
+      },
+      {
+        "id": "2ea3ccb3-8123-4f49-82be-c4b90e0c5f20",
+        "name": "Prepare GitLab File Path",
+        "type": "n8n-nodes-base.code",
+        "notes": "Builds a normalized GitLab file path for the workflow backup (workflowId + .json)",
+        "position": [
+          1312,
+          32
+        ],
+        "parameters": {
+          "jsCode": "// ---------------------------------------------------------------------------\n// n8n Code Node - Prepare GitLab File Path (Dedicated Node)\n// ---------------------------------------------------------------------------\n//\n// GOAL: Generate the GitLab storage path for each workflow without polluting\n//       the workflow JSON that will be versioned. File name is fixed on ID\n//       to avoid duplication when the workflow name changes.\n// ---------------------------------------------------------------------------\n\nreturn $input.all().map(item => {\n    const w = item.json; // Current workflow data\n\n    // --------------------------------------------------------\n    // Helper: normalize accents & slugify safely\n    // --------------------------------------------------------\n    const toSlug = (s) => String(s || '')\n        .normalize('NFKD')                // decompose accented characters\n        .replace(/[\\u0300-\\u036f]/g, '')  // remove diacritics\n        .toLowerCase()\n        .replace(/[^a-z0-9]+/g, '-')      // replace invalid chars with hyphens\n        .replace(/^-+|-+$/g, '');         // trim hyphens at start/end\n\n    // --------------------------------------------------------\n    // 1. Extract and normalize the client slug if tag exists\n    // --------------------------------------------------------\n    const clientTag = /\\[client\\s*:?\\s*([^\\]\\r\\n]*)\\]/i;\n    const match = (w.name || '').match(clientTag);\n\n    let clientSlug = \"unassigned\"; // Default if no [client: ...] tag is found\n    if (match && match[1].trim()) {\n        clientSlug = toSlug(match[1].trim()) || \"unassigned\";\n    }\n\n    // --------------------------------------------------------\n    // 2. Build the GitLab storage path (ID-based, rename-proof)\n    // --------------------------------------------------------\n    const basePath = $('Set Global GitLab Variables').first().json.gitlab_workflow_path; // From declared variables\n    const filePath = `${basePath}/${clientSlug}/${w.id}.json`;\n\n    // --------------------------------------------------------\n    // 3. Return ONLY the GitLab file path\n    // --------------------------------------------------------\n    return {\n        json: {\n            gitlab_file_path: filePath\n        }\n    };\n});\n"
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "9f4fd524-5c9b-4ba6-bef2-a6da86f64c7d",
+        "name": "Compare Workflow with GitLab Version",
+        "type": "n8n-nodes-base.if",
+        "notes": "Compares exported workflow JSON with the GitLab version to detect changes.",
+        "position": [
+          2096,
+          -128
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "2e7b9fc6-cf3e-4f3c-b8be-a55221f5d1f4",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{ JSON.stringify($(\"Prepare Workflow JSON for UI-Compatible Export\").item.json) }}",
+                "rightValue": "={{ JSON.stringify(JSON.parse($json.content.base64Decode().trim())) }}"
+              }
+            ]
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 2.2
+      },
+      {
+        "id": "71fc8901-e3ea-4540-9384-51525834964b",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2656,
+          -1648
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 1280,
+          "height": 1920,
+          "content": "\n\n## 🟦 Output & Logging 📊\n\n### 🎯 Goal\nStandardize results for reporting and monitoring.  \n\n### 🔗 Nodes\n- **Mark as Created** → enriches each workflow output with `status = created`.  \n- **Mark as Updated** → enriches each workflow output with `status = updated`.  \n- **Mark as Unchanged** → enriches each workflow output with `status = unchanged`.  \n- **Merge Backup Results** → combines all outputs (`created`, `updated`, `unchanged`) into a single flow.  \n- **Normalize Backup Output** → consolidates merged data into a standardized schema for logging and reporting.  \n- **Summarize Backup Results** → aggregates counts per status and adds execution context (manual/scheduled + timestamp).  \n\n### ✅ Best practices\n- 📢 Use consistent logging for dashboards, Slack alerts, or monitoring systems.  \n- ✅ Ensure all cases (`created`, `updated`, `unchanged`) are tracked.  \n- 🧩 Keep outputs normalized to simplify downstream processing.  \n- 📊 Provide a final recap (`created`, `updated`, `unchanged`, `total`) for monitoring and auditing.  \n\n### 📤 Key outputs\n- `status` = `created` | `updated` | `unchanged`  \n- `workflow_name`  \n- `file_path`  \n- `execution_type`, `execution_time`  \n- `recap` = `{ created, updated, unchanged, total }`\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fcc49db9-286c-4f06-8e4e-dc1f11a0488c",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1264,
+          -1648
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 1328,
+          "height": 912,
+          "content": "\n\n# 📘 n8n → GitLab Backup (with `[client]`) — Cheat Sheet\n\n## 1️⃣ Purpose\n- Versioned history, centralized repo, internal vs client separation.\n\n## 2️⃣ Client Management\n- Default path: `workflow_definitions/<file>.json`  \n- If name contains `[client: Acme]` → `workflow_definitions/acme/<file>.json`\n\n## 3️⃣ Setup\n- Create tag: **`backup-workflows`**  \n- Tag target workflows  \n- Triggers:  \n  - ⚡ Manual  \n  - ⏰ Schedule (daily 03:00) — or cron example: `30 21 * * 6` (Sat 21:30)\n\n## 4️⃣ Initialization (Globals)\n- GitLab owner/project  \n- Root path: `workflow_definitions/`  \n- Tag filter: `backup-workflows`  \n- `execution_type` (Manual | Scheduled), `execution_time` (ISO)\n\n## 5️⃣ Selection\n- Fetch Workflows → retrieve only workflows tagged `backup-workflows`\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "178c79f8-345e-4d33-a8aa-4eb31da592b7",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          64,
+          -1648
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 1504,
+          "height": 912,
+          "content": "\n\n## 6️⃣ Name Normalization\n- Extract `[client: Name]` tag → route file to subfolder `<client>/` (or `unassigned/` if none).  \n- File name is fixed to `<workflowId>.json` to preserve history across renames.  \n- Generate a `display_slug` (optional, from the workflow name) for documentation or index files.\n\n## 7️⃣ GitLab Verification\n- Check if file already exists in GitLab.\n  - 🆕 No → **Create** (status = `created`, via *Mark as Created*).\n  - 🔄 Yes + content differs → **Update** (status = `updated`, via *Mark as Updated*).\n  - ⏭️ Yes + unchanged → **Skip** (status = `unchanged`, via *Mark as Unchanged*).\n\n## 8️⃣ Backup Actions\n- **Create New File(s)** → first commit of a workflow.  \n- **Update Existing File(s)** → commit only if JSON content changed.  \n- **Skip Unchanged File(s)** → prevent unnecessary commits.  \n- Commit message: \"Add/Update backup for workflow: <name> (<path>)\".\n\n## 9️⃣ Best Practices\n- 🔐 Limit GitLab token scope (repo-only).  \n- 🏷️ Standardize client names (`acme`, not `Acme Corp` vs `ACME`).  \n- 📊 Add a final recap (`created`, `updated`, `unchanged`).  \n- 🛠️ Compare JSON **object-to-object** (avoid false positives due to indentation or line breaks).  \n\n## 🔟 Expected Results\n- Only workflows tagged with `backup-workflows` are auto-saved.  \n- Internal workflows → `workflow_definitions/`.  \n- Client workflows → `workflow_definitions/<client>/`.  \n- Clean, structured Git history with meaningful commits and standardized statuses. "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "75b2037f-bad5-4988-9f82-73665e4ae0eb",
+        "name": "Mark as Created",
+        "type": "n8n-nodes-base.set",
+        "notes": "Tags workflow as \"created\" (new file added in GitLab).",
+        "position": [
+          2928,
+          64
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "8e6cb925-589a-4daa-bf5c-73a51092ae9e",
+                "name": "status",
+                "type": "string",
+                "value": "created"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "e995304e-5611-4905-9a33-b6fdd70d3655",
+        "name": "Mark as Updated",
+        "type": "n8n-nodes-base.set",
+        "notes": "Tags workflow as \"updated\" after backup comparison.",
+        "position": [
+          2928,
+          -96
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "8e6cb925-589a-4daa-bf5c-73a51092ae9e",
+                "name": "status",
+                "type": "string",
+                "value": "updated"
+              }
+            ]
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 3.4
+      },
+      {
+        "id": "69533d20-2a48-4cb4-810d-e65c2a4aa71c",
+        "name": "Mark as Unchanged",
+        "type": "n8n-nodes-base.set",
+        "notes": "Tags workflow as \"unchanged\" (no differences found).",
+        "position": [
+          2768,
+          -16
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "8e6cb925-589a-4daa-bf5c-73a51092ae9e",
+                "name": "status",
+                "type": "string",
+                "value": "unchanged"
+              }
+            ]
+          }
+        },
+        "notesInFlow": true,
+        "typeVersion": 3.4
+      },
+      {
+        "id": "7af2d653-0358-4b5a-847c-8b1851aa2721",
+        "name": "Summarize Backup Results",
+        "type": "n8n-nodes-base.code",
+        "notes": "Summarizes backup results: counts created/updated/unchanged workflows and adds execution metadata.",
+        "position": [
+          3712,
+          -16
+        ],
+        "parameters": {
+          "jsCode": "// n8n Code Node — Summarize Backup Results\n// ----------------------------------------\n\nconst items = $input.all();\n\n// Init counters\nlet recap = {\n  created: 0,\n  updated: 0,\n  unchanged: 0,\n  total: items.length,\n};\n\nfor (const item of items) {\n  const status = item.json.status;\n  if (status && recap.hasOwnProperty(status)) {\n    recap[status]++;\n  }\n}\n\n// Build output\nreturn [\n  {\n    json: {\n      execution_type: items[0]?.json.execution_type || \"unknown\",\n      execution_time: items[0]?.json.execution_time || new Date().toISOString(),\n      recap,\n    },\n  },\n];"
+        },
+        "notesInFlow": true,
+        "typeVersion": 2
+      },
+      {
+        "id": "90c21f27-3af6-416f-978e-2ff38c300c7a",
+        "name": "Merge",
+        "type": "n8n-nodes-base.merge",
+        "notes": "Merges outputs from \"Mark as Updated/Unchanged/Created\" into a single stream.\n",
+        "position": [
+          3168,
+          -32
+        ],
+        "parameters": {
+          "numberInputs": 3
+        },
+        "notesInFlow": true,
+        "typeVersion": 3.2
+      }
+    ],
+    "active": true,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "35bc096b-29a7-461f-9bc7-23fd23a9aa5c",
+    "connections": {
+      "Merge": {
+        "main": [
+          [
+            {
+              "node": "Normalize Backup Output",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Mark as Created": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Mark as Updated": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Set Global GitLab Variables",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Mark as Unchanged": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Normalize Backup Output": {
+        "main": [
+          [
+            {
+              "node": "Summarize Backup Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Workflows from n8n": {
+        "main": [
+          [
+            {
+              "node": "Clean & Normalize Workflow Name",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare GitLab File Path": {
+        "main": [
+          [
+            {
+              "node": "Fetch Existing File from GitLab",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create New File in GitLab": {
+        "main": [
+          [
+            {
+              "node": "Mark as Created",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Global GitLab Variables": {
+        "main": [
+          [
+            {
+              "node": "Fetch Workflows from n8n",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Existing File in GitLab": {
+        "main": [
+          [
+            {
+              "node": "Mark as Updated",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clean & Normalize Workflow Name": {
+        "main": [
+          [
+            {
+              "node": "Prepare Workflow JSON for UI-Compatible Export",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Existing File from GitLab": {
+        "main": [
+          [
+            {
+              "node": "Compare Workflow with GitLab Version",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Create New File in GitLab",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Compare Workflow with GitLab Version": {
+        "main": [
+          [
+            {
+              "node": "Update Existing File in GitLab",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Mark as Unchanged",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When clicking ‘Execute workflow’": {
+        "main": [
+          [
+            {
+              "node": "Set Global GitLab Variables",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Workflow JSON for UI-Compatible Export": {
+        "main": [
+          [
+            {
+              "node": "Prepare GitLab File Path",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 24,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.n8n": {
+        "count": 1
+      },
+      "n8n-nodes-base.set": {
+        "count": 5
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.gitlab": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Omar Kennouche",
+    "username": "kennouche-omar",
+    "bio": "Automation & AI consultant. I design practical n8n workflows connecting APIs, business tools and AI—focused on saving time, reducing errors and enabling growth.\n",
+    "verified": false,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/fab5dda594093c30620fa6f7c21574e48647fd9354a1a65aac4c38e7eb7c74dd?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "icon": "file:gitlab.svg",
+      "name": "n8n-nodes-base.gitlab",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gitlab/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/gitlab/"
+              }
+            ]
+          },
+          "categories": [
+            "Development"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "GitLab"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiNFMjQzMjkiIGQ9Im0zMC41IDU2Ljk2NyAxMC44NjMtMzMuMjAzSDE5LjYzN3oiLz48cGF0aCBmaWxsPSIjRkM2RDI2IiBkPSJNMzAuNSA1Ni45NjcgMTkuNjM3IDIzLjc2NEg0LjQxeiIvPjxwYXRoIGZpbGw9IiNGQ0EzMjYiIGQ9Ik00LjQxIDIzLjc2NCAxLjExIDMzLjg2Yy0uMy45Mi4wMyAxLjkyOC44MTcgMi40OTZMMzAuNSA1Ni45Njd6Ii8+PHBhdGggZmlsbD0iI0UyNDMyOSIgZD0iTTQuNDEgMjMuNzY0aDE1LjIyNkwxMy4wOTMgMy43ODFjLS4zMzYtMS4wMjktMS44MDItMS4wMjktMi4xMzkgMHoiLz48cGF0aCBmaWxsPSIjRkM2RDI2IiBkPSJtMzAuNSA1Ni45NjcgMTAuODYzLTMzLjIwM0g1Ni41OXoiLz48cGF0aCBmaWxsPSIjRkNBMzI2IiBkPSJtNTYuNTkgMjMuNzY0IDMuMyAxMC4wODZhMi4yMiAyLjIyIDAgMCAxLS44MTcgMi40OTdMMzAuNSA1Ni45Njd6Ii8+PHBhdGggZmlsbD0iI0UyNDMyOSIgZD0iTTU2LjU5IDIzLjc2NEg0MS4zNjJsNi41NDQtMTkuOTkyYy4zMzYtMS4wMyAxLjgwMi0xLjAzIDIuMTM5IDBsNi41NDMgMTkuOTkyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "GitLab",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 826,
+      "icon": "file:n8n.svg",
+      "name": "n8n-nodes-base.n8n",
+      "codex": {
+        "data": {
+          "alias": [
+            "Workflow",
+            "Execution"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.n8n/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/api/authentication/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "n8n"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjAgMCAyMzAgMTIwIj48cGF0aCBmaWxsPSIjRUE0QjcxIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0yMDQgNDhjLTExLjE4MyAwLTIwLjU4LTcuNjQ5LTIzLjI0NC0xOGgtMjcuNTA4YTEyIDEyIDAgMCAwLTExLjgzNiAxMC4wMjdsLS45ODcgNS45MTlBMjMuOTQgMjMuOTQgMCAwIDEgMTMyLjYyNiA2MGEyMy45NCAyMy45NCAwIDAgMSA3Ljc5OSAxNC4wNTRsLjk4NyA1LjkxOUExMiAxMiAwIDAgMCAxNTMuMjQ4IDkwaDMuNTA4QzE1OS40MiA3OS42NDkgMTY4LjgxNyA3MiAxODAgNzJjMTMuMjU1IDAgMjQgMTAuNzQ1IDI0IDI0cy0xMC43NDUgMjQtMjQgMjRjLTExLjE4MyAwLTIwLjU4LTcuNjQ5LTIzLjI0NC0xOGgtMy41MDhjLTExLjczMiAwLTIxLjc0NC04LjQ4Mi0yMy42NzMtMjAuMDU0bC0uOTg3LTUuOTE5QTEyIDEyIDAgMCAwIDExNi43NTIgNjZoLTkuNTA4QzEwNC41OCA3Ni4zNTEgOTUuMTgzIDg0IDg0IDg0cy0yMC41OC03LjY0OS0yMy4yNDQtMThINDcuMjQ0QzQ0LjU4IDc2LjM1MSAzNS4xODMgODQgMjQgODQgMTAuNzQ1IDg0IDAgNzMuMjU1IDAgNjBzMTAuNzQ1LTI0IDI0LTI0YzExLjE4MyAwIDIwLjU4IDcuNjQ5IDIzLjI0NCAxOGgxMy41MTJDNjMuNDIgNDMuNjQ5IDcyLjgxNyAzNiA4NCAzNnMyMC41OCA3LjY0OSAyMy4yNDQgMThoOS41MDhhMTIgMTIgMCAwIDAgMTEuODM2LTEwLjAyN2wuOTg3LTUuOTE5QzEzMS41MDQgMjYuNDgyIDE0MS41MTYgMTggMTUzLjI0OCAxOGgyNy41MDhDMTgzLjQyIDcuNjQ5IDE5Mi44MTcgMCAyMDQgMGMxMy4yNTUgMCAyNCAxMC43NDUgMjQgMjRzLTEwLjc0NSAyNC0yNCAyNG0wLTEyYzYuNjI3IDAgMTItNS4zNzMgMTItMTJzLTUuMzczLTEyLTEyLTEyLTEyIDUuMzczLTEyIDEyIDUuMzczIDEyIDEyIDEyTTI0IDcyYzYuNjI3IDAgMTItNS4zNzMgMTItMTJzLTUuMzczLTEyLTEyLTEyLTEyIDUuMzczLTEyIDEyIDUuMzczIDEyIDEyIDEybTcyLTEyYzAgNi42MjctNS4zNzMgMTItMTIgMTJzLTEyLTUuMzczLTEyLTEyIDUuMzczLTEyIDEyLTEyIDEyIDUuMzczIDEyIDEybTk2IDM2YzAgNi42MjctNS4zNzMgMTItMTIgMTJzLTEyLTUuMzczLTEyLTEyIDUuMzczLTEyIDEyLTEyIDEyIDUuMzczIDEyIDEyIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48L3N2Zz4="
+      },
+      "displayName": "n8n",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 16,
+      "name": "DevOps"
+    }
+  ],
+  "image": []
+}

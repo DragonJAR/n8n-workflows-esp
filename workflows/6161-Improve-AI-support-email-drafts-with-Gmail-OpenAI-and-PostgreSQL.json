@@ -1,0 +1,1995 @@
+{
+  "id": 13978,
+  "name": "Improve AI support email drafts with Gmail, OpenAI and PostgreSQL",
+  "views": 3,
+  "recentViews": 0,
+  "totalViews": 3,
+  "createdAt": "2026-03-10T04:53:31.547Z",
+  "description": "# Self-learning feedback loop for AI customer support email drafts with Gmail, OpenAI and PostgreSQL\n\nAutomatically compare AI-generated email drafts against what your support team actually sent, learn from the differences, and improve future drafts over time — without any model fine-tuning.\n\n---\n\n## What this workflow does\n\nThis is the second workflow in a two-part customer support automation system. The first workflow generates AI draft replies for incoming support emails. This workflow closes the loop — it runs every 3 hours, checks which drafts were reviewed and sent, compares them against the original AI output, and stores the human-edited versions as training examples.\n\nThe more this workflow runs, the smarter the first workflow becomes. When generating future drafts, the similarity search surfaces past human-approved responses — so the AI progressively learns what good answers look like for your specific support context.\n\n---\n\n## How it works\n\n**Step 1 — Watermark and scheduling**\nEvery run starts by fetching the `last_processed_sent_at` timestamp from the previous completed run. Only Gmail Sent emails newer than this timestamp are fetched, so nothing gets processed twice. On the first-ever run it defaults to 7 days ago.\n\n**Step 2 — Fetch and loop**\nSent emails are fetched from Gmail and processed one at a time. For each email, the full message body is retrieved via the Gmail API (the list endpoint only returns a preview snippet). The sent email's thread ID is matched against the `ai_drafts` table to find the corresponding AI draft.\n\n**Step 3 — Match and skip logic**\nThree things skip an email without processing: no matching AI draft found (the team sent something manually), the draft was already processed in a previous run, or the fetch returns no results. Only genuine unprocessed matches continue.\n\n**Step 4 — AI comparison**\nGPT-4o-mini compares the AI draft text against the human-sent text and returns a structured analysis: whether it was approved unchanged, the type of edit made (minor edits vs major rewrite), a plain English summary of what changed, and whether the edit implies missing or incorrect information in the knowledge base.\n\n**Step 5 — Store the correction**\nIf the human made any edits, the pair (original email + human response) is embedded using OpenAI text-embedding-3-small and saved to the `corrections` table. This table is what the first workflow searches using vector cosine similarity when assembling future draft prompts.\n\n**Step 6 — KB auto-update**\nIf the AI comparison flags that the human edit contained new information, the most relevant knowledge base entry for that category is fetched and rewritten by GPT-4o-mini to incorporate the new information. The previous answer is preserved in the `previous_answer` column for auditing.\n\n**Step 7 — Run log**\nEach run is logged to `feedback_run_log` with counts of emails checked, corrections saved, KB updates made and any errors. This log also serves as the watermark source for the next run.\n\n---\n\n## Setup steps\n\n### Prerequisites\n- Gmail account (same support inbox used by the main email workflow)\n- OpenAI API key\n- PostgreSQL database with pgvector extension and the full schema from Workflow 1 already applied\n- The main email automation workflow (Workflow 1) must be active and generating drafts\n\n### 1. Apply the DB migration\nRun the following against your existing database to add the columns this workflow needs:\n\n```sql\nALTER TABLE ai_drafts\n    ADD COLUMN IF NOT EXISTS email_embedding        vector(1536),\n    ADD COLUMN IF NOT EXISTS feedback_processed_at  TIMESTAMPTZ,\n    ADD COLUMN IF NOT EXISTS was_approved_as_is     BOOLEAN DEFAULT FALSE;\n\nALTER TABLE corrections\n    ADD COLUMN IF NOT EXISTS source      TEXT DEFAULT 'feedback_loop',\n    ADD COLUMN IF NOT EXISTS kb_updated  BOOLEAN DEFAULT FALSE;\n\nALTER TABLE kb_data\n    ADD COLUMN IF NOT EXISTS updated_by      TEXT DEFAULT 'manual',\n    ADD COLUMN IF NOT EXISTS previous_answer TEXT;\n\nCREATE TABLE IF NOT EXISTS feedback_run_log (\n    id                      SERIAL PRIMARY KEY,\n    run_started_at          TIMESTAMPTZ DEFAULT NOW(),\n    run_completed_at        TIMESTAMPTZ,\n    last_processed_sent_at  TIMESTAMPTZ,\n    emails_checked          INTEGER DEFAULT 0,\n    approved_as_is          INTEGER DEFAULT 0,\n    corrections_saved       INTEGER DEFAULT 0,\n    kb_updates              INTEGER DEFAULT 0,\n    errors                  INTEGER DEFAULT 0,\n    status                  TEXT DEFAULT 'running'\n);\n```\n\n### 2. Configure credentials\n\n| Node | Credential needed |\n|---|---|\n| Gmail - Fetch Sent Emails | Gmail OAuth2 |\n| Gmail - Fetch Full Message | Gmail OAuth2 (HTTP Request with OAuth) |\n| All DB nodes | PostgreSQL |\n| OpenAI Chat Model - Compare | OpenAI API |\n| AI - Rewrite KB Answer | OpenAI API |\n| Generate Embedding - Human Sent | OpenAI API |\n\n### 3. Check node connections\nThe `splitInBatches` loop node has two outputs — make sure they are connected correctly:\n- **Output 0 (loop)** → `DB - Match Thread ID`\n- **Output 1 (done)** → `DB - Complete Run Log`\n\nAll branch dead-ends (approved as-is, no KB update, KB updated) should feed back into the loop node's input to advance to the next item.\n\n### 4. Activate\nToggle the workflow to active. It will run automatically on the 3-hour schedule. You can also trigger it manually to test.\n\n---\n\n## How it connects to Workflow 1\n\nOnce corrections start accumulating in the `corrections` table, Workflow 1's similarity search (which queries this table using vector cosine distance) will begin surfacing relevant past human-approved responses when assembling draft prompts. No changes to Workflow 1 are needed — it queries the same table this workflow writes to.\n\n---\n\n## Tech stack\n\n- **n8n** — workflow automation and scheduling\n- **Gmail API** — sent folder monitoring and full message fetch\n- **OpenAI GPT-4o-mini** — draft comparison and KB rewriting\n- **OpenAI text-embedding-3-small** — vector embedding for similarity search\n- **PostgreSQL + pgvector** — storing corrections and running cosine similarity queries\n\n---\n\n## Who this is for\n\n- Teams already running an AI email draft workflow who want it to improve over time\n- Support operations that want human edits to automatically become training data\n- Anyone who wants a self-improving system without model fine-tuning or external ML infrastructure\n",
+  "workflow": {
+    "id": "OLnCF91fbGB6E9FGthJXi",
+    "meta": {
+      "instanceId": "19d43a8cad94d007140e13e21de07af2d4119a87745d1049407d721b4880fabd",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Feedback Loop",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "5c7d4f79-b479-4c40-a092-0934e2e87169",
+        "name": "⏰ Schedule - Every 3 Hours",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -2352,
+          640
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 3
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "fc095fb7-cdad-4f45-8384-d533101cbfe7",
+        "name": "🗄️ DB - Get Last Watermark",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -2176,
+          640
+        ],
+        "parameters": {
+          "query": "SELECT last_processed_sent_at FROM feedback_run_log WHERE status = 'completed' ORDER BY run_completed_at DESC LIMIT 1;",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "43c7801f-2e51-4970-a498-c90de6cb3283",
+        "name": "⚙️ Set Watermark",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1952,
+          640
+        ],
+        "parameters": {
+          "jsCode": "const rows = $input.all();\nlet watermark;\n\nif (rows && rows.length > 0 && rows[0].json && rows[0].json.last_processed_sent_at) {\n  watermark = rows[0].json.last_processed_sent_at;\n} else {\n  // First run ever — go back 7 days\n  const d = new Date();\n  d.setDate(d.getDate() - 7);\n  watermark = d.toISOString();\n}\n\n// Unix timestamp for Gmail query\nconst unixTs = Math.floor(new Date(watermark).getTime() / 1000);\n\nreturn [{ json: { watermark, unixTs } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "1fbc336f-2d9a-45ff-8448-11a585b2ed94",
+        "name": "🗄️ DB - Start Run Log",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -1728,
+          640
+        ],
+        "parameters": {
+          "query": "INSERT INTO feedback_run_log (run_started_at, status) VALUES (NOW(), 'running') RETURNING id;",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "424f2c18-4a90-414d-85af-00f6ec627dfa",
+        "name": "⚙️ Carry Run Context",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1504,
+          640
+        ],
+        "parameters": {
+          "jsCode": "// Carry run_log_id forward alongside watermark\nconst runLogId = $input.first().json.id;\nconst watermark = $('⚙️ Set Watermark').first().json.watermark;\nconst unixTs = $('⚙️ Set Watermark').first().json.unixTs;\n\nreturn [{ json: { runLogId, watermark, unixTs } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "08bf8015-b08f-42a2-9c58-4c5719fd0723",
+        "name": "📧 Gmail - Fetch Sent Emails",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          -1280,
+          640
+        ],
+        "webhookId": "fbafdf23-db72-4bce-8a60-ea2403406e68",
+        "parameters": {
+          "filters": {
+            "q": "=in:sent after:{{ $json.unixTs }}"
+          },
+          "operation": "getAll",
+          "returnAll": true
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "d21b20f9-d259-440f-a426-00b08189b29c",
+        "name": "🔄 Loop - Sent Emails",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -1056,
+          640
+        ],
+        "parameters": {
+          "options": {
+            "reset": false
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "8d74b94a-7d0f-4575-8de6-883e8e72ce2c",
+        "name": "🗄️ DB - Match Thread ID",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          16,
+          912
+        ],
+        "parameters": {
+          "query": "SELECT id, gmail_thread_id, gmail_message_id, original_email_body, classification, ai_draft_text, feedback_processed_at, was_approved_as_is FROM ai_drafts WHERE gmail_thread_id = '{{ $json.threadId }}' LIMIT 1;",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "4f9b5c5b-e2b2-48dc-9e22-794577d816da",
+        "name": "❓ IF - Draft Match Found?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          224,
+          912
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "b1+1234567890-+1234567890",
+                "operator": {
+                  "type": "number",
+                  "operation": "exists",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.id }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "fb1cd898-8b4c-4d4f-9945-7b03e1e489e2",
+        "name": "❓ IF - Already Processed?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -784,
+          288
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "b1+1234567890-+1234567890",
+                "operator": {
+                  "type": "string",
+                  "operation": "empty"
+                },
+                "leftValue": "={{ $json.feedback_processed_at }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "f982e930-4766-4015-b4e5-1f4882351e62",
+        "name": "🤖 AI - Compare Draft vs Sent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          -576,
+          272
+        ],
+        "parameters": {
+          "text": "=ORIGINAL CUSTOMER EMAIL:\n{{ $('🔄 Loop - Sent Emails').item.json.text || $('🔄 Loop - Sent Emails').item.json.body || '' }}\n\nAI DRAFT (what the system generated):\n{{ $('🗄️ DB - Match Thread ID').item.json.ai_draft_text }}\n\nHUMAN SENT (what was actually sent to the customer):\n{{ $json.text || $json.body || '' }}\n\nCLASSIFICATION: {{ $('🗄️ DB - Match Thread ID').item.json.classification }}\n\nAnalyze the difference between the AI draft and the human-sent email. Respond ONLY with this exact JSON, no markdown, no explanation:\n{\n  \"approved_as_is\": true or false,\n  \"edit_type\": \"none\" or \"minor_edits\" or \"major_rewrite\",\n  \"diff_summary\": \"Plain English description of what changed and why it likely changed. Be specific.\",\n  \"tone_shift\": \"more_formal\" or \"more_casual\" or \"same\" or \"n/a\",\n  \"info_added\": true or false,\n  \"info_removed\": true or false,\n  \"kb_update_needed\": true or false,\n  \"kb_update_reason\": \"Why the KB needs updating, or null if not needed\",\n  \"kb_category\": \"The category from the classification that should be updated, or null\",\n  \"kb_new_info\": \"The specific new information or correction to add to the KB, or null\"\n}",
+          "options": {
+            "maxIterations": 3
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 3.1
+      },
+      {
+        "id": "421e6376-4c88-45c8-b1ea-3127e51682fd",
+        "name": "OpenAI Chat Model - Compare",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          -320,
+          144
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4o-mini",
+            "cachedResultName": "gpt-4o-mini"
+          },
+          "options": {
+            "maxTokens": 800,
+            "temperature": 0,
+            "presencePenalty": 0,
+            "frequencyPenalty": 0
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "6e4090dc-8610-45f7-af03-df16ba65a569",
+        "name": "⚙️ Parse AI Comparison",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -224,
+          272
+        ],
+        "parameters": {
+          "jsCode": "const item = $input.first().json;\nconst rawOutput = item.output || '';\nconst cleaned = rawOutput\n  .replace(/```json/gi, '')\n  .replace(/```/g, '')\n  .trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch(e) {\n  parsed = {\n    approved_as_is: false,\n    edit_type: 'parse_error',\n    diff_summary: 'Failed to parse AI comparison response',\n    tone_shift: 'n/a',\n    info_added: false,\n    info_removed: false,\n    kb_update_needed: false,\n    kb_update_reason: null,\n    kb_category: null,\n    kb_new_info: null\n  };\n}\n\n// Carry through the sent email body and thread context\n// The loop item flows into DB - Match Thread ID as input\n// so reference the sent email body from the IF node before it\nconst sentBody = $('⚙️ Parse Full Message Body').item.json.sentBody || '';\nconst draftId = $('🗄️ DB - Match Thread ID').item.json.id;\nconst originalBody = $('🗄️ DB - Match Thread ID').item.json.original_email_body;\nconst classification = $('🗄️ DB - Match Thread ID').item.json.classification;\nconst aiDraftText = $('🗄️ DB - Match Thread ID').item.json.ai_draft_text;\n\nreturn [{\n  json: {\n    ...parsed,\n    sentBody,\n    draftId,\n    originalBody,\n    classification,\n    aiDraftText\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a287218e-4a5e-4dab-99ea-0e33da8b1873",
+        "name": "❓ IF - Approved As-Is?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          0,
+          272
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "b1+1234567890-+1234567890",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.approved_as_is }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "0155b7f2-bcd4-4819-a00e-e7d07b06485a",
+        "name": "🗄️ DB - Mark Approved As-Is",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          224,
+          256
+        ],
+        "parameters": {
+          "query": "UPDATE ai_drafts SET was_approved_as_is = TRUE, feedback_processed_at = NOW() WHERE id = {{ $json.draftId }};",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "c8362985-ba49-4170-a9ae-bb10647966fd",
+        "name": "🔢 Generate Embedding - Human Sent",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          64,
+          528
+        ],
+        "parameters": {
+          "url": "https://api.openai.com/v1/embeddings",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "authentication": "predefinedCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "model",
+                "value": "text-embedding-3-small"
+              },
+              {
+                "name": "input",
+                "value": "={{ $json.sentBody }}"
+              }
+            ]
+          },
+          "nodeCredentialType": "openAiApi"
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 4.4
+      },
+      {
+        "id": "37c6deac-6deb-4b41-9270-3e817766f76b",
+        "name": "⚙️ Extract Embedding",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          288,
+          528
+        ],
+        "parameters": {
+          "jsCode": "const item = $input.first().json;\nconst embeddingArray = item.data[0].embedding;\nconst vectorString = '[' + embeddingArray.join(',') + ']';\n\nconst prev = $('⚙️ Parse AI Comparison').first().json;\n\nreturn [{\n  json: {\n    embedding: vectorString,\n    sentBody: prev.sentBody,\n    draftId: prev.draftId,\n    originalBody: prev.originalBody,\n    classification: prev.classification,\n    aiDraftText: prev.aiDraftText,\n    diff_summary: prev.diff_summary,\n    kb_update_needed: prev.kb_update_needed,\n    kb_update_reason: prev.kb_update_reason,\n    kb_category: prev.kb_category,\n    kb_new_info: prev.kb_new_info\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2e318078-fee1-4729-a59b-1816a7db3188",
+        "name": "🗄️ DB - Save Correction",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          512,
+          528
+        ],
+        "parameters": {
+          "query": "INSERT INTO corrections (\n  ai_draft_id,\n  original_email_body,\n  classification,\n  ai_draft_text,\n  human_sent_text,\n  diff_summary,\n  embedding,\n  source,\n  kb_updated\n) VALUES (\n  {{ $json.draftId }},\n  $1,\n  $2,\n  $3,\n  $4,\n  $5,\n  $6::vector,\n  'feedback_loop',\n  FALSE\n) RETURNING id;",
+          "options": {
+            "queryReplacement": "={{ [$json.originalBody, $json.classification, $json.aiDraftText, $json.sentBody, $json.diff_summary, $json.embedding] }}"
+          },
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "33d6c979-c122-4efc-9e54-21ece23e788e",
+        "name": "🗄️ DB - Mark Draft Processed",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          736,
+          528
+        ],
+        "parameters": {
+          "query": "UPDATE ai_drafts SET feedback_processed_at = NOW() WHERE id = {{ $('⚙️ Extract Embedding').item.json.draftId }};",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "afffe5e1-9615-4342-939a-4202a3dc163f",
+        "name": "❓ IF - KB Update Needed?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          944,
+          528
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "b1+1234567890-+1234567890",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $('⚙️ Parse AI Comparison').item.json.kb_update_needed }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "ac859ee7-262e-4f49-897c-0b8ee107248e",
+        "name": "🗄️ DB - Fetch KB Entry to Update",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          1168,
+          512
+        ],
+        "parameters": {
+          "query": "SELECT id, category, question, answer FROM kb_data WHERE category = $1 ORDER BY updated_at DESC LIMIT 1;",
+          "options": {
+            "queryReplacement": "={{ [$('⚙️ Parse AI Comparison').item.json.kb_category] }}"
+          },
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "87e04269-1321-4be0-9466-eb806f54b907",
+        "name": "🤖 AI - Rewrite KB Answer",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          1360,
+          512
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4o-mini"
+          },
+          "options": {
+            "maxTokens": 500,
+            "temperature": 0.2
+          },
+          "simplify": false,
+          "responses": {
+            "values": [
+              {
+                "role": "system",
+                "content": "You are updating a knowledge base entry for a customer support system at InCred Money, a platform for trading unlisted pre-IPO shares. Rewrite the KB answer to incorporate new information while preserving all existing correct content. Respond with ONLY the new answer text. No preamble, no explanation, no markdown."
+              },
+              {
+                "content": "=EXISTING KB ENTRY:\nCategory: {{ $json.category }}\nQuestion: {{ $json.question }}\nCurrent Answer: {{ $json.answer }}\n\nNEW INFORMATION TO INCORPORATE:\n{{ $('⚙️ Parse AI Comparison').item.json.kb_new_info }}\n\nREASON FOR UPDATE:\n{{ $('⚙️ Parse AI Comparison').item.json.kb_update_reason }}\n\nRewrite the answer incorporating the new information."
+              }
+            ]
+          },
+          "builtInTools": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "d3eb84c2-227a-466f-80f2-57dbf087e1cf",
+        "name": "🗄️ DB - Update KB Entry",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          1696,
+          512
+        ],
+        "parameters": {
+          "query": "UPDATE kb_data SET previous_answer = answer, answer = $1, updated_by = 'ai_feedback_loop', updated_at = NOW() WHERE id = {{ $('🗄️ DB - Fetch KB Entry to Update').item.json.id }};",
+          "options": {
+            "queryReplacement": "={{ [$json.message?.content?.[0]?.text || $json.output || ''] }}"
+          },
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "ca26d98e-853e-4d13-9dc0-4b8cfd229624",
+        "name": "🗄️ DB - Mark KB Updated",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          1888,
+          624
+        ],
+        "parameters": {
+          "query": "UPDATE corrections SET kb_updated = TRUE WHERE ai_draft_id = {{ $('⚙️ Extract Embedding').item.json.draftId }} AND source = 'feedback_loop' ORDER BY created_at DESC LIMIT 1;",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "a3437287-ee6e-46bb-b8a4-f5f2bc4795c3",
+        "name": "🗄️ DB - Complete Run Log",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          -784,
+          560
+        ],
+        "parameters": {
+          "query": "UPDATE feedback_run_log SET run_completed_at = NOW(), last_processed_sent_at = NOW(), status = 'completed' WHERE id = {{ $('🗄️ DB - Start Run Log').first().json.id }};",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 2.6
+      },
+      {
+        "id": "554c5627-7ed7-4234-864b-498f40054607",
+        "name": "📧 Gmail - Fetch Full Message",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -384,
+          912
+        ],
+        "parameters": {
+          "url": "=https://www.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}?format=full",
+          "options": {},
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "gmailOAuth2"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "Credential Name"
+          }
+        },
+        "typeVersion": 4.4
+      },
+      {
+        "id": "5bd58454-bc56-4850-9f90-e8c53cbeaeeb",
+        "name": "⚙️ Parse Full Message Body",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -192,
+          912
+        ],
+        "parameters": {
+          "jsCode": "const item = $input.first().json;\n\nfunction decodeBase64url(str) {\n  if (!str) return '';\n  return Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');\n}\n\nfunction extractTextPlain(payload) {\n  if (!payload) return '';\n\n  // CASE 1: Direct body.data on payload (text/plain, no parts) ← this email's structure\n  if (payload.mimeType === 'text/plain' && payload.body?.data) {\n    return decodeBase64url(payload.body.data);\n  }\n\n  // CASE 2: Nested parts (multipart/alternative, multipart/mixed etc.)\n  if (payload.parts && payload.parts.length > 0) {\n    for (const part of payload.parts) {\n      const result = extractTextPlain(part); // recursive\n      if (result) return result;\n    }\n  }\n\n  return '';\n}\n\nfunction stripQuotedReply(text) {\n  const lines = text.split('\\n');\n  const replyLines = [];\n  for (const line of lines) {\n    if (line.startsWith('>')) break;\n    if (/^On .+wrote:$/i.test(line.trim())) break;\n    if (line.includes('---------- Forwarded message')) break;\n    replyLines.push(line);\n  }\n  return replyLines.join('\\n').replace(/\\r/g, '').replace(/\\n{3,}/g, '\\n\\n').trim();\n}\n\nlet sentBody = extractTextPlain(item.payload);\nsentBody = stripQuotedReply(sentBody);\n\nif (!sentBody) sentBody = item.snippet || '';\n\nconst loopItem = $('🔄 Loop - Sent Emails').item.json;\n\nreturn [{\n  json: {\n    ...loopItem,\n    sentBody,\n    threadId: item.threadId,\n    messageId: item.id\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b47598a7-6bbd-4cb8-a30f-d6e3415949d6",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3168,
+          32
+        ],
+        "parameters": {
+          "width": 656,
+          "height": 848,
+          "content": "## Self-learning feedback loop for AI email drafts\n\nThis workflow runs every 3 hours and checks which AI-generated \nemail drafts have been reviewed and sent by the support team. \nIt compares the AI draft against what was actually sent, learns \nfrom the differences, and stores human-approved responses as \ntraining examples for future drafts.\n\nOver time, the main email workflow surfaces increasingly relevant \npast responses via vector similarity search — no fine-tuning needed.\n\n## How it works\n\n1. Fetches watermark from last completed run — only new sent \n   emails are processed each time\n2. Gmail Sent folder is fetched since the watermark timestamp\n3. Each sent email is matched to an AI draft via thread ID\n4. Already-processed drafts are skipped automatically\n5. AI compares the draft vs actual sent email and classifies \n   the type of edit made\n6. If sent unchanged — marked approved-as-is, loop continues\n7. If edited — embedding generated, correction saved to DB \n   for future similarity search\n8. If edit reveals missing KB info — KB entry auto-updated\n\n## Setup steps\n\n1. Connect Gmail OAuth2 to the Gmail Fetch Sent node\n2. Connect PostgreSQL credential to all DB nodes\n3. Connect OpenAI API to the Chat Model and embedding nodes\n4. Run the DB migration SQL to add feedback columns and \n   create the feedback_run_log table\n5. Ensure Workflow 1 (email draft automation) is already \n   active and generating drafts\n6. Activate — runs automatically every 3 hours"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2ca9131b-ae98-41be-ac18-2e94c02d6155",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2496,
+          480
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1360,
+          "height": 400,
+          "content": "## Schedule & Fetch Emails\n\nRuns every 3 hours. Fetches last_processed_sent_at from the \nmost recent completed run as a watermark — so only new sent \nemails are fetched each time. First-ever run defaults to 7 days ago."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4e9841ac-1ea9-4fae-a97e-8cca892f5771",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -864,
+          832
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1280,
+          "height": 336,
+          "content": "## Loop & thread matching\n\nProcesses one sent email at a time. Full message body is fetched \nvia Gmail API separately — the Sent folder list only returns a \nsnippet. Each email is matched to an AI draft by thread ID. \nNo match or already processed = skip."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2aebc058-79a7-4de6-9fd7-16593f15919a",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -864,
+          -16
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1280,
+          "height": 480,
+          "content": "## AI comparison & branching\n\nGPT-4o-mini compares the AI draft vs human-sent email and returns \nedit type, a plain-English diff summary, and whether a KB update \nis needed.\n\nApproved as-is → mark draft, continue loop\nEdited/rewritten → generate embedding, save to corrections table"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d41b364f-5010-4a01-95dd-564bf474b2e5",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -464,
+          480
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 2528,
+          "height": 336,
+          "content": "## Corrections & KB update\n\nHuman-edited pairs are embedded and saved to the corrections \ntable — this is what Workflow 1 queries for similarity search \nwhen drafting future replies.\n\nIf the edit contained new information, the matching KB entry \nis rewritten by AI. Previous answer is preserved for audit."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {
+      "⚙️ Extract Embedding": [
+        {
+          "json": {
+            "draftId": 12,
+            "sentBody": "Hello Prakash,\n\nThank you for reaching out regarding the referral amount discrepancy.\nWe understand your concern about receiving Rs. 238 instead of the\nexpected Rs. 400 voucher.\n\nTo assist you further, we recommend checking if there were any terms\nor conditions associated with the referral program that might have\naffected the final amount. If everything seems in order, please\nprovide us with any additional details, and we will investigate this\nmatter for you.\n\nWe'd also like to share the deatils with you that your account is\nworking fine and should be good.\n\nRegards, Team InCred Money",
+            "embedding": "[0.010643272,-0.0006213155,-0.0011304278,0.009305993,0.000008771835,0.011736298,0.024461815,0.04655439,-0.016719034,-0.0024257256,0.07298243,-0.06677844,-0.029505616,-0.0068940064,0.07791632,0.011943912,-0.015851941,0.013311722,-0.07317784,0.073666334,0.027282923,0.011559215,0.036515642,-0.004671315,-0.0014868827,-0.028406482,-0.017464003,-0.04367222,0.066876136,-0.012346928,0.015143611,-0.01985767,0.020614851,-0.0002700127,-0.038616206,0.018013569,-0.04872823,0.0054803994,0.021543007,-0.003419525,-0.050902072,0.021396456,0.0047598565,0.030629173,-0.0018120429,0.015290162,0.0031966453,-0.015168035,-0.0038378062,0.052465282,-0.059597436,0.0030989444,-0.037468225,0.049314436,0.011089031,-0.00058505934,0.06423822,0.019796606,0.015913004,-0.04218228,-0.0073092347,-0.0053674327,-0.019992009,0.018074632,-0.008011458,0.0076206555,-0.03839638,0.084706515,0.018880663,-0.029505616,-0.041132,0.06282156,0.010802035,0.010618846,0.0059994343,0.0039019221,0.00041179324,-0.028357632,0.0414251,0.010960799,0.028382057,-0.04623686,0.005785714,0.02183611,-0.03150848,-0.039275687,-0.032192387,0.007809951,-0.0057887672,-0.006545948,0.017867018,0.016523633,0.006784093,0.024498453,0.032412212,-0.033853296,-0.019320317,-0.02155522,-0.007797738,0.02684327,0.033902146,-0.017183112,0.029114813,-0.02443739,0.010569996,0.03378002,0.0067474553,-0.01613283,0.010887523,-0.018050207,-0.022373464,-0.020578213,-0.013555974,0.017573915,-0.0064238217,0.037956726,-0.03334037,-0.050218165,-0.0014471918,0.012847643,-0.044844627,0.015021484,0.026550168,-0.035343233,-0.025841838,-0.00410343,0.030580323,0.019283678,-0.003108104,-0.015546626,0.009825028,0.0062833773,-0.018844025,0.016670184,-0.011046287,0.019271465,0.019674482,0.0037828495,-0.016169468,-0.07381289,-0.033853296,-0.011058499,-0.055591706,-0.019356953,-0.012383565,-0.020981228,-0.009476969,-0.03297399,-0.0012418677,-0.016328232,-0.017720466,0.023790123,-0.033462495,-0.012908706,-0.01791587,0.020773614,0.025622012,0.032338936,-0.021958236,0.025670862,0.003895816,-0.0033645683,-0.006741349,-0.008286241,-0.0019311156,-0.011278326,-0.055298604,-0.038640633,-0.052514132,-0.02203151,-0.014276517,-0.013336147,-0.05910893,-0.022861967,0.04914346,0.012981982,0.026525743,-0.030824576,0.030360496,-0.036833167,0.0015616849,-0.03541651,0.022116998,0.013494911,-0.030873425,-0.0059383716,-0.008017565,-0.0064116092,0.024803769,0.032021407,0.007278703,-0.04027712,-0.0102891065,-0.021713983,-0.08626973,-0.03622254,-0.008194648,0.015509988,-0.040203843,0.015607689,0.019124914,-0.067902,0.031239804,0.10033863,-0.057838824,-0.059304334,-0.033047266,-0.026232641,-0.017537277,-0.00095716165,0.04943656,-0.023240557,-0.0340487,-0.024901468,-0.008927403,-0.01906385,-0.032338936,0.024583941,-0.009947154,-0.045723934,0.017573915,0.009934941,-0.004106483,0.017696042,0.0029584998,0.025841838,0.05515205,0.011614172,-0.035025705,-0.027820278,0.014850508,0.029652167,-0.00067741703,-0.025402185,0.01867305,0.0040087826,0.044869054,0.035318807,0.023448171,-0.05104862,-0.015106972,0.010795929,0.02127433,0.030262796,0.01646257,-0.020724764,-0.00064650393,-0.02387561,0.0067718807,-0.006155145,0.013714737,-0.0017631926,0.034512777,-0.04963196,-0.016987711,-0.04665209,0.017305238,0.06672959,0.028137805,-0.056031357,0.04650554,-0.020358386,-0.072933584,-0.009495288,0.03566076,-0.002756992,0.0061032414,0.025499886,-0.02381455,0.042524233,-0.012713306,0.006777987,0.032754164,0.034683753,0.002642499,0.02051715,0.02830878,-0.0012266019,-0.0018532604,-0.007907651,-0.031239804,0.022984093,-0.030629173,0.015363437,-0.031923708,-0.009165548,0.052367583,-0.0061643044,-0.0012464473,0.019943157,-0.0035324914,-0.03368232,-0.014569619,0.0073458725,0.040057294,-0.0005846777,-0.00028642337,-0.028040105,0.04000844,0.009464757,-0.014325367,0.0051018093,0.003294346,0.043818768,-0.0135804,-0.002940181,0.07542495,0.008225178,0.022935241,0.0031905388,0.042670786,0.03250991,0.0004633151,-0.058571577,0.036833167,0.027747003,0.058083072,-0.036955293,-0.010399019,0.04623686,-0.0094464375,0.025499886,0.009067847,-0.011027968,0.05627561,-0.0049247267,-0.031190952,-0.015436713,0.019161552,0.02330162,0.01816012,0.011021862,0.0051353937,-0.02140867,-0.03995959,0.057838824,0.0307513,0.022129212,-0.013275084,0.014410855,-0.062479608,-0.036027137,0.020627063,-0.017280813,-0.033926573,-0.030971127,0.014410855,0.020969015,0.04736042,0.036149263,-0.00879917,0.00875032,0.043501243,0.018025782,0.008359517,0.013189596,0.025060233,-0.004146174,-0.02443739,-0.003129476,-0.06301696,0.026379192,0.026574593,0.012224802,-0.009373162,0.015619902,-0.046383414,-0.03551421,-0.0019647002,-0.034121975,0.0033493026,0.01235914,-0.023460384,-0.0146795325,-0.061991103,-0.06145375,0.0023570296,0.016853373,0.03070245,0.014630682,0.063407764,-0.006356653,0.00218758,-0.02862631,0.04589491,0.031044401,-0.02872401,-0.03485473,0.014740595,-0.004311044,0.027795853,0.021384243,-0.0055353562,-0.021433095,0.049119033,-0.0008052676,-0.02679442,0.034170825,0.05173253,0.008304561,0.03250991,-0.021738408,0.00257075,0.024986958,0.00014607402,0.016059555,0.006490991,-0.014948209,-0.010508933,-0.012249227,0.0340487,-0.08065194,0.004314097,-0.0954536,-0.019992009,-0.07005141,0.015534413,0.03859178,-0.008542706,-0.017854806,-0.009495288,-0.02528006,-0.05881583,-0.009959366,-0.03231451,0.0034378439,-0.010704335,-0.01143709,0.006362759,-0.056861814,-0.04665209,0.042011306,-0.0025264793,0.02882171,0.035318807,0.046432264,-0.0017586128,0.003544704,0.004933886,-0.05744802,0.025695287,-0.045650657,-0.013116321,-0.046139162,-0.019185977,-0.020602638,0.0066009043,0.009959366,0.057936523,0.027991254,-0.048361853,-0.014948209,-0.0000571511,0.04953426,-0.04696962,-0.0377369,-0.012072144,0.010319638,-0.025451036,0.046945192,-0.023020731,0.027624877,0.009208292,0.03207026,0.0378346,-0.045015603,-0.022886392,0.03175273,-0.007272597,-0.018355522,0.007443573,-0.026525743,0.044307273,0.034586053,-0.015058123,-0.011308857,-0.04877708,-0.022654353,0.032045834,0.0066192234,0.0043598944,-0.029701017,0.0056819073,0.021640709,0.04990064,0.02236125,0.02669672,0.025622012,-0.054468147,0.014288729,0.017268602,0.011821786,-0.002839427,-0.011968337,-0.007999246,-0.022666566,0.05065782,0.016425932,0.003523332,0.02038281,-0.021188842,0.006029966,-0.00080221443,-0.011101243,0.020761402,0.023448171,-0.004546136,-0.038738333,-0.013910139,0.014227666,0.04528428,0.013995627,-0.00908006,0.004747644,-0.04775122,0.052367583,0.01334836,0.052611835,-0.024986958,0.029212514,-0.019503504,0.01679231,-0.0124629475,0.0017265548,-0.022446739,-0.0059811156,-0.018184545,0.00547124,0.009452544,-0.00973954,0.01792808,0.013494911,0.028040105,0.025963964,-0.012798794,-0.022520015,0.025353335,-0.029359065,0.022300187,-0.0030302487,-0.0023448172,-0.0068756877,0.0013372785,0.024168713,0.010502826,0.0027493592,0.0021616283,-0.026403617,-0.020443873,0.028479759,-0.004607199,0.012945345,0.008011458,0.02000422,-0.009879985,-0.02297188,0.010997437,-0.037175123,-0.0020746135,-0.015400074,-0.0008411421,0.0028836976,-0.01868526,-0.017207539,-0.023411533,0.043892045,-0.011601959,-0.008121372,0.01665797,0.008267923,0.005016321,0.01684116,-0.007657293,0.00078847527,0.047995474,-0.0023829814,-0.04594376,0.016340444,0.0078404825,-0.020553788,0.024474028,0.0035355445,0.011681342,0.0448202,0.0017357143,-0.00008787339,-0.012615604,-0.008591556,0.033706747,0.011626385,-0.004851451,-0.023387108,-0.008353411,0.019894307,-0.02254444,0.040887747,-0.08773524,0.03971534,0.060818695,0.039422236,0.01740294,-0.006735243,-0.029823143,-0.04914346,-0.018758537,0.03839638,-0.004848398,0.037443798,-0.008634301,-0.008121372,0.035636336,-0.034195248,0.007443573,-0.00029348378,-0.0042347154,-0.0027737843,-0.0127377305,0.0018318883,0.006784093,0.010252468,-0.0010853938,-0.037223972,0.00476291,-0.004369054,0.03353577,0.027282923,0.022984093,-0.02513351,0.010148661,-0.000028408582,0.013446061,0.013421635,0.0011830946,0.0037004144,0.03302284,0.0009907463,-0.008524387,-0.003688202,0.0062955897,-0.03089785,-0.017231964,-0.032851864,0.029456764,-0.02659902,0.02806453,-0.038836032,-0.013384998,0.050902072,0.01433758,0.010716547,0.012554541,-0.014362005,0.026892122,0.007645081,0.021396456,-0.028137805,-0.04293946,0.0041950243,0.033706747,0.007602337,-0.025304485,0.0023203918,-0.021640709,-0.02466943,-0.023411533,0.0113454955,-0.02145752,0.0006323831,0.0023799282,0.021701772,-0.045015603,0.029603316,-0.020162985,-0.034366224,-0.012749943,-0.00043125707,0.00738251,-0.02740505,0.010679909,0.0057124384,-0.003315718,-0.018086845,-0.017769318,-0.009025103,-0.035221107,-0.001711289,0.020065283,-0.0056696944,0.0065581603,-0.00317222,0.009251037,0.014984847,0.014594044,-0.02669672,0.0047232187,0.014471918,-0.0070527704,-0.0066253296,0.021347607,-0.062528454,0.02084689,-0.015265737,0.04858168,-0.03707742,-0.046090312,-0.008292348,0.027576026,-0.009934941,-0.01219427,-0.011101243,0.04215786,0.041522805,0.033975422,0.0035019598,-0.011247794,0.07288473,-0.0038500186,-0.03636909,0.041986883,-0.0066863927,0.020834677,0.038567357,-0.017891442,-0.026501318,0.014410855,0.012200377,-0.009812815,-0.025011383,-0.017231964,0.023216132,-0.045552958,-0.009183867,-0.02178726,-0.029701017,0.020101922,0.0018089898,-0.012291971,-0.0010968432,-0.008035883,-0.011430983,0.0006541368,-0.04721387,0.013189596,0.022373464,0.014471918,0.0069062193,0.02669672,0.00006445003,-0.02419314,-0.033511344,-0.019491293,0.008335092,0.033364795,-0.010588314,0.012444628,0.0029111758,-0.00012909088,-0.0021585752,-0.013006408,-0.015619902,0.020785827,0.051439427,0.016340444,0.0074741044,0.013360572,-0.007846588,0.009855559,-0.00093120994,0.018941727,-0.036759894,0.048557255,-0.004518658,0.0016380135,-0.013849076,0.06580143,-0.025841838,-0.022837542,-0.0017433472,-0.01240799,0.005553675,-0.017390726,0.007645081,-0.0055689407,-0.03541651,-0.020883527,-0.0035782887,-0.023069581,-0.04628571,-0.010209724,0.047189444,-0.009104486,-0.0103745945,-0.047042895,-0.002660818,0.013030833,0.032412212,-0.0016288541,-0.049070183,0.048557255,0.004747644,0.0022761214,0.05080437,-0.0034256312,0.03956879,-0.023790123,0.009727327,0.0120416125,0.03509898,-0.016206106,-0.003691255,-0.024425179,0.026257066,-0.0028989634,0.022764266,0.031288654,-0.008542706,0.03255876,-0.0062070484,0.008561025,0.019088278,0.036027137,-0.041864756,0.023399321,-0.014581831,-0.022520015,-0.004930833,-0.023167282,0.030042969,0.009122804,-0.012059932,0.025841838,0.015803091,0.0014365058,-0.021762833,-0.018013569,0.017256388,-0.014093328,0.017512852,-0.0049491515,0.005059065,0.04626129,0.0023066527,0.0067047114,0.0170732,0.025963964,0.012713306,-0.014752808,0.0029600263,0.031996984,-0.021701772,0.004607199,-0.013006408,0.037468225,-0.0059963814,0.0015448926,-0.008951828,-0.015241311,0.012279758,-0.0030088767,-0.0115775345,-0.041107576,0.023790123,0.010081492,-0.0052483603,0.017622767,-0.0014059743,0.022520015,-0.0077183563,0.009049528,0.02877286,-0.0005125471,-0.021616282,-0.00061253767,-0.015851941,-0.009971579,0.019185977,0.040838897,0.0026180737,-0.005700226,-0.041815907,0.025744138,-0.0239611,0.004845345,-0.02659902,-0.021445306,-0.054223895,-0.004243875,-0.019124914,-0.06291926,-0.009983792,0.022275763,-0.005410177,0.021713983,-0.024657218,-0.019259254,-0.003874444,-0.0055017713,0.0006083396,-0.0002848968,0.021201055,0.023643572,0.009580776,0.005431549,0.027429475,0.013104108,0.021103354,0.012615604,-0.010368488,0.041547228,0.046310138,0.040912174,-0.016853373,0.027478326,-0.010569996,0.0070588766,-0.009476969,0.0117668295,-0.02193381,-0.007980927,0.0062833773,0.011962231,-0.008084734,0.034121975,-0.0032638144,-0.009806709,0.035636336,0.006051338,-0.017818168,0.010557783,-0.022556651,0.024925895,-0.0033462495,0.049729664,0.024681643,-0.02146973,0.005868149,0.0013639935,0.021384243,0.030262796,-0.0021799472,0.041596077,0.006387184,-0.014313155,-0.018734112,0.036442365,-0.02603724,0.014801658,-0.009684583,-0.023594722,0.011663022,-0.030775724,-0.00095258193,0.005001055,-0.0128232185,0.005016321,0.0041919714,0.026672294,-0.014227666,0.037981153,-0.016364869,0.009354843,-0.026379192,-0.011467621,-0.031239804,0.014642894,0.033486918,-0.021713983,0.003972145,0.030409347,0.019588994,0.023643572,0.0037217864,-0.040130567,0.01665797,0.019869883,0.02811338,0.0044484357,-0.0019937053,0.031655032,0.0025890688,0.02330162,-0.0047964943,0.033267092,-0.0003129476,0.008860233,0.014105541,0.001700603,-0.03250991,-0.022752054,-0.012322502,0.0052422537,-0.026721144,0.015986279,-0.02953004,0.009684583,-0.047848925,-0.036686618,-0.038738333,-0.005874255,-0.0049613644,0.03231451,-0.022336826,0.003465322,-0.022520015,0.036198113,0.034512777,-0.01306747,0.020529361,-0.05026702,0.00096250465,-0.009910516,-0.010173087,-0.020358386,-0.028406482,-0.0342441,0.0021204108,0.014239879,-0.013409423,0.0030119298,-0.020224048,0.0075779115,0.022800904,0.022471163,-0.024022162,-0.008408368,0.03248549,0.011363815,0.008774745,0.008414474,-0.023667999,-0.017134262,-0.016999925,-0.013812439,0.0035111194,-0.010081492,0.01264003,-0.009269355,0.0025692235,-0.008084734,0.0066192234,-0.006552054,-0.005492612,-0.015558839,-0.01886845,0.012933132,0.005208669,-0.005510931,-0.014557406,-0.0046102526,-0.020492725,-0.024583941,-0.0073336596,-0.0078404825,0.033047266,-0.010411232,0.0137758,-0.0019662268,-0.006139879,-0.0043446287,-0.016596908,-0.017573915,-0.024925895,0.013629249,-0.015363437,0.02150637,-0.0033889934,0.0007266491,-0.015766453,-0.015546626,-0.0064238217,0.028699584,0.038884886,0.0009777704,0.04169378,0.00005142645,-0.021909384,-0.017671617,0.013409423,-0.008243497,-0.012725518,-0.011455408,-0.00924493,-0.009440332,-0.015876366,-0.016340444,-0.015925216,0.00014492909,0.020773614,-0.010515039,0.028992686,0.020443873,-0.0012327082,0.055982508,0.011418771,0.053979643,-0.02867516,0.034610476,0.028553033,-0.020773614,0.00007508834,-0.015265737,-0.014129966,0.037272822,0.0076328684,-0.00009102195,-0.022434527,-0.0010312005,0.025011383,-0.008548812,-0.02948119,0.017610554,0.035245534,-0.0066680736,-0.000011562603,0.017012136,-0.00896404,-0.0050102146,0.0006571899,-0.005593366,0.026012816,-0.020810252,0.011925593,-0.031728305,0.022800904,-0.0030134565,-0.031899285,0.014471918,0.0135804,0.034561627,-0.006942857,-0.0005739917,-0.010850886,0.020480512,-0.027844703,0.002796683,-0.030213945,-0.004002676,0.05769227,-0.026305918,-0.00015599675,0.008365624,0.021017866,0.0029233885,0.0273562,-0.004720166,-0.031264227,-0.044575952,0.0745945,-0.021286543,0.03951994,0.052318733,-0.00251732,0.0023799282,-0.013262872,0.007064983,-0.0035019598,0.023423746,0.01905164,0.037150696,0.019454654,0.03905586,0.0019402751,0.019711118,-0.02628149,0.01664576,-0.0154611375,-0.045675084,-0.022483377,-0.0052147754,0.036857594,0.016535847,-0.017744891,0.0014601677,0.039422236,-0.011724086,0.020736976,-0.0058162455,0.036759894,0.010063173,0.023533659,-0.008499962,0.031142103,-0.014838296,0.018074632,0.0113027515,0.008194648,-0.001559395,-0.0058498303,-0.0118095735,0.033071693,-0.013641462,0.007229853,0.0069489633,-0.006011647,-0.0476291,0.026452469,-0.0050041084,0.028553033,-0.01905164,-0.027527176,0.002921862,-0.00037763614,-0.006802412,0.024376327,0.021701772,0.012786581,-0.003898869,-0.0029188087,0.02867516,0.013555974,-0.008670938,0.033364795,0.030531473,-0.06033019,0.030262796,0.013116321,-0.0075840177,-0.009055635,-0.020981228,0.014007839,-0.03033607,-0.03920241,-0.011974444,0.013836863,0.00037515548,-0.0056452695,0.020309536,0.026354767,-0.02107893,0.012218695,0.008860233,0.0035294383,0.011266113,0.02140867,0.04076562,-0.011430983,0.0037920089,-0.0030058236,-0.01395899,0.01405669,-0.005056012,0.028357632,0.003706521,-0.007174896,0.02140867,0.025157934,0.0051231813,-0.025548736,-0.029847568,0.014093328,0.023460384,-0.008921296,-0.006490991,0.00934263,-0.011626385,0.0025829626,-0.008707576,0.02957889,-0.006979495,-0.0018242555,0.02994527,-0.0046316246,-0.012059932,0.001657859,-0.0017647191,-0.0021097248,0.021249905,-0.014887146,-0.004274406,-0.04066792,0.012414097,0.018184545,0.0017754051,0.03707742,0.03185043,0.03180158,0.02292303,-0.0046102526,0.032338936,0.00924493,0.021384243,0.016438145,0.034830306,-0.021139992,0.00497663,-0.008762533,-0.006503204,-0.01603513,0.0017479268,-0.0154245,0.019772181,0.00084801164,0.0012098096,0.0006499387,0.010399019,0.006588692,-0.00052018,-0.00092357706,0.02278869,-0.0018181492,0.041522805,-0.02471828,-0.012322502,0.017634979,-0.026354767,0.011406559,-0.02882171,-0.025719713,-0.0034500565,-0.032949567,0.0068085184,-0.027966829,-0.054565847,-0.022935241,0.006203995,-0.016853373,-0.012664455,-0.01754949,0.0047537503,-0.004643837,0.05339344,-0.013604824,0.021152204,-0.011601959,-0.00596585,-0.041767053,0.0068634753,-0.026916547,-0.026379192,-0.05725262,-0.025622012,-0.04621244,0.017293027,-0.026721144,-0.025157934,-0.01703656,-0.006735243,0.0019204296,0.015400074,-0.0071626836,0.023094006,0.02882171,0.015558839,-0.038933735,0.017964719,0.0042621936,0.006155145,0.010856992,-0.007999246,-0.02433969,0.02226355,-0.02400995,-0.0039690915,-0.010460082,-0.061600298,0.012530116,-0.007657293,0.029407915,-0.0032424424,-0.019332528,0.036344666,0.0011716452,-0.0026898228,0.017940294,-0.009538032,0.0309467,-0.014984847,0.01433758,0.0045980397,-0.02387561,-0.014264304,0.041913606,0.008707576,0.044649225,-0.010832567,-0.03910471,0.011968337,0.03666219,-0.022568865,0.0069917073,-0.015558839,-0.025182359,-0.006115454,-0.04147395,0.04892363,-0.032680888,0.031019976,-0.0018120429,-0.03566076,0.020956803,0.0044301166,-0.009916622,-0.021481944,0.031703882,-0.018355522,-0.02198266,0.016316019,0.018611986,-0.007852695,0.014227666,0.0025997548,-0.040545795,-0.047848925,0.007211534,-0.028235506,0.03282744,0.0051659252,-0.011467621,0.008463324,-0.027673727,-0.06135605,0.033511344,0.0033035052,-0.014020053,0.02867516,-0.01306747,-0.031630605,-0.032729737,-0.020920165,0.027063098,-0.025548736,-0.012847643,0.06648534,0.0055200905,0.030800149,0.0026562382,-0.028211081,-0.029163662,0.051537126,-0.016157255,-0.018856237,-0.041205276,0.021762833,-0.018990576,0.016230531,0.023216132,-0.0012411043,0.03961764,-0.00978839,-0.025011383,-0.003966038,-0.0074741044,-0.01537565,-0.015082547,-0.03216796,-0.01778153,-0.00738251,0.0135193365,-0.019308103,0.055396304,-0.0071565774,0.013946777,0.012261439,0.0344395,-0.0023555032,0.01405669,0.029041536,-0.0038713908,-0.02466943,-0.0031600075,0.00048774027,0.0009915095,-0.0224101,0.03886046,0.0031813795,-0.00074496795,0.020785827,-0.008628194,0.024083225,0.022532227,-0.016804522,-0.0020349226,0.0051567657,-0.0018685261,-0.0018792121,-0.021762833,-0.0037797964,-0.03253434,-0.013946777,0.056715265,-0.0018669995,-0.01339721,-0.031606182,-0.001410554,0.0029310214,0.00924493,-0.007907651,0.024474028,-0.0070405575,-0.017415153,-0.010423445,0.015363437,-0.016157255,0.04775122,0.030629173,0.010179193,0.025060233,-0.0029294947,0.008805277,-0.019076064,0.030116245,-0.0029050696,-0.010508933,0.004420957,-0.0115347905,0.029090388,-0.008561025,-0.024498453,-0.00042362418,0.024706068,-0.009464757,0.005266679,0.020346174,-0.03480588,-0.023753487,-0.03688202,0.019332528,0.015216886,0.032338936,0.0045705615,0.03145963,-0.0054376554,0.020395024,0.005175085,-0.019332528,0.032094683,0.00497663,0.015717601,-0.025817413,0.030824576,-0.024449604,0.024803769,-0.022116998,0.008658726,0.021115566,0.022458952]",
+            "aiDraftText": "Hello Prakash,\n\nThank you for reaching out regarding the referral amount discrepancy. We understand your concern about receiving Rs. 238 instead of the expected Rs. 400 voucher. \n\nTo assist you further, we recommend checking if there were any terms or conditions associated with the referral program that might have affected the final amount. If everything seems in order, please provide us with any additional details, and we will investigate this matter for you.\n\nLooking forward to your response.\n\nRegards, Team InCred Money",
+            "kb_category": null,
+            "kb_new_info": null,
+            "diff_summary": "The human-sent email likely included a more personalized touch or specific details that were not present in the AI draft, making it more relatable to the customer.",
+            "originalBody": "Hello team\nIn app it was showing total I will get Rs.400 voucher but only get 238, why\nso less\n\nThanks & Best Regards\nPrakash Srivastava",
+            "classification": "billing",
+            "kb_update_needed": false,
+            "kb_update_reason": null
+          },
+          "pairedItem": {
+            "item": 0
+          }
+        }
+      ]
+    },
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "09b7acc8-474c-4f82-b57c-95474987c1c1",
+    "connections": {
+      "⚙️ Set Watermark": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Start Run Log",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🔄 Loop - Sent Emails": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Complete Run Log",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "📧 Gmail - Fetch Full Message",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⚙️ Carry Run Context": {
+        "main": [
+          [
+            {
+              "node": "📧 Gmail - Fetch Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⚙️ Extract Embedding": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Save Correction",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "❓ IF - Approved As-Is?": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Mark Approved As-Is",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "🔢 Generate Embedding - Human Sent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⚙️ Parse AI Comparison": {
+        "main": [
+          [
+            {
+              "node": "❓ IF - Approved As-Is?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "❓ IF - KB Update Needed?": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Fetch KB Entry to Update",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "🔄 Loop - Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Start Run Log": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Carry Run Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model - Compare": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "🤖 AI - Compare Draft vs Sent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "❓ IF - Already Processed?": {
+        "main": [
+          [
+            {
+              "node": "🤖 AI - Compare Draft vs Sent",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "🔄 Loop - Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "❓ IF - Draft Match Found?": {
+        "main": [
+          [
+            {
+              "node": "❓ IF - Already Processed?",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "🔄 Loop - Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🤖 AI - Rewrite KB Answer": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Update KB Entry",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⏰ Schedule - Every 3 Hours": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Get Last Watermark",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Mark KB Updated": {
+        "main": [
+          [
+            {
+              "node": "🔄 Loop - Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Match Thread ID": {
+        "main": [
+          [
+            {
+              "node": "❓ IF - Draft Match Found?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Save Correction": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Mark Draft Processed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Update KB Entry": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Mark KB Updated",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⚙️ Parse Full Message Body": {
+        "main": [
+          [
+            {
+              "node": "🗄️ DB - Match Thread ID",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📧 Gmail - Fetch Sent Emails": {
+        "main": [
+          [
+            {
+              "node": "🔄 Loop - Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📧 Gmail - Fetch Full Message": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Parse Full Message Body",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Get Last Watermark": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Set Watermark",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🤖 AI - Compare Draft vs Sent": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Parse AI Comparison",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Mark Approved As-Is": {
+        "main": [
+          [
+            {
+              "node": "🔄 Loop - Sent Emails",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Mark Draft Processed": {
+        "main": [
+          [
+            {
+              "node": "❓ IF - KB Update Needed?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🔢 Generate Embedding - Human Sent": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Extract Embedding",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🗄️ DB - Fetch KB Entry to Update": {
+        "main": [
+          [
+            {
+              "node": "🤖 AI - Rewrite KB Answer",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 32,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 4
+      },
+      "n8n-nodes-base.code": {
+        "count": 5
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.postgres": {
+        "count": 10
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 5
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Vivekanand M",
+    "username": "vivek120819",
+    "bio": "",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/3d641762a2843f9a1146e16033e88f3fc0771c5e5caa85e665fede58c5749a0b?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "icon": "file:postgres.svg",
+      "name": "n8n-nodes-base.postgres",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/postgres/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Postgres"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzkgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwMCIgZD0iTTc3LjM5MSA0Ny45MjJjLS40NjYtMS40MTItMS42ODgtMi4zOTYtMy4yNjgtMi42MzItLjc0NS0uMTExLTEuNTk4LS4wNjQtMi42MDguMTQ0LTEuNzYuMzYzLTMuMDY1LjUwMS00LjAxOC41MjggMy41OTYtNi4wNzIgNi41MjEtMTIuOTk3IDguMjA0LTE5LjUxNSAyLjcyMi0xMC41NCAxLjI2OC0xNS4zNDEtLjQzMi0xNy41MTNDNzAuNzcgMy4xODUgNjQuMjA2LjA5NyA1Ni4yODcuMDAyYy00LjIyNC0uMDUyLTcuOTMzLjc4Mi05Ljg2NyAxLjM4MmEzNyAzNyAwIDAgMC01Ljc3LS41MjhjLTMuODA5LS4wNjEtNy4xNzQuNzctMTAuMDUgMi40NzZhNDYgNDYgMCAwIDAtNy4wOTgtMS43ODJDMTYuNTYxLjQxMSAxMC45NjggMS4yOTkgNi44NzYgNC4xOSAxLjkyMiA3LjY4OS0uMzc1IDEzLjc3LjA1IDIyLjI2MmMuMTM1IDIuNjk2IDEuNjQzIDEwLjkgNC4wMTggMTguNjggMS4zNjUgNC40NzIgMi44MiA4LjE4NSA0LjMyNiAxMS4wMzggMi4xMzUgNC4wNDYgNC40MTkgNi40MjggNi45ODQgNy4yODQgMS40MzguNDc5IDQuMDQ5LjgxNCA2Ljc5Ny0xLjQ3M2E2IDYgMCAwIDAgMS40MjkgMS4yM2MuNzgzLjQ5NCAxLjc0Ljg5NyAyLjY5NiAxLjEzNiAzLjQ0Ni44NjIgNi42NzQuNjQ2IDkuNDI3LS41NjFsLjA0MSAxLjM2Mi4wNiAxLjg5OWMuMTYzIDQuMDY0LjQ0IDcuMjIzIDEuMjU5IDkuNDM0LjA0NS4xMjIuMTA1LjMwNy4xNjkuNTAzLjQwOSAxLjI1MSAxLjA5MiAzLjM0NiAyLjgzIDQuOTg3IDEuOCAxLjY5OSAzLjk3OCAyLjIyIDUuOTcyIDIuMjIgMSAwIDEuOTU1LS4xMzEgMi43OTItLjMxMSAyLjk4NC0uNjM5IDYuMzczLTEuNjE0IDguODI0LTUuMTA0IDIuMzE4LTMuMyAzLjQ0NC04LjI3IDMuNjQ4LTE2LjEwMWwuMDc0LS42MzQuMDQ4LS40MTQuNTQ2LjA0OC4xNDEuMDFjMy4wMzkuMTM4IDYuNzU1LS41MDYgOS4wMzctMS41NjYgMS44MDMtLjgzNyA3LjU4Mi0zLjg4OCA2LjIyMS04LjAwNyIvPjxwYXRoIGZpbGw9IiMzMzY3OTEiIGQ9Ik03Mi4xOTUgNDguNzIzYy05LjAzNiAxLjg2NC05LjY1Ny0xLjE5NS05LjY1Ny0xLjE5NSA5LjU0MS0xNC4xNTcgMTMuNTI5LTMyLjEyNyAxMC4wODctMzYuNTI1QzYzLjIzNS0uOTk0IDQ2Ljk4MSA0LjY4IDQ2LjcxIDQuODI3bC0uMDg3LjAxNmMtMS43ODUtLjM3MS0zLjc4My0uNTkxLTYuMDI5LS42MjgtNC4wODktLjA2Ny03LjE5IDEuMDcyLTkuNTQ0IDIuODU3IDAgMC0yOC45OTUtMTEuOTQ1LTI3LjY0NyAxNS4wMjMuMjg3IDUuNzM3IDguMjIzIDQzLjQxIDE3LjY4OSAzMi4wMzEgMy40Ni00LjE2MSA2LjgwMy03LjY3OSA2LjgwMy03LjY3OSAxLjY2IDEuMTAzIDMuNjQ4IDEuNjY2IDUuNzMyIDEuNDYzbC4xNjItLjEzN2E2LjMgNi4zIDAgMCAwIC4wNjUgMS42MmMtMi40MzkgMi43MjUtMS43MjIgMy4yMDMtNi41OTcgNC4yMDYtNC45MzMgMS4wMTctMi4wMzUgMi44MjYtLjE0MyAzLjI5OSAyLjI5NC41NzQgNy42IDEuMzg2IDExLjE4NS0zLjYzM2wtLjE0My41NzNjLjk1Ni43NjUgMS42MjYgNC45NzggMS41MTQgOC43OTdzLS4xODggNi40NDEuNTY1IDguNDg5IDEuNTAzIDYuNjU2IDcuOTEyIDUuMjgyYzUuMzU1LTEuMTQ4IDguMTMtNC4xMjEgOC41MTYtOS4wODEuMjc0LTMuNTI2Ljg5NC0zLjAwNS45MzMtNi4xNThsLjQ5Ny0xLjQ5M2MuNTczLTQuNzguMDkxLTYuMzIyIDMuMzktNS42MDVsLjgwMi4wN2MyLjQyOC4xMSA1LjYwNi0uMzkxIDcuNDcxLTEuMjU3IDQuMDE2LTEuODY0IDYuMzk4LTQuOTc2IDIuNDM4LTQuMTU4Ii8+PHBhdGggZD0iTTMyLjc0NyAyNC42NmMtLjgxNC0uMTEzLTEuNTUyLS4wMDgtMS45MjUuMjc0YS43LjcgMCAwIDAtLjI5Mi40N2MtLjA0Ny4zMzYuMTg4LjcwNy4zMzMuODk4LjQwOS41NDIgMS4wMDYuOTE1IDEuNTk4Ljk5N2EyIDIgMCAwIDAgLjI1Ni4wMThjLjk4NiAwIDEuODgzLS43NjggMS45NjItMS4zMzUuMDk5LS43MS0uOTMyLTEuMTgzLTEuOTMxLTEuMzIybTI2Ljk3NS4wMjJjLS4wNzgtLjU1Ni0xLjA2OC0uNzE1LTIuMDA3LS41ODRzLTEuODQ4LjU1NC0xLjc3MiAxLjExMmMuMDYxLjQzNC44NDQgMS4xNzQgMS43NzEgMS4xNzRxLjExNyAwIC4yMzctLjAxNmMuNjE5LS4wODYgMS4wNzMtLjQ3OSAxLjI4OC0uNzA1LjMyOS0uMzQ1LjUxOC0uNzMuNDg0LS45OG0xNS40NzcgMjMuODI4Yy0uMzQ1LTEuMDQyLTEuNDUzLTEuMzc3LTMuMjk2LS45OTctNS40NzEgMS4xMjktNy40My4zNDctOC4wNzMtLjEyNyA0LjI1Mi02LjQ3OCA3Ljc1LTE0LjMwOCA5LjYzNy0yMS42MTQuODk0LTMuNDYxIDEuMzg4LTYuNjc1IDEuNDI4LTkuMjk0LjA0NS0yLjg3Ni0uNDQ1LTQuOTg4LTEuNDU1LTYuMjc5LTQuMDcyLTUuMjAzLTEwLjA0OC03Ljk5NC0xNy4yODMtOC4wNy00Ljk3My0uMDU2LTkuMTc1IDEuMjE3LTkuOTkgMS41NzVhMjUgMjUgMCAwIDAtNS42MjItLjcyMmMtMy43MzQtLjA2LTYuOTYxLjgzNC05LjYzMyAyLjY1NWE0MyA0MyAwIDAgMC03LjgyOC0yLjA1MmMtNi4zNDItMS4wMjEtMTEuMzgxLS4yNDgtMTQuOTc4IDIuMy00LjI5MSAzLjA0LTYuMjcyIDguNDc1LTUuODg4IDE2LjE1Mi4xMjkgMi41ODMgMS42MDEgMTAuNTI5IDMuOTIzIDE4LjEzOSAzLjA1NyAxMC4wMTYgNi4zOCAxNS42ODYgOS44NzcgMTYuODUyYTQuNCA0LjQgMCAwIDAgMS40MDIuMjMyYzEuMjc2IDAgMi44MzktLjU3NSA0LjQ2Ni0yLjUzMWExNjEgMTYxIDAgMCAxIDYuMTU2LTYuOTY2IDkuOSA5LjkgMCAwIDAgNC40MjkgMS4xOTFsLjAxLjEyMWMtLjMxLjM2OC0uNTY0LjY5LS43ODEuOTY1LTEuMDcgMS4zNTgtMS4yOTMgMS42NDEtNC43MzggMi4zNTEtLjk4LjIwMi0zLjU4Mi43MzgtMy42MiAyLjU2My0uMDQxIDEuOTkzIDMuMDc2IDIuODMgMy40MzEgMi45MTkgMS4yMzguMzEgMi40My40NjMgMy41NjguNDYzIDIuNzY2IDAgNS4yLS45MDkgNy4xNDUtMi42NjgtLjA2IDcuMTA2LjIzNiAxNC4xMDcgMS4wODkgMTYuMjQxLjY5OSAxLjc0NiAyLjQwNiA2LjAxNCA3Ljc5OCA2LjAxNC43OTEgMCAxLjY2Mi0uMDkyIDIuNjItLjI5NyA1LjYyNy0xLjIwNyA4LjA3MS0zLjY5NCA5LjAxNi05LjE3Ny41MDYtMi45MyAxLjM3NC05LjkyOCAxLjc4Mi0xMy42ODIuODYyLjI2OSAxLjk3MS4zOTIgMy4xNy4zOTIgMi41MDEgMCA1LjM4Ny0uNTMxIDcuMTk3LTEuMzcyIDIuMDMzLS45NDQgNS43MDItMy4yNjEgNS4wMzctNS4yNzR6TTYxLjggMjMuMTQ3Yy0uMDE5IDEuMTA4LS4xNzEgMi4xMTQtLjMzMyAzLjE2NC0uMTc0IDEuMTI5LS4zNTQgMi4yOTctLjM5OSAzLjcxNS0uMDQ1IDEuMzc5LjEyOCAyLjgxNC4yOTQgNC4yLjMzNyAyLjgwMS42ODIgNS42ODUtLjY1NSA4LjUzMWExMSAxMSAwIDAgMS0uNTkyLTEuMjE4Yy0uMTY2LS40MDMtLjUyNy0xLjA1LTEuMDI3LTEuOTQ2LTEuOTQ0LTMuNDg3LTYuNDk3LTExLjY1Mi00LjE2Ny0xNC45ODQuNjk0LS45OTIgMi40NTYtMi4wMTEgNi44NzktMS40NjN6TTU2LjQzOSA0LjM3NGM2LjQ4Mi4xNDMgMTEuNjA5IDIuNTY4IDE1LjI0IDcuMjA3IDIuNzg0IDMuNTU4LS4yODIgMTkuNzQ5LTkuMTU4IDMzLjcxNmwtLjI2OS0uMzM5LS4xMTItLjE0YzIuMjk0LTMuNzg4IDEuODQ1LTcuNTM2IDEuNDQ2LTEwLjg1OS0uMTY0LTEuMzY0LS4zMTktMi42NTItLjI4LTMuODYxLjA0MS0xLjI4My4yMS0yLjM4Mi4zNzQtMy40NDYuMjAyLTEuMzExLjQwNy0yLjY2Ny4zNS00LjI2NWExLjggMS44IDAgMCAwIC4wMzctLjYwMWMtLjE0NC0xLjUzMy0xLjg5NC02LjEyLTUuNDYyLTEwLjI3My0xLjk1MS0yLjI3MS00Ljc5Ny00LjgxMy04LjY4Mi02LjUyN2EyOS4zIDI5LjMgMCAwIDEgNi41MTUtLjYxMnpNMjAuMTY3IDUzLjI5OGMtMS43OTMgMi4xNTUtMy4wMzEgMS43NDItMy40MzggMS42MDctMi42NTMtLjg4NS01LjczLTYuNDkxLTguNDQ0LTE1LjM4Mi0yLjM0OC03LjY5My0zLjcyLTE1LjQyOC0zLjgyOS0xNy41OTctLjM0My02Ljg2IDEuMzItMTEuNjQxIDQuOTQzLTE0LjIxIDUuODk2LTQuMTgxIDE1LjU4OS0xLjY3OSAxOS40ODQtLjQwOWwtLjE3LjE2M2MtNi4zOTEgNi40NTUtNi4yNCAxNy40ODMtNi4yMjQgMTguMTU3YTIyIDIyIDAgMCAwIC4wNTEgMS4xMzVjLjExIDEuODU1LjMxNSA1LjMwNy0uMjMyIDkuMjE3LS41MDggMy42MzMuNjEyIDcuMTg5IDMuMDcyIDkuNzU2cS4zODMuMzk4Ljc5NS43NWExNjQgMTY0IDAgMCAwLTYuMDA4IDYuODE0em02LjgzLTkuMTEzYy0xLjk4My0yLjA2OS0yLjg4NC00Ljk0Ny0yLjQ3MS03Ljg5Ni41NzctNC4xMy4zNjQtNy43MjcuMjUtOS42NTlsLS4wMzktLjY5NGMuOTM0LS44MjggNS4yNjEtMy4xNDYgOC4zNDYtMi40MzkgMS40MDguMzIzIDIuMjY2IDEuMjgxIDIuNjIzIDIuOTMxIDEuODQ2IDguNTM5LjI0NCAxMi4wOTgtMS4wNDMgMTQuOTU3LS4yNjUuNTg5LS41MTYgMS4xNDYtLjczIDEuNzIybC0uMTY2LjQ0NWMtLjQyIDEuMTI2LS44MTEgMi4xNzMtMS4wNTMgMy4xNjctMi4xMDgtLjAwNi00LjE1OS0uOTA3LTUuNzE4LTIuNTM0em0uMzI0IDExLjUxNmE1IDUgMCAwIDEtMS40OTQtLjY0MmMuMjcxLS4xMjguNzU0LS4zMDEgMS41OTEtLjQ3NCA0LjA1Mi0uODM0IDQuNjc4LTEuNDIzIDYuMDQ1LTMuMTU4LjMxMy0uMzk4LjY2OS0uODQ5IDEuMTYtMS4zOTguNzMzLS44MjEgMS4wNjgtLjY4MiAxLjY3Ni0uNDMuNDkzLjIwNC45NzIuODIxIDEuMTY3IDEuNTAxLjA5Mi4zMjEuMTk1LjkzLS4xNDMgMS40MDQtMi44NTUgMy45OTctNy4wMTUgMy45NDYtMTAuMDAzIDMuMTk4em0yMS4yMDcgMTkuNzM1Yy00Ljk1NyAxLjA2Mi02LjcxMy0xLjQ2Ny03Ljg2OS00LjM1OS0uNzQ3LTEuODY3LTEuMTEzLTEwLjI4NS0uODUzLTE5LjU4MmExLjEgMS4xIDAgMCAwLS4wNDgtLjM1NiA1IDUgMCAwIDAtLjEzOS0uNjU3Yy0uMzg3LTEuMzUzLTEuMzMxLTIuNDg0LTIuNDYyLTIuOTUzLS40NS0uMTg2LTEuMjc1LS41MjgtMi4yNjctLjI3NC4yMTItLjg3MS41NzgtMS44NTUuOTc2LTIuOTIxbC4xNjctLjQ0OGMuMTg4LS41MDUuNDIzLTEuMDI5LjY3My0xLjU4MyAxLjM0Ny0yLjk5MiAzLjE5Mi03LjA5MSAxLjE5LTE2LjM1LS43NS0zLjQ2OC0zLjI1NC01LjE2MS03LjA1LTQuNzY4LTIuMjc2LjIzNS00LjM1OCAxLjE1NC01LjM5NiAxLjY4cS0uMzM0LjE2OS0uNjE4LjMyOWMuMjktMy40OTQgMS4zODUtMTAuMDI0IDUuNDgxLTE0LjE1NiAyLjU3OS0yLjYwMSA2LjAxNC0zLjg4NiAxMC4xOTktMy44MTcgOC4yNDYuMTM1IDEzLjUzNCA0LjM2NyAxNi41MTggNy44OTMgMi41NzEgMy4wMzkgMy45NjQgNi4xIDQuNTIgNy43NTEtNC4xNzktLjQyNS03LjAyMi40LTguNDYzIDIuNDYtMy4xMzUgNC40ODEgMS43MTUgMTMuMTc4IDQuMDQ2IDE3LjM1OC40MjcuNzY2Ljc5NiAxLjQyOC45MTIgMS43MDkuNzU5IDEuODM5IDEuNzQyIDMuMDY3IDIuNDU5IDMuOTY0LjIyLjI3NS40MzMuNTQxLjU5Ni43NzQtMS4yNjYuMzY1LTMuNTM5IDEuMjA4LTMuMzMyIDUuNDIyLS4xNjcgMi4xMTUtMS4zNTYgMTIuMDE2LTEuOTU5IDE1LjUxNC0uNzk3IDQuNjIxLTIuNDk3IDYuMzQzLTcuMjc5IDcuMzY4em0yMC42OTMtMjMuNjhjLTEuMjk0LjYwMS0zLjQ2IDEuMDUyLTUuNTE4IDEuMTQ4LTIuMjczLjEwNy0zLjQzLS4yNTUtMy43MDItLjQ3Ny0uMTI4LTIuNjI2Ljg1LTIuOTAxIDEuODg0LTMuMTkxLjE2My0uMDQ2LjMyMS0uMDkuNDc0LS4xNDRhNCA0IDAgMCAwIC4zMTMuMjNjMS44MjcgMS4yMDYgNS4wODUgMS4zMzYgOS42ODUuMzg2bC4wNS0uMDFjLS42Mi41OC0xLjY4MiAxLjM1OS0zLjE4NyAyLjA1OHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Postgres",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 41,
+      "name": "Ticket Management"
+    },
+    {
+      "id": 48,
+      "name": "AI RAG"
+    }
+  ],
+  "image": []
+}

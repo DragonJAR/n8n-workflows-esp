@@ -1,0 +1,1473 @@
+{
+  "id": 12100,
+  "name": "Compare LLM token costs across 350+ models with OpenRouter",
+  "views": 121,
+  "recentViews": 0,
+  "totalViews": 121,
+  "createdAt": "2025-12-24T12:21:06.911Z",
+  "description": "###  This n8n template lets you run prompts against 350+ LLM models and see exactly what each request costs with real-time pricing from OpenRouter\n\n  Use cases are many: Compare costs across different models, plan your AI budget, optimize prompts for cost efficiency, or track expenses for client billing!\n\n  ## Good to know\n\n  - OpenRouter charges a platform fee on top of model costs. See [OpenRouter Pricing](https://openrouter.ai/pricing) for details.\n  - You need an OpenRouter account with API credits. Free signup available with some free models included.\n  - Pricing data is fetched live from OpenRouter's API, so costs are always up-to-date.\n\n  ## How it works\n\n  1. All available models are fetched from OpenRouter's API when you start.\n  2. You select a model and enter your prompt via the form (or just use the chat).\n  3. The prompt is sent to OpenRouter and the response is captured.\n  4. Token usage (input/output) is extracted from the response using a LangChain Code node.\n  5. Real-time pricing for your selected model is fetched from OpenRouter.\n  6. The exact cost is calculated and displayed alongside your AI response.\n\n  ## How to use\n\n  - **Chat interface**: Quick testing - just type a prompt and get the response with costs.\n  - **Form interface**: Select from all available models via dropdown, enter your prompt, and get a detailed cost breakdown.\n  - Click **\"Show Details\"** on the result form to see the full breakdown (input tokens, output tokens, cost per type).\n\n  ## Requirements\n\n  - OpenRouter account with API key ([Get one here](https://openrouter.ai/settings/keys))\n\n  ## Customising this workflow\n\n  - Add a database node to log all requests and costs over time\n  - Connect to Google Sheets for cost tracking and reporting\n  - Extend with LLM-as-Judge evaluation to also check response quality",
+  "workflow": {
+    "meta": {
+      "instanceId": "a54cf02b6776c9f83792938b4263399d57575eb51bfe5520daa010289a525069",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "1492691c-98f1-46a3-8d27-3d7f067620dd",
+        "name": "When chat message received",
+        "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+        "position": [
+          784,
+          64
+        ],
+        "webhookId": "2f6fee75-c581-46b1-b57e-c460012d4b2c",
+        "parameters": {
+          "options": {
+            "responseMode": "responseNodes"
+          }
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "16164596-fe99-4e3c-929a-414be89200da",
+        "name": "When Executed by Another Workflow",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "position": [
+          784,
+          576
+        ],
+        "parameters": {
+          "workflowInputs": {
+            "values": [
+              {
+                "name": "chatInput"
+              },
+              {
+                "name": "model"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "28dac69d-44a9-4c52-8a06-efafc48c3e8d",
+        "name": "Code in JavaScript",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2000,
+          576
+        ],
+        "parameters": {
+          "jsCode": "// Hole die Pricing-Daten vom Filter Node\nconst modelData = $('Filter').first().json;\nconst pricing = modelData.pricing;\n\n// Hole die Token-Usage vom LangChain Code Node\nconst tokenUsage = $json.tokenUsage;\n\n// Preise pro Token (von OpenRouter - sind bereits in Dollar pro Token)\nconst promptPrice = parseFloat(pricing.prompt);      // z.B. 0.0000004\nconst completionPrice = parseFloat(pricing.completion); // z.B. 0.0000016\n\n// Berechne Kosten\nconst inputCost = tokenUsage.input_tokens * promptPrice;\nconst outputCost = tokenUsage.output_tokens * completionPrice;\nconst totalCost = inputCost + outputCost;\n\nreturn {\n  // Original Output\n  output: $json.output,\n  \n  // Token Usage\n  tokenUsage: {\n    input_tokens: tokenUsage.input_tokens,\n    output_tokens: tokenUsage.output_tokens,\n    total_tokens: tokenUsage.total_tokens\n  },\n  \n  // Kosten in USD\n  costs: {\n    input_cost_usd: inputCost,\n    output_cost_usd: outputCost,\n    total_cost_usd: totalCost,\n    // Formatiert für bessere Lesbarkeit\n    total_cost_formatted: `$${totalCost.toFixed(8)}`\n  },\n  \n  // Model Info\n  model: {\n    id: modelData.id,\n    name: modelData.name,\n    prompt_price_per_token: promptPrice,\n    completion_price_per_token: completionPrice\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "8dc228d4-7dd0-4003-a444-4a36be89edb1",
+        "name": "LangChain Code",
+        "type": "@n8n/n8n-nodes-langchain.code",
+        "position": [
+          1680,
+          576
+        ],
+        "parameters": {
+          "code": {
+            "execute": {
+              "code": "const { PromptTemplate } = require('@langchain/core/prompts');\n\n// Get the LLM from ai_languageModel input\nconst llm = await this.getInputConnectionData('ai_languageModel', 0);\n\n// Get the chat input\nconst chatInput = $('When Executed by Another Workflow').first().json.chatInput;\n\n// Variable for token data\nlet tokenUsage = null;\n\n// Callback handler for token tracking\nconst tokenCallback = {\n  handleLLMEnd: async function(output, runId, parentId) {\n    try {\n      const generation = output.generations[0][0];\n      const message = generation.message;\n      if (message && message.usage_metadata) {\n        tokenUsage = {\n          input_tokens: message.usage_metadata.input_tokens,\n          output_tokens: message.usage_metadata.output_tokens,\n          total_tokens: message.usage_metadata.total_tokens\n        };\n      }\n    } catch (e) {\n      console.log('Token tracking error:', e);\n    }\n  }\n};\n\n// Create prompt and chain\nconst prompt = PromptTemplate.fromTemplate('{input}');\nconst chain = prompt.pipe(llm);\n\n// Invoke WITH callbacks (important: on invoke, not on the LLM!)\nconst response = await chain.invoke(\n  { input: chatInput },\n  { callbacks: [tokenCallback] }\n);\n\n// Return response with token data\nreturn [{\n  json: {\n    output: response.content,\n    tokenUsage: tokenUsage\n  }\n}];"
+            }
+          },
+          "inputs": {
+            "input": [
+              {
+                "type": "main",
+                "required": true,
+                "maxConnections": 1
+              },
+              {
+                "type": "ai_languageModel",
+                "required": true,
+                "maxConnections": 1
+              }
+            ]
+          },
+          "outputs": {
+            "output": [
+              {
+                "type": "main"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0365fe8b-f2ec-4144-b7e5-d09cb88cd193",
+        "name": "Filter",
+        "type": "n8n-nodes-base.filter",
+        "position": [
+          1456,
+          576
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "5e3a6f70-614e-4dda-bd44-f03d041dffba",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.id }}",
+                "rightValue": "={{ $('When Executed by Another Workflow').item.json.model }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "1e2846e8-2cd4-4b41-b208-5971b7c0dd56",
+        "name": "Code in JavaScript1",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1456,
+          288
+        ],
+        "parameters": {
+          "jsCode": "// Dropdown values must be { option: \"...\" } format (not name/value)\nconst dropdownValues = items\n  .map(item => ({\n    option: item.json.id,\n  }))\n  .sort((a, b) => a.option.localeCompare(b.option));\n\nconst formJson = [\n  {\n    fieldLabel: \"Select Model\",\n    fieldType: \"dropdown\",\n    fieldOptions: {\n      values: dropdownValues,\n    },\n    requiredField: true,\n  },\n  {\n    fieldLabel: \"Prompt\",\n    fieldType: \"textarea\",\n    placeholder: \"Enter your prompt/question\",\n    requiredField: true,\n  },\n];\n\n// Form Node expects a single item carrying the JSON\nreturn [{\n  json: {\n    formJson,\n    // Pass templates through for resolution after form submit\n    templates: items.map(i => i.json),\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ba0e8b3a-22ee-4054-873a-2884aacb3fc9",
+        "name": "Form",
+        "type": "n8n-nodes-base.form",
+        "position": [
+          1680,
+          288
+        ],
+        "webhookId": "fbd3f6bb-1555-457f-b6ad-177e2c165750",
+        "parameters": {
+          "options": {
+            "customCss": ":root {\n  --font-family: 'Inter', system-ui, -apple-system, sans-serif;\n  --font-weight-normal: 400;\n  --font-weight-bold: 600;\n  --font-size-body: 12px;\n  --font-size-label: 14px;\n  --font-size-input: 14px;\n  --font-size-header: 20px;\n  \n  /* Dark Theme Colors */\n  --color-background: #0f0f0f;\n  --color-card-bg: #1a1a1a;\n  --color-card-border: #2a2a2a;\n  --color-card-shadow: rgba(0, 0, 0, 0.4);\n  \n  --color-header: #e5e5e5;\n  --color-label: #888888;\n  --color-input-border: #2a2a2a;\n  --color-input-text: #e5e5e5;\n  --color-input-bg: #141414;\n  --color-focus-border: #2563eb;\n  \n  --color-submit-btn-bg: #2563eb;\n  --color-submit-btn-text: #ffffff;\n  --color-error: #ef4444;\n  --color-required: #ef4444;\n  \n  --color-html-text: #888888;\n  --color-html-link: #60a5fa;\n  --color-link: #888888;\n  \n  --border-radius-card: 12px;\n  --border-radius-input: 6px;\n  --box-shadow-card: 0px 4px 16px 0px var(--color-card-shadow);\n  --opacity-placeholder: 0.4;\n}\n\n/* Textarea & Select hover/focus */\ntextarea, select, input {\n  background: var(--color-input-bg) !important;\n  transition: border-color 0.15s ease, box-shadow 0.15s ease;\n}\n\ntextarea:hover, select:hover, input:hover {\n  border-color: #3a3a3a !important;\n}\n\ntextarea:focus, select:focus, input:focus {\n  border-color: var(--color-focus-border) !important;\n  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3) !important;\n  outline: none;\n}\n\n/* Select dropdown arrow */\nselect {\n  appearance: none;\n  background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888888' d='M6 8L1 3h10z'/%3E%3C/svg%3E\") !important;\n  background-repeat: no-repeat !important;\n  background-position: right 12px center !important;\n  padding-right: 36px !important;\n  cursor: pointer;\n}\n\n/* Submit Button hover */\nbutton[type=\"submit\"], .submit-btn {\n  transition: background-color 0.15s ease, transform 0.1s ease;\n}\n\nbutton[type=\"submit\"]:hover, .submit-btn:hover {\n  background: #3b82f6 !important;\n}\n\nbutton[type=\"submit\"]:active, .submit-btn:active {\n  transform: scale(0.98);\n}"
+          },
+          "defineForm": "json",
+          "jsonOutput": "={{ $json.formJson }}"
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "0158a19d-a67a-4723-84f0-90cf345e47e5",
+        "name": "Form1",
+        "type": "n8n-nodes-base.form",
+        "position": [
+          2128,
+          288
+        ],
+        "webhookId": "157de726-50c1-4b8c-911b-145006765028",
+        "parameters": {
+          "operation": "completion",
+          "respondWith": "showText",
+          "responseText": "=<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>AI Response Display</title>\n  <style>\n    * { margin: 0; padding: 0; box-sizing: border-box; }\n    body {\n      font-family: system-ui, -apple-system, sans-serif;\n      background: #0f0f0f;\n      color: #e5e5e5;\n      min-height: 100vh;\n      padding: 2rem;\n    }\n    .container { max-width: 600px; margin: 0 auto; }\n    .card {\n      background: #1a1a1a;\n      border: 1px solid #2a2a2a;\n      border-radius: 12px;\n      padding: 1.5rem;\n    }\n    .output {\n      font-size: 1rem;\n      line-height: 1.7;\n      padding-bottom: 1rem;\n      border-bottom: 1px solid #2a2a2a;\n      margin-bottom: 1rem;\n    }\n    \n    /* Markdown Styles */\n    .output h1 { font-size: 1.5rem; margin: 1.5rem 0 1rem; color: #fff; }\n    .output h2 { font-size: 1.25rem; margin: 1.25rem 0 0.75rem; color: #fff; }\n    .output h3 { font-size: 1.1rem; margin: 1rem 0 0.5rem; color: #fff; }\n    .output h4 { font-size: 1rem; margin: 1rem 0 0.5rem; color: #ddd; }\n    .output h1:first-child, .output h2:first-child, .output h3:first-child { margin-top: 0; }\n    \n    .output p { margin: 0.75rem 0; }\n    .output strong { color: #fff; font-weight: 600; }\n    \n    .output code {\n      background: #2a2a2a;\n      padding: 0.15rem 0.4rem;\n      border-radius: 4px;\n      font-family: 'SF Mono', Consolas, monospace;\n      font-size: 0.9em;\n      color: #f472b6;\n    }\n    \n    .output pre {\n      background: #141414;\n      border: 1px solid #2a2a2a;\n      border-radius: 8px;\n      padding: 1rem;\n      margin: 1rem 0;\n      overflow-x: auto;\n    }\n    .output pre code {\n      background: none;\n      padding: 0;\n      color: #e5e5e5;\n      font-size: 0.85rem;\n    }\n    \n    .output ul, .output ol {\n      margin: 0.75rem 0;\n      padding-left: 1.5rem;\n    }\n    .output li { margin: 0.35rem 0; }\n    \n    .output hr {\n      border: none;\n      border-top: 1px solid #2a2a2a;\n      margin: 1.5rem 0;\n    }\n    \n    .output a {\n      color: #60a5fa;\n      text-decoration: none;\n    }\n    .output a:hover { text-decoration: underline; }\n\n    /* Meta & Details */\n    .meta {\n      display: flex;\n      justify-content: space-between;\n      align-items: center;\n      font-size: 0.875rem;\n      margin-bottom: 1rem;\n    }\n    .model {\n      background: #2563eb;\n      color: white;\n      padding: 0.25rem 0.75rem;\n      border-radius: 6px;\n      font-weight: 500;\n    }\n    .cost {\n      color: #22c55e;\n      font-family: monospace;\n      font-size: 0.9rem;\n    }\n    \n    details {\n      border-top: 1px solid #2a2a2a;\n      padding-top: 1rem;\n    }\n    summary {\n      cursor: pointer;\n      color: #888;\n      font-size: 0.8rem;\n      user-select: none;\n      display: flex;\n      align-items: center;\n      gap: 0.5rem;\n    }\n    summary:hover { color: #aaa; }\n    summary::marker { content: ''; }\n    summary .icon {\n      transition: transform 0.2s;\n      font-size: 0.7rem;\n    }\n    details[open] summary .icon {\n      transform: rotate(90deg);\n    }\n    \n    .details-grid {\n      display: grid;\n      grid-template-columns: 1fr 1fr;\n      gap: 1rem;\n      margin-top: 1rem;\n      padding: 1rem;\n      background: #141414;\n      border-radius: 8px;\n    }\n    .detail-section h4 {\n      color: #666;\n      font-size: 0.7rem;\n      text-transform: uppercase;\n      letter-spacing: 0.05em;\n      margin-bottom: 0.5rem;\n    }\n    .detail-row {\n      display: flex;\n      justify-content: space-between;\n      font-size: 0.8rem;\n      padding: 0.25rem 0;\n    }\n    .detail-row .label { color: #888; }\n    .detail-row .value { \n      font-family: monospace;\n      color: #e5e5e5;\n    }\n    .detail-row .value.green { color: #22c55e; }\n    .detail-row .value.blue { color: #60a5fa; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"card\">\n      <div class=\"output\">{{ $json.output }}</div>\n      \n      <div class=\"meta\">\n        <span class=\"model\">{{ $json.model.id }}</span>\n        <span class=\"cost\">{{ $json.costs.total_cost_formatted }}</span>\n      </div>\n      \n      <details>\n        <summary><span class=\"icon\">▶</span>Show details</summary>\n        <div class=\"details-grid\">\n          <div class=\"detail-section\">\n            <h4>Token Usage</h4>\n            <div class=\"detail-row\">\n              <span class=\"label\">Input</span>\n              <span class=\"value\">{{ $json.tokenUsage.input_tokens }}</span>\n            </div>\n            <div class=\"detail-row\">\n              <span class=\"label\">Output</span>\n              <span class=\"value\">{{ $json.tokenUsage.output_tokens }}</span>\n            </div>\n            <div class=\"detail-row\">\n              <span class=\"label\">Total</span>\n              <span class=\"value blue\">{{ $json.tokenUsage.total_tokens }}</span>\n            </div>\n          </div>\n          \n          <div class=\"detail-section\">\n            <h4>Costs</h4>\n            <div class=\"detail-row\">\n              <span class=\"label\">Input</span>\n              <span class=\"value\">${{ $json.costs.input_cost_usd }}</span>\n            </div>\n            <div class=\"detail-row\">\n              <span class=\"label\">Output</span>\n              <span class=\"value\">${{ $json.costs.output_cost_usd }}</span>\n            </div>\n            <div class=\"detail-row\">\n              <span class=\"label\">Total</span>\n              <span class=\"value green\">${{ $json.costs.total_cost_usd }}</span>\n            </div>\n          </div>\n          \n          <div class=\"detail-section\" style=\"grid-column: span 2;\">\n            <h4>Model Pricing</h4>\n            <div class=\"detail-row\">\n              <span class=\"label\">Prompt (per token)</span>\n              <span class=\"value\">${{ $json.model.prompt_price_per_token }}</span>\n            </div>\n            <div class=\"detail-row\">\n              <span class=\"label\">Completion (per token)</span>\n              <span class=\"value\">${{ $json.model.completion_price_per_token }}</span>\n            </div>\n            <div class=\"detail-row\">\n              <span class=\"label\">Model Name</span>\n              <span class=\"value\">{{ $json.model.name }}</span>\n            </div>\n          </div>\n        </div>\n      </details>\n    </div>\n  </div>\n</body>\n</html>"
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "8e0635fb-e651-4848-8491-07b8c0c58ed8",
+        "name": "Split Out",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          1232,
+          288
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3de0f267-dc22-4807-a9ef-32812e8f5ecd",
+        "name": "Split Out1",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          1232,
+          576
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "data"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ea0a8895-e1e3-4897-8198-2348e4deb84a",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          720,
+          0
+        ],
+        "parameters": {
+          "width": 688,
+          "height": 224,
+          "content": "## Chat (simple testing via chat)\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1615dd6e-0c15-46cc-872c-9d9cea8cbb9b",
+        "name": "Respond to Chat",
+        "type": "@n8n/n8n-nodes-langchain.chat",
+        "position": [
+          1232,
+          64
+        ],
+        "parameters": {
+          "message": "={{ $json.output }}\n\n---\n\n**{{ $json.model.id }}** · `{{ $json.costs.total_cost_formatted }}`\n\n**Tokens** · Input: {{ $json.tokenUsage.input_tokens }} · Output: {{ $json.tokenUsage.output_tokens }} · Total: **{{ $json.tokenUsage.total_tokens }}**\n\n**Costs** · Input: ${{ $json.costs.input_cost_usd.toFixed(7) }} · Output: ${{ $json.costs.output_cost_usd.toFixed(7) }} · Total: **{{ $json.costs.total_cost_formatted }}**\n\n*{{ $json.model.name }} · Prompt ${{ $json.model.prompt_price_per_token.toFixed(7) }}/tk · Completion ${{ $json.model.completion_price_per_token.toFixed(7) }}/tk*",
+          "options": {},
+          "waitUserReply": false
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b4cd2c9f-18fd-4ae0-9569-cf68e351fd80",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          720,
+          240
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1648,
+          "height": 240,
+          "content": "## UI\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "de85ae21-918d-48d4-8e29-62fc275bbc83",
+        "name": "On form submission",
+        "type": "n8n-nodes-base.formTrigger",
+        "position": [
+          784,
+          288
+        ],
+        "webhookId": "d76f1c96-2355-4baa-b718-329795e04fc9",
+        "parameters": {
+          "options": {
+            "customCss": ":root {\n  --font-family: 'Inter', system-ui, -apple-system, sans-serif;\n  --font-weight-normal: 400;\n  --font-weight-bold: 600;\n  --font-size-body: 12px;\n  --font-size-label: 14px;\n  --font-size-input: 14px;\n  --font-size-header: 20px;\n  \n  /* Dark Theme Colors */\n  --color-background: #0f0f0f;\n  --color-card-bg: #1a1a1a;\n  --color-card-border: #2a2a2a;\n  --color-card-shadow: rgba(0, 0, 0, 0.4);\n  \n  --color-header: #e5e5e5;\n  --color-label: #888888;\n  --color-input-border: #2a2a2a;\n  --color-input-text: #e5e5e5;\n  --color-input-bg: #141414;\n  --color-focus-border: #2563eb;\n  \n  --color-submit-btn-bg: #2563eb;\n  --color-submit-btn-text: #ffffff;\n  --color-error: #ef4444;\n  --color-required: #ef4444;\n  \n  --color-html-text: #888888;\n  --color-html-link: #60a5fa;\n  --color-link: #888888;\n  \n  --border-radius-card: 12px;\n  --border-radius-input: 6px;\n  --box-shadow-card: 0px 4px 16px 0px var(--color-card-shadow);\n  --opacity-placeholder: 0.4;\n}\n\n/* Textarea & Select hover/focus */\ntextarea, select, input {\n  background: var(--color-input-bg) !important;\n  transition: border-color 0.15s ease, box-shadow 0.15s ease;\n}\n\ntextarea:hover, select:hover, input:hover {\n  border-color: #3a3a3a !important;\n}\n\ntextarea:focus, select:focus, input:focus {\n  border-color: var(--color-focus-border) !important;\n  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3) !important;\n  outline: none;\n}\n\n/* Select dropdown arrow */\nselect {\n  appearance: none;\n  background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888888' d='M6 8L1 3h10z'/%3E%3C/svg%3E\") !important;\n  background-repeat: no-repeat !important;\n  background-position: right 12px center !important;\n  padding-right: 36px !important;\n  cursor: pointer;\n}\n\n/* Submit Button hover */\nbutton[type=\"submit\"], .submit-btn {\n  transition: background-color 0.15s ease, transform 0.1s ease;\n}\n\nbutton[type=\"submit\"]:hover, .submit-btn:hover {\n  background: #3b82f6 !important;\n}\n\nbutton[type=\"submit\"]:active, .submit-btn:active {\n  transform: scale(0.98);\n}",
+            "buttonLabel": "Start"
+          },
+          "formTitle": "LLM Token Cost Tracker",
+          "formDescription": "🔍 Find out exactly what your AI requests cost.\n\n  This tool lets you:\n  • Choose from 350+ LLM models (GPT-4, Claude, Llama, etc.)\n  • Enter any prompt and run it\n  • See the exact token usage and cost breakdown\n\n  Perfect for comparing model prices or tracking your AI spending"
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "c70b764d-65eb-41bd-81a7-61c20a983239",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          720,
+          496
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 1536,
+          "height": 336,
+          "content": "## Backend\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a305499a-09d9-4636-bd66-9f0fdd9e230a",
+        "name": "OpenRouter",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+        "position": [
+          1680,
+          720
+        ],
+        "parameters": {
+          "model": "={{ $('When Executed by Another Workflow').item.json.model }}",
+          "options": {}
+        },
+        "credentials": {
+          "openRouterApi": {
+            "id": "credential-id",
+            "name": "openRouterApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5119d08c-5d14-43e1-b89c-010cb11abc30",
+        "name": "Backend",
+        "type": "n8n-nodes-base.executeWorkflow",
+        "position": [
+          1904,
+          288
+        ],
+        "parameters": {
+          "options": {},
+          "workflowId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $workflow.id }}",
+            "cachedResultUrl": "/workflow/=%7B%7B%20$workflow.id%20%7D%7D"
+          },
+          "workflowInputs": {
+            "value": {
+              "model": "={{ $json[\"Select Model\"] }}",
+              "chatInput": "={{ $json.Prompt }}"
+            },
+            "schema": [
+              {
+                "id": "chatInput",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "chatInput",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "model",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "model",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "17649aeb-5fe6-4ef6-89b6-797b6a98d5a7",
+        "name": "Backend1",
+        "type": "n8n-nodes-base.executeWorkflow",
+        "position": [
+          1008,
+          64
+        ],
+        "parameters": {
+          "options": {},
+          "workflowId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $workflow.id }}",
+            "cachedResultUrl": "/workflow/=%7B%7B%20$workflow.id%20%7D%7D"
+          },
+          "workflowInputs": {
+            "value": {
+              "model": "openai/gpt-4.1-mini",
+              "chatInput": "={{ $json.chatInput }}"
+            },
+            "schema": [
+              {
+                "id": "chatInput",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "chatInput",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "model",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "model",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "1a982773-b900-45cf-9bb9-6a6cccef8c2c",
+        "name": "Get Openrouter models",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1008,
+          288
+        ],
+        "parameters": {
+          "url": "https://openrouter.ai/api/v1/models",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBearerAuth"
+        },
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "credential-id",
+            "name": "httpBearerAuth Credential"
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "3816f346-0b0b-40cf-9c15-63a1851b34b7",
+        "name": "Get Openrouter models1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1008,
+          576
+        ],
+        "parameters": {
+          "url": "https://openrouter.ai/api/v1/models",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBearerAuth"
+        },
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "credential-id",
+            "name": "httpBearerAuth Credential"
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "ddde7547-c651-43a5-b58f-d67bde3e8839",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 704,
+          "height": 1600,
+          "content": "# LLM Token Cost Tracker\n  🔍 **Find out exactly what your AI requests cost.**\n  ---\n  ## ✨ Features\n  - **350+ Models** - Access GPT-4, Claude, Llama, Mistral, and many more\n  - **Real-time Pricing** - Costs calculated using live OpenRouter pricing data\n  - **Detailed Breakdown** - See input tokens, output tokens, and cost per category\n  - **Two Interfaces** - Use via Chat or interactive Form\n  ---\n  ## 🛠️ Setup\n  ### 1. Get your OpenRouter API Key\n  1. Visit [OpenRouter API Keys](https://openrouter.ai/settings/keys)\n  2. Click **\"Create Key\"**\n  3. Copy your new API key\n\n  ### 2. Configure the HTTP Node\n  1. Open the **HTTP Request** node (fetches model list)\n  2. In the **Authentication** dropdown, select **\"Bearer YOUR_TOKEN_HERE\"**\n  3. Click **\"Create New Credential\"**\n  4. Paste your API key and save\n\n  ### 3. Configure the OpenRouter Chat Model\n  1. Open the **OpenRouter Chat Model** node (attached to the LangChain Code node)\n  2. Click **\"Create New Credential\"**\n  3. Paste the same API key and save\n\n  ✅ **Done!** Your workflow is ready to use.\n  ---\n\n  ## 🚀 Usage\n  ### Option 1: Chat Interface\n  The quickest way to test:\n\n  1. Open the **Chat** panel in n8n\n  2. Type any prompt\n  3. Get your response + cost breakdown directly in the chat\n\n  ### Option 2: Form Interface\n  For model selection and detailed results:\n\n  1. Click **\"Form Submission\"** → **\"Start\"**\n  2. Wait a moment while all available models are fetched from OpenRouter\n  3. **Select a model** from the dropdown (e.g., `openai/gpt-4.1-mini`)\n  4. **Enter your prompt** in the textarea\n  5. Click **\"Submit\"**\n  6. View the **result form** with:\n     - The AI response\n     - Total cost\n     - Click **\"Show Details\"** for full breakdown:\n       - Input tokens\n       - Output tokens\n       - Cost per token type\n       - Model pricing info\n\n  ---\n  ## 💡 Use Cases\n  - **Compare model costs** - Same prompt, different models, see price differences\n  - **Budget planning** - Estimate costs before scaling up\n  - **Optimize prompts** - See how prompt length affects cost\n  - **Client billing** - Track exact costs per request\n  ---\n  ## 🔗 Links\n  - [OpenRouter](https://openrouter.ai/) - Multi-model API gateway\n  - [OpenRouter Pricing](https://openrouter.ai/models) - Current model prices\n  - [Get API Key](https://openrouter.ai/settings/keys) - Create your key here\n\n  ---\n  Made with ❤️ by philflow for the n8n community\n  ---"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Form": {
+        "main": [
+          [
+            {
+              "node": "Backend",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter": {
+        "main": [
+          [
+            {
+              "node": "LangChain Code",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backend": {
+        "main": [
+          [
+            {
+              "node": "Form1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backend1": {
+        "main": [
+          [
+            {
+              "node": "Respond to Chat",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Out": {
+        "main": [
+          [
+            {
+              "node": "Code in JavaScript1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenRouter": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "LangChain Code",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split Out1": {
+        "main": [
+          [
+            {
+              "node": "Filter",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "LangChain Code": {
+        "main": [
+          [
+            {
+              "node": "Code in JavaScript",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "On form submission": {
+        "main": [
+          [
+            {
+              "node": "Get Openrouter models",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code in JavaScript1": {
+        "main": [
+          [
+            {
+              "node": "Form",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Openrouter models": {
+        "main": [
+          [
+            {
+              "node": "Split Out",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Openrouter models1": {
+        "main": [
+          [
+            {
+              "node": "Split Out1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When chat message received": {
+        "main": [
+          [
+            {
+              "node": "Backend1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When Executed by Another Workflow": {
+        "main": [
+          [
+            {
+              "node": "Get Openrouter models1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 21,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.form": {
+        "count": 2
+      },
+      "n8n-nodes-base.filter": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitOut": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.formTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.chat": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.code": {
+        "count": 1
+      },
+      "n8n-nodes-base.executeWorkflow": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.chatTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.executeWorkflowTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenRouter": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Philflow",
+    "username": "philflow",
+    "bio": "",
+    "verified": false,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/ea057f84e2c3dc30b0dc47fdde0e272eb0dd1e1bcad47089ec5a539114d4ba11?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 111,
+      "icon": "fa:sign-in-alt",
+      "name": "n8n-nodes-base.executeWorkflow",
+      "codex": {
+        "data": {
+          "alias": [
+            "n8n",
+            "call",
+            "sub",
+            "workflow",
+            "sub-workflow",
+            "subworkflow"
+          ],
+          "details": "The Execute Workflow node can be used when you want your workflow to treat another workflow as a step in your flow. It allows you to modularize your workflows and have a single source of truth for series of actions you perform often. ",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflow/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Execute Workflow",
+        "color": "#ff6d5a"
+      },
+      "iconData": {
+        "icon": "sign-in-alt",
+        "type": "icon"
+      },
+      "displayName": "Execute Sub-workflow",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 837,
+      "icon": "fa:sign-out-alt",
+      "name": "n8n-nodes-base.executeWorkflowTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.executeworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When Executed by Another Workflow",
+        "color": "#ff6d5a"
+      },
+      "iconData": {
+        "icon": "sign-out-alt",
+        "type": "icon"
+      },
+      "displayName": "Execute Workflow Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 844,
+      "icon": "fa:filter",
+      "name": "n8n-nodes-base.filter",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The Filter node can be used to filter items based on a condition. If the condition is met, the item will be passed on to the next node. If the condition is not met, the item will be omitted. Conditions can be combined together by AND(meet all conditions), or OR(meet at least one condition).",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.filter/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Filter",
+        "color": "#229eff"
+      },
+      "iconData": {
+        "icon": "filter",
+        "type": "icon"
+      },
+      "displayName": "Filter",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1127,
+      "icon": "fa:code",
+      "name": "@n8n/n8n-nodes-langchain.code",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.code/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Miscellaneous"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "LangChain Code"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "LangChain Code",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1225,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.formTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "table",
+            "submit",
+            "post"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.formtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "On form submission"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form Trigger",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1239,
+      "icon": "file:splitOut.svg",
+      "name": "n8n-nodes-base.splitOut",
+      "codex": {
+        "data": {
+          "alias": [
+            "Split",
+            "Nested",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitout/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Split Out"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjOUI2REQ1IiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTQ4MCAxNDhjMC02LjYyNy01LjM3My0xMi0xMi0xMkgzMjJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxNDZjNi42MjcgMCAxMi01LjM3MyAxMi0xMnptMCA5NmMwLTYuNjI3LTUuMzczLTEyLTEyLTEySDMyMmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDE0NmM2LjYyNyAwIDEyLTUuMzczIDEyLTEyem0wIDk2YzAtNi42MjctNS4zNzMtMTItMTItMTJIMzIyYy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTQ2YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48cGF0aCBkPSJNNDM4IDc2YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtMTcuNjczIDAtMzIgMTQuMzI3LTMyIDMydjU2YzAgMjYuOTc4LTEwLjI3MiA1MS41NTctMjcuMTE5IDcwLjAzOS01LjA1NSA1LjU0NS01LjA1NSAxNC4zNzcgMCAxOS45MjIgMTYuODQ3IDE4LjQ4MiAyNy4xMTkgNDMuMDYxIDI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMySDQyNmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtNDQuMTgzIDAtODAtMzUuODE3LTgwLTgwdi01NmMwLTMwLjkyOC0yNS4wNzItNTYtNTYtNTZhNS43ODMgNS43ODMgMCAwIDEtNS43ODMtNS43ODN2LTM2LjQzNGE1Ljc4MyA1Ljc4MyAwIDAgMSA1Ljc4My01Ljc4M2MzMC45MjggMCA1Ni0yNS4wNzIgNTYtNTZ2LTU2YzAtNDQuMTgzIDM1LjgxNy04MCA4MC04MEg0MjZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMzYgMjQ0YzAtNi42MjctNS4zNzMtMTItMTItMTJIMTJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxMTJjNi42MjcgMCAxMi01LjM3MyAxMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik01MTIgMEgwdjUxMmg1MTJ6Ii8+PC9jbGlwUGF0aD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Split Out",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1247,
+      "icon": "fa:comments",
+      "name": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-langchain.chattrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Langchain"
+          ]
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When chat message received"
+      },
+      "iconData": {
+        "icon": "comments",
+        "type": "icon"
+      },
+      "displayName": "Chat Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1274,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.form",
+      "codex": {
+        "data": {
+          "alias": [
+            "_Form",
+            "form",
+            "table",
+            "submit",
+            "post",
+            "page",
+            "step",
+            "stage",
+            "multi"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.form/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Form"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1281,
+      "icon": "file:openrouter.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenrouter/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenRouter Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyBmaWxsPSIjOTRBM0I4IiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCIgdmlld0JveD0iMCAwIDI0IDI0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjx0aXRsZT5PcGVuUm91dGVyPC90aXRsZT48cGF0aCBkPSJNMTYuODA0IDEuOTU3bDcuMjIgNC4xMDV2LjA4N0wxNi43MyAxMC4yMWwuMDE3LTIuMTE3LS44MjEtLjAzYy0xLjA1OS0uMDI4LTEuNjExLjAwMi0yLjI2OC4xMS0xLjA2NC4xNzUtMi4wMzguNTc3LTMuMTQ3IDEuMzUyTDguMzQ1IDExLjAzYy0uMjg0LjE5NS0uNDk1LjMzNi0uNjguNDU1bC0uNTE1LjMyMi0uMzk3LjIzNC4zODUuMjMuNTMuMzM4Yy40NzYuMzE0IDEuMTcuNzk2IDIuNzAxIDEuODY2IDEuMTEuNzc1IDIuMDgzIDEuMTc3IDMuMTQ3IDEuMzUybC4zLjA0NWMuNjk0LjA5MSAxLjM3NS4wOTQgMi44MjUuMDMzbC4wMjItMi4xNTkgNy4yMiA0LjEwNXYuMDg3TDE2LjU4OSAyMmwuMDE0LTEuODYyLS42MzUuMDIyYy0xLjM4Ni4wNDItMi4xMzcuMDAyLTMuMTM4LS4xNjItMS42OTQtLjI4LTMuMjYtLjkyNi00Ljg4MS0yLjA1OWwtMi4xNTgtMS41YTIxLjk5NyAyMS45OTcgMCAwMC0uNzU1LS40OThsLS40NjctLjI4YTU1LjkyNyA1NS45MjcgMCAwMC0uNzYtLjQzQzIuOTA4IDE0LjczLjU2MyAxNC4xMTYgMCAxNC4xMTZWOS44ODhsLjE0LjAwNGMuNTY0LS4wMDcgMi45MS0uNjIyIDMuODA5LTEuMTI0bDEuMDE2LS41OC40MzgtLjI3NGMuNDI4LS4yOCAxLjA3Mi0uNzI2IDIuNjg2LTEuODUzIDEuNjIxLTEuMTMzIDMuMTg2LTEuNzggNC44ODEtMi4wNTkgMS4xNTItLjE5IDEuOTc0LS4yMTMgMy44MTQtLjEzOGwuMDItMS45MDd6Ij48L3BhdGg+PC9zdmc+Cg=="
+      },
+      "displayName": "OpenRouter Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1313,
+      "icon": "fa:comments",
+      "name": "@n8n/n8n-nodes-langchain.chat",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "wait",
+            "hitl",
+            "respond",
+            "approve",
+            "confirm",
+            "send",
+            "message"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-langchain.respondtochat/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "HITL",
+            "Langchain"
+          ],
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Chat"
+      },
+      "iconData": {
+        "icon": "comments",
+        "type": "icon"
+      },
+      "displayName": "Chat",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 5,
+      "name": "Engineering"
+    },
+    {
+      "id": 47,
+      "name": "AI Chatbot"
+    }
+  ],
+  "image": []
+}

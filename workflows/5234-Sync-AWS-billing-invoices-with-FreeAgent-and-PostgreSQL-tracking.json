@@ -1,0 +1,1182 @@
+{
+  "id": 12524,
+  "name": "Sync AWS billing invoices with FreeAgent and PostgreSQL tracking",
+  "views": 14,
+  "recentViews": 0,
+  "totalViews": 14,
+  "createdAt": "2026-01-06T16:56:16.893Z",
+  "description": "Automatically retrieve AWS invoices and create corresponding bills in FreeAgent, marking them as paid. This workflow eliminates manual data entry for AWS billing.\n\n## What It Does\n\n1. Fetches invoices from AWS Invoicing API for the previous month\n2. Filters invoices by issue date to ensure only new ones are processed\n3. Checks PostgreSQL database for previously processed invoices\n4. Creates a bill in FreeAgent with correct dates and amounts\n5. Marks the bill as paid with a bank transaction explanation\n6. Records the invoice in the database to prevent future duplication\n\n## Prerequisites\n\n- AWS account with Invoicing API access\n- FreeAgent account with OAuth API access\n- PostgreSQL database (you could modify to use n8n Data Table?)\n- AWS IAM user with `invoicing:ListInvoiceSummaries` permission\n\n## Quick Setup Checklist\n\n- [ ] Create PostgreSQL table (see below)\n- [ ] Add PostgreSQL credentials in n8n\n- [ ] Set up FreeAgent OAuth2 credentials\n- [ ] Update AWS access key and secret key in \"Generate AWS Signature\" node\n- [ ] Update AWS account ID in \"Calculate Last Month\" node\n- [ ] Get and update FreeAgent contact ID for AWS\n- [ ] Get and update FreeAgent category ID (cloud services/hosting)\n- [ ] Get and update FreeAgent bank account ID\n- \n## Configuration Required\n\nThis template has placeholders that you need to replace:\n\n### In Code Nodes\n- `YOUR_AWS_ACCESS_KEY_ID` - Your AWS access key\n- `YOUR_AWS_SECRET_ACCESS_KEY` - Your AWS secret key  \n- `YOUR_AWS_ACCOUNT_ID` - Your 12-digit AWS account number\n- `YOUR_CONTACT_ID` - FreeAgent contact ID for AWS\n- `YOUR_CATEGORY_ID` - FreeAgent category for cloud services\n- `YOUR_BANK_ACCOUNT_ID` - FreeAgent bank account for payments\n\n### Credentials to Add\n- PostgreSQL database credentials (3 nodes)\n- FreeAgent OAuth2 credentials (2 nodes)\n\n## Use Cases\n\n- **Freelancers & Consultants**: Automatically track AWS infrastructure costs\n- **Small Businesses**: Streamline bookkeeping for cloud expenses\n- **Agencies**: Manage multiple AWS accounts with separate workflows\n- **Accountants**: Reduce manual data entry for client AWS bills\n\n## Database Schema\n\nThe workflow uses a PostgreSQL table to track processed invoices - To initially create the table you need to run :\n\n```sql\nCREATE TABLE aws_invoices_processed (\n    id SERIAL PRIMARY KEY,\n    aws_invoice_id VARCHAR(255) UNIQUE NOT NULL,\n    freeagent_invoice_url TEXT NOT NULL,\n    billing_period VARCHAR(7) NOT NULL,\n    amount DECIMAL(10, 2) NOT NULL,\n    currency VARCHAR(3) NOT NULL,\n    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n);\n```\n\n## Customization\n\n- **VAT Rate**: Default is 20% (UK), adjust in \"Prepare FreeAgent Bill\" node\n- **Schedule**: Modify cron expression in \"Schedule Trigger\" node\n- **Description Format**: Customize invoice description in code nodes\n- **Multi-Account**: Duplicate workflow for each AWS account\n\n## Notes\n\n- AWS dates are reversed: DueDate is earlier than IssuedDate, so the workflow swaps these\n- All amounts are processed in the currency specified by AWS\n- The \"DELETE Test Record\" node is disabled by default - use for testing only",
+  "workflow": {
+    "name": "Sync AWS Billing with Free Agent Invoice",
+    "tags": [
+      {
+        "name": "Pernille-AI.com"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "generate-signature",
+        "name": "Generate AWS Signature",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          352,
+          -464
+        ],
+        "parameters": {
+          "jsCode": "const crypto = require('crypto');\n\n// AWS Credentials\nconst accessKeyId = '[YOUR_AWS_ACCESS_KEY]';\nconst secretAccessKey = '[YOUR_AWS_SECRET_KEY]';\n\nconst region = 'us-east-1';\nconst service = 'invoicing';\n\n// Get input data\nconst input = $input.all()[0].json;\nconst accountId = input.account_id;\nconst billingMonth = input.billing_month;\nconst billingYear = input.billing_year;\n\n// Request details\nconst host = 'invoicing.us-east-1.api.aws';\nconst method = 'POST';\nconst canonicalUri = '/';\nconst canonicalQuerystring = '';\nconst amzTarget = 'Invoicing.ListInvoiceSummaries';\nconst contentType = 'application/x-amz-json-1.0';\n\n// Request body\nconst requestBody = JSON.stringify({\n  Selector: {\n    ResourceType: 'ACCOUNT_ID',\n    Value: accountId\n  },\n  Filter: {\n    BillingPeriod: {\n      Month: billingMonth,\n      Year: billingYear\n    }\n  },\n  MaxResults: 10\n});\n\n// Create date strings\nconst now = new Date();\nconst amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '').slice(0, 15) + 'Z';\nconst dateStamp = amzDate.slice(0, 8);\n\n// Create canonical headers (must be sorted alphabetically)\nconst canonicalHeaders = \n  'content-type:' + contentType + '\\n' +\n  'host:' + host + '\\n' +\n  'x-amz-date:' + amzDate + '\\n' +\n  'x-amz-target:' + amzTarget + '\\n';\n\nconst signedHeaders = 'content-type;host;x-amz-date;x-amz-target';\n\n// Hash the payload\nconst payloadHash = crypto.createHash('sha256').update(requestBody).digest('hex');\n\n// Create canonical request\nconst canonicalRequest = \n  method + '\\n' +\n  canonicalUri + '\\n' +\n  canonicalQuerystring + '\\n' +\n  canonicalHeaders + '\\n' +\n  signedHeaders + '\\n' +\n  payloadHash;\n\n// Create string to sign\nconst algorithm = 'AWS4-HMAC-SHA256';\nconst credentialScope = dateStamp + '/' + region + '/' + service + '/aws4_request';\nconst stringToSign = \n  algorithm + '\\n' +\n  amzDate + '\\n' +\n  credentialScope + '\\n' +\n  crypto.createHash('sha256').update(canonicalRequest).digest('hex');\n\n// Create signing key\nfunction getSignatureKey(key, dateStamp, regionName, serviceName) {\n  const kDate = crypto.createHmac('sha256', 'AWS4' + key).update(dateStamp).digest();\n  const kRegion = crypto.createHmac('sha256', kDate).update(regionName).digest();\n  const kService = crypto.createHmac('sha256', kRegion).update(serviceName).digest();\n  const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();\n  return kSigning;\n}\n\nconst signingKey = getSignatureKey(secretAccessKey, dateStamp, region, service);\nconst signature = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');\n\n// Create authorization header\nconst authorizationHeader = \n  algorithm + ' ' +\n  'Credential=' + accessKeyId + '/' + credentialScope + ', ' +\n  'SignedHeaders=' + signedHeaders + ', ' +\n  'Signature=' + signature;\n\nreturn [{\n  json: {\n    url: 'https://' + host + '/',\n    method: 'POST',\n    headers: {\n      'Content-Type': contentType,\n      'X-Amz-Date': amzDate,\n      'X-Amz-Target': amzTarget,\n      'Authorization': authorizationHeader\n    },\n    body: requestBody\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "parse-aws-response",
+        "name": "Parse AWS Response",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          752,
+          -464
+        ],
+        "parameters": {
+          "jsCode": "const response = $input.first().json;\nconst data = JSON.parse(response.data);\nconst invoices = data.InvoiceSummaries || [];\n\nreturn invoices.map(invoice => ({\n  json: invoice\n}));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "filter-by-date-code",
+        "name": "Filter By Date",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          944,
+          -464
+        ],
+        "parameters": {
+          "jsCode": "// Get cutoff date from Set Test Data node\nconst cutoffDate = new Date($node['Calculate Last Month Date Range'].json.cutoff_date + 'T00:00:00.000Z');\n\n// Get all invoice items\nconst items = $input.all();\n\n// Filter invoices by issued date\nconst filtered = items.filter(item => {\n  const issuedDate = new Date(item.json.IssuedDate * 1000);\n  return issuedDate >= cutoffDate;\n});\n\n// Return filtered items or empty message\nif (filtered.length === 0) {\n  return [{ json: { message: 'No invoices after cutoff date' } }];\n}\n\nreturn filtered;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "loop-invoices",
+        "name": "Loop Over Invoices",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -192,
+          -112
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "check-exists-pg",
+        "name": "Check If Already Processed",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          144,
+          -48
+        ],
+        "parameters": {
+          "query": "=SELECT COUNT(*) as count FROM aws_invoices_processed WHERE aws_invoice_id = '{{ $json.InvoiceId }}';",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "",
+            "name": "Postgres account"
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "record-pg",
+        "name": "Record In PostgreSQL",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          1616,
+          -64
+        ],
+        "parameters": {
+          "query": "=INSERT INTO aws_invoices_processed (aws_invoice_id, freeagent_invoice_url, billing_period, amount, currency)\nVALUES (\n  '{{ $('Loop Over Invoices').item.json.InvoiceId }}',\n  '{{ $json.bill.url }}',\n  '{{ $('Loop Over Invoices').item.json.BillingPeriod.Year }}-{{ String($('Loop Over Invoices').item.json.BillingPeriod.Month).padStart(2, \"0\") }}',\n  {{ $('Loop Over Invoices').item.json.PaymentCurrencyAmount.TotalAmount }},\n  '{{ $('Loop Over Invoices').item.json.PaymentCurrencyAmount.CurrencyCode }}'\n);",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "",
+            "name": "Postgres account"
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "create-fa-bill",
+        "name": "Create FreeAgent Bill",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          976,
+          -64
+        ],
+        "parameters": {
+          "url": "https://api.freeagent.com/v2/bills",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={{ JSON.stringify($json) }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "oAuth2Api"
+        },
+        "credentials": {
+          "oAuth2Api": {
+            "id": "",
+            "name": "FreeAgent OAuth2"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "if-new-invoice",
+        "name": "If New Invoice",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          352,
+          -48
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "count-check",
+                "operator": {
+                  "type": "number",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.count.toNumber() }}",
+                "rightValue": 0
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "prepare-fa-bill",
+        "name": "Prepare FreeAgent Bill",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          768,
+          -64
+        ],
+        "parameters": {
+          "jsCode": "const invoice = $('Loop Over Invoices').item.json;\n\n// Helper function to convert Unix timestamp to YYYY-MM-DD\nfunction formatDate(timestamp) {\n  if (!timestamp || isNaN(timestamp)) {\n    throw new Error(`Invalid timestamp: ${timestamp}`);\n  }\n  const date = new Date(timestamp * 1000);\n  if (isNaN(date.getTime())) {\n    throw new Error(`Could not create valid date from timestamp: ${timestamp}`);\n  }\n  return date.toISOString().split('T')[0];\n}\n\n// AWS has the dates backwards - DueDate is earlier than IssuedDate\n// So we use DueDate as dated_on and IssuedDate as due_on\nconst bill = {\n  contact: 'https://api.freeagent.com/v2/contacts/[YOUR_FREEAGENT_CONTACT_ID]',\n  reference: invoice.InvoiceId,\n  dated_on: formatDate(invoice.DueDate),\n  due_on: formatDate(invoice.IssuedDate),\n  total_value: invoice.PaymentCurrencyAmount.TotalAmount,\n  bill_items: [\n    {\n      category: 'https://api.freeagent.com/v2/categories/[YOUR_FREEAGENT_CATEGORY_ID]',\n      description: `AWS Services - ${invoice.BillingPeriod.Year}-${String(invoice.BillingPeriod.Month).padStart(2, '0')}`,\n      total_value: invoice.PaymentCurrencyAmount.TotalAmount,\n      sales_tax_rate: '20.0'\n    }\n  ]\n};\n\nreturn { json: { bill } };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "mark-bill-paid",
+        "name": "Mark Bill as Paid",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1392,
+          -64
+        ],
+        "parameters": {
+          "url": "https://api.freeagent.com/v2/bank_transaction_explanations",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={{ JSON.stringify($json) }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "oAuth2Api"
+        },
+        "credentials": {
+          "oAuth2Api": {
+            "id": "",
+            "name": "FreeAgent OAuth2"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "prepare-payment",
+        "name": "Prepare Payment",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1184,
+          -64
+        ],
+        "parameters": {
+          "jsCode": "const billUrl = $json.bill.url;\nconst billAmount = $json.bill.total_value;\nconst billDate = $json.bill.dated_on;\n\nconst payment = {\n  bank_transaction_explanation: {\n    bank_account: 'https://api.freeagent.com/v2/bank_accounts/[YOUR_FREEAGENT_BANK_ACCOUNT_ID]',\n    paid_bill: billUrl,\n    dated_on: billDate,\n    gross_value: `-${billAmount}`\n  }\n};\n\nreturn { json: payment };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "sticky-fetch",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          80,
+          -560
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1072,
+          "height": 328,
+          "content": "**1. Fetch AWS Invoices**\nRetrieves last month's invoices via AWS Invoicing API"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "sticky-dedup",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          80,
+          -176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 544,
+          "height": 320,
+          "content": "**2. Deduplicate**\nSkips invoices already in PostgreSQL"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "sticky-create",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          672,
+          -176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1192,
+          "height": 320,
+          "content": "**3. Create & Pay Bill**\nCreates FreeAgent bill, marks paid, logs to database"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "main-overview-sticky",
+        "name": "Workflow Overview",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -880,
+          -560
+        ],
+        "parameters": {
+          "width": 580,
+          "height": 720,
+          "content": "## How it works\nThis workflow automatically imports AWS invoices into FreeAgent accounting software. Running on the 3rd and 4th of each month, it:\n\n1. **Fetches invoices** from AWS using Signature V4 authentication\n2. **Checks for duplicates** against a PostgreSQL tracking table\n3. **Creates bills** in FreeAgent for new invoices\n4. **Marks bills as paid** against your bank account\n5. **Records processed invoices** to prevent future duplicates\n\n## Setup steps\n1. **AWS Credentials**: Open the `Generate AWS Signature` code node and replace `accessKeyId` and `secretAccessKey` with your IAM credentials (requires `invoicing:ListInvoiceSummaries` permission)\n2. **AWS Account ID**: In `Calculate Last Month Date Range`, update the `account_id` value\n3. **FreeAgent OAuth**: Create OAuth2 credentials in n8n for FreeAgent\n4. **FreeAgent Contact**: In `Prepare FreeAgent Bill`, update the `contact` URL with your supplier contact ID\n5. **FreeAgent Category**: Update the `category` URL with your expense category ID\n6. **Bank Account**: In `Prepare Payment`, update the `bank_account` URL\n7. **PostgreSQL**: Create credentials and run this SQL:\n```sql\nCREATE TABLE aws_invoices_processed (\n  id SERIAL PRIMARY KEY,\n  aws_invoice_id VARCHAR(255) UNIQUE,\n  freeagent_invoice_url VARCHAR(500),\n  billing_period VARCHAR(7),\n  amount DECIMAL(10,2),\n  currency VARCHAR(3),\n  created_at TIMESTAMP DEFAULT NOW()\n);\n```"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "calculate-last-month",
+        "name": "Calculate Last Month Date Range",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          144,
+          -464
+        ],
+        "parameters": {
+          "jsCode": "// Get last month's billing period\nconst now = new Date();\nconst lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);\n\nconst billingYear = lastMonth.getFullYear();\nconst billingMonth = lastMonth.getMonth() + 1; // JavaScript months are 0-indexed\n\n// Cutoff date is the first day of the billing period\nconst cutoffDate = `${billingYear}-${String(billingMonth).padStart(2, '0')}-01`;\n\nreturn [{\n  json: {\n    billing_year: billingYear,\n    billing_month: billingMonth,\n    account_id: '[YOUR_AWS_ACCOUNT_ID]',\n    cutoff_date: cutoffDate\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "http-request",
+        "name": "Call AWS For Bills",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          544,
+          -464
+        ],
+        "parameters": {
+          "url": "={{ $json.url }}",
+          "method": "POST",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true
+              }
+            }
+          },
+          "jsonBody": "={{ $json.body }}",
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "={{ $json.headers['Content-Type'] }}"
+              },
+              {
+                "name": "X-Amz-Date",
+                "value": "={{ $json.headers['X-Amz-Date'] }}"
+              },
+              {
+                "name": "X-Amz-Target",
+                "value": "={{ $json.headers['X-Amz-Target'] }}"
+              },
+              {
+                "name": "Authorization",
+                "value": "={{ $json.headers['Authorization'] }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "trigger-monthly",
+        "name": "Trigger Monthly",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -208,
+          -464
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "30 0 3,4 * *"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "timezone": "Europe/London",
+      "callerPolicy": "workflowsFromSameOwner",
+      "executionOrder": "v1",
+      "saveManualExecutions": true,
+      "saveExecutionProgress": true,
+      "saveDataErrorExecution": "all",
+      "saveDataSuccessExecution": "all"
+    },
+    "connections": {
+      "Filter By Date": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Invoices",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "If New Invoice": {
+        "main": [
+          [
+            {
+              "node": "Prepare FreeAgent Bill",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Payment": {
+        "main": [
+          [
+            {
+              "node": "Mark Bill as Paid",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Trigger Monthly": {
+        "main": [
+          [
+            {
+              "node": "Calculate Last Month Date Range",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Mark Bill as Paid": {
+        "main": [
+          [
+            {
+              "node": "Record In PostgreSQL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Call AWS For Bills": {
+        "main": [
+          [
+            {
+              "node": "Parse AWS Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Invoices": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Check If Already Processed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse AWS Response": {
+        "main": [
+          [
+            {
+              "node": "Filter By Date",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Record In PostgreSQL": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Invoices",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create FreeAgent Bill": {
+        "main": [
+          [
+            {
+              "node": "Prepare Payment",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate AWS Signature": {
+        "main": [
+          [
+            {
+              "node": "Call AWS For Bills",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare FreeAgent Bill": {
+        "main": [
+          [
+            {
+              "node": "Create FreeAgent Bill",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check If Already Processed": {
+        "main": [
+          [
+            {
+              "node": "If New Invoice",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Calculate Last Month Date Range": {
+        "main": [
+          [
+            {
+              "node": "Generate AWS Signature",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "description": "Automatically imports AWS invoices into FreeAgent accounting software. Runs monthly to fetch invoices via AWS Signature V4 authentication, checks for duplicates against PostgreSQL, creates bills in FreeAgent, marks them as paid, and tracks processed invoices to prevent duplicates."
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 18,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.postgres": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Pernille-AI",
+    "username": "pernilleai",
+    "bio": "We're an automation and workflow agency based in the UK. We're daily helping businesses save money by automating admin and repetitive business processes. Come say hi and find out how we can help!",
+    "verified": false,
+    "links": [
+      "https://pernille-ai.com"
+    ],
+    "avatar": "https://gravatar.com/avatar/ba3f4810bc136ae5254e86a431f22929e7030128dcd756808c4ad903c1402e48?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "icon": "file:postgres.svg",
+      "name": "n8n-nodes-base.postgres",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/postgres/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Postgres"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzkgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwMCIgZD0iTTc3LjM5MSA0Ny45MjJjLS40NjYtMS40MTItMS42ODgtMi4zOTYtMy4yNjgtMi42MzItLjc0NS0uMTExLTEuNTk4LS4wNjQtMi42MDguMTQ0LTEuNzYuMzYzLTMuMDY1LjUwMS00LjAxOC41MjggMy41OTYtNi4wNzIgNi41MjEtMTIuOTk3IDguMjA0LTE5LjUxNSAyLjcyMi0xMC41NCAxLjI2OC0xNS4zNDEtLjQzMi0xNy41MTNDNzAuNzcgMy4xODUgNjQuMjA2LjA5NyA1Ni4yODcuMDAyYy00LjIyNC0uMDUyLTcuOTMzLjc4Mi05Ljg2NyAxLjM4MmEzNyAzNyAwIDAgMC01Ljc3LS41MjhjLTMuODA5LS4wNjEtNy4xNzQuNzctMTAuMDUgMi40NzZhNDYgNDYgMCAwIDAtNy4wOTgtMS43ODJDMTYuNTYxLjQxMSAxMC45NjggMS4yOTkgNi44NzYgNC4xOSAxLjkyMiA3LjY4OS0uMzc1IDEzLjc3LjA1IDIyLjI2MmMuMTM1IDIuNjk2IDEuNjQzIDEwLjkgNC4wMTggMTguNjggMS4zNjUgNC40NzIgMi44MiA4LjE4NSA0LjMyNiAxMS4wMzggMi4xMzUgNC4wNDYgNC40MTkgNi40MjggNi45ODQgNy4yODQgMS40MzguNDc5IDQuMDQ5LjgxNCA2Ljc5Ny0xLjQ3M2E2IDYgMCAwIDAgMS40MjkgMS4yM2MuNzgzLjQ5NCAxLjc0Ljg5NyAyLjY5NiAxLjEzNiAzLjQ0Ni44NjIgNi42NzQuNjQ2IDkuNDI3LS41NjFsLjA0MSAxLjM2Mi4wNiAxLjg5OWMuMTYzIDQuMDY0LjQ0IDcuMjIzIDEuMjU5IDkuNDM0LjA0NS4xMjIuMTA1LjMwNy4xNjkuNTAzLjQwOSAxLjI1MSAxLjA5MiAzLjM0NiAyLjgzIDQuOTg3IDEuOCAxLjY5OSAzLjk3OCAyLjIyIDUuOTcyIDIuMjIgMSAwIDEuOTU1LS4xMzEgMi43OTItLjMxMSAyLjk4NC0uNjM5IDYuMzczLTEuNjE0IDguODI0LTUuMTA0IDIuMzE4LTMuMyAzLjQ0NC04LjI3IDMuNjQ4LTE2LjEwMWwuMDc0LS42MzQuMDQ4LS40MTQuNTQ2LjA0OC4xNDEuMDFjMy4wMzkuMTM4IDYuNzU1LS41MDYgOS4wMzctMS41NjYgMS44MDMtLjgzNyA3LjU4Mi0zLjg4OCA2LjIyMS04LjAwNyIvPjxwYXRoIGZpbGw9IiMzMzY3OTEiIGQ9Ik03Mi4xOTUgNDguNzIzYy05LjAzNiAxLjg2NC05LjY1Ny0xLjE5NS05LjY1Ny0xLjE5NSA5LjU0MS0xNC4xNTcgMTMuNTI5LTMyLjEyNyAxMC4wODctMzYuNTI1QzYzLjIzNS0uOTk0IDQ2Ljk4MSA0LjY4IDQ2LjcxIDQuODI3bC0uMDg3LjAxNmMtMS43ODUtLjM3MS0zLjc4My0uNTkxLTYuMDI5LS42MjgtNC4wODktLjA2Ny03LjE5IDEuMDcyLTkuNTQ0IDIuODU3IDAgMC0yOC45OTUtMTEuOTQ1LTI3LjY0NyAxNS4wMjMuMjg3IDUuNzM3IDguMjIzIDQzLjQxIDE3LjY4OSAzMi4wMzEgMy40Ni00LjE2MSA2LjgwMy03LjY3OSA2LjgwMy03LjY3OSAxLjY2IDEuMTAzIDMuNjQ4IDEuNjY2IDUuNzMyIDEuNDYzbC4xNjItLjEzN2E2LjMgNi4zIDAgMCAwIC4wNjUgMS42MmMtMi40MzkgMi43MjUtMS43MjIgMy4yMDMtNi41OTcgNC4yMDYtNC45MzMgMS4wMTctMi4wMzUgMi44MjYtLjE0MyAzLjI5OSAyLjI5NC41NzQgNy42IDEuMzg2IDExLjE4NS0zLjYzM2wtLjE0My41NzNjLjk1Ni43NjUgMS42MjYgNC45NzggMS41MTQgOC43OTdzLS4xODggNi40NDEuNTY1IDguNDg5IDEuNTAzIDYuNjU2IDcuOTEyIDUuMjgyYzUuMzU1LTEuMTQ4IDguMTMtNC4xMjEgOC41MTYtOS4wODEuMjc0LTMuNTI2Ljg5NC0zLjAwNS45MzMtNi4xNThsLjQ5Ny0xLjQ5M2MuNTczLTQuNzguMDkxLTYuMzIyIDMuMzktNS42MDVsLjgwMi4wN2MyLjQyOC4xMSA1LjYwNi0uMzkxIDcuNDcxLTEuMjU3IDQuMDE2LTEuODY0IDYuMzk4LTQuOTc2IDIuNDM4LTQuMTU4Ii8+PHBhdGggZD0iTTMyLjc0NyAyNC42NmMtLjgxNC0uMTEzLTEuNTUyLS4wMDgtMS45MjUuMjc0YS43LjcgMCAwIDAtLjI5Mi40N2MtLjA0Ny4zMzYuMTg4LjcwNy4zMzMuODk4LjQwOS41NDIgMS4wMDYuOTE1IDEuNTk4Ljk5N2EyIDIgMCAwIDAgLjI1Ni4wMThjLjk4NiAwIDEuODgzLS43NjggMS45NjItMS4zMzUuMDk5LS43MS0uOTMyLTEuMTgzLTEuOTMxLTEuMzIybTI2Ljk3NS4wMjJjLS4wNzgtLjU1Ni0xLjA2OC0uNzE1LTIuMDA3LS41ODRzLTEuODQ4LjU1NC0xLjc3MiAxLjExMmMuMDYxLjQzNC44NDQgMS4xNzQgMS43NzEgMS4xNzRxLjExNyAwIC4yMzctLjAxNmMuNjE5LS4wODYgMS4wNzMtLjQ3OSAxLjI4OC0uNzA1LjMyOS0uMzQ1LjUxOC0uNzMuNDg0LS45OG0xNS40NzcgMjMuODI4Yy0uMzQ1LTEuMDQyLTEuNDUzLTEuMzc3LTMuMjk2LS45OTctNS40NzEgMS4xMjktNy40My4zNDctOC4wNzMtLjEyNyA0LjI1Mi02LjQ3OCA3Ljc1LTE0LjMwOCA5LjYzNy0yMS42MTQuODk0LTMuNDYxIDEuMzg4LTYuNjc1IDEuNDI4LTkuMjk0LjA0NS0yLjg3Ni0uNDQ1LTQuOTg4LTEuNDU1LTYuMjc5LTQuMDcyLTUuMjAzLTEwLjA0OC03Ljk5NC0xNy4yODMtOC4wNy00Ljk3My0uMDU2LTkuMTc1IDEuMjE3LTkuOTkgMS41NzVhMjUgMjUgMCAwIDAtNS42MjItLjcyMmMtMy43MzQtLjA2LTYuOTYxLjgzNC05LjYzMyAyLjY1NWE0MyA0MyAwIDAgMC03LjgyOC0yLjA1MmMtNi4zNDItMS4wMjEtMTEuMzgxLS4yNDgtMTQuOTc4IDIuMy00LjI5MSAzLjA0LTYuMjcyIDguNDc1LTUuODg4IDE2LjE1Mi4xMjkgMi41ODMgMS42MDEgMTAuNTI5IDMuOTIzIDE4LjEzOSAzLjA1NyAxMC4wMTYgNi4zOCAxNS42ODYgOS44NzcgMTYuODUyYTQuNCA0LjQgMCAwIDAgMS40MDIuMjMyYzEuMjc2IDAgMi44MzktLjU3NSA0LjQ2Ni0yLjUzMWExNjEgMTYxIDAgMCAxIDYuMTU2LTYuOTY2IDkuOSA5LjkgMCAwIDAgNC40MjkgMS4xOTFsLjAxLjEyMWMtLjMxLjM2OC0uNTY0LjY5LS43ODEuOTY1LTEuMDcgMS4zNTgtMS4yOTMgMS42NDEtNC43MzggMi4zNTEtLjk4LjIwMi0zLjU4Mi43MzgtMy42MiAyLjU2My0uMDQxIDEuOTkzIDMuMDc2IDIuODMgMy40MzEgMi45MTkgMS4yMzguMzEgMi40My40NjMgMy41NjguNDYzIDIuNzY2IDAgNS4yLS45MDkgNy4xNDUtMi42NjgtLjA2IDcuMTA2LjIzNiAxNC4xMDcgMS4wODkgMTYuMjQxLjY5OSAxLjc0NiAyLjQwNiA2LjAxNCA3Ljc5OCA2LjAxNC43OTEgMCAxLjY2Mi0uMDkyIDIuNjItLjI5NyA1LjYyNy0xLjIwNyA4LjA3MS0zLjY5NCA5LjAxNi05LjE3Ny41MDYtMi45MyAxLjM3NC05LjkyOCAxLjc4Mi0xMy42ODIuODYyLjI2OSAxLjk3MS4zOTIgMy4xNy4zOTIgMi41MDEgMCA1LjM4Ny0uNTMxIDcuMTk3LTEuMzcyIDIuMDMzLS45NDQgNS43MDItMy4yNjEgNS4wMzctNS4yNzR6TTYxLjggMjMuMTQ3Yy0uMDE5IDEuMTA4LS4xNzEgMi4xMTQtLjMzMyAzLjE2NC0uMTc0IDEuMTI5LS4zNTQgMi4yOTctLjM5OSAzLjcxNS0uMDQ1IDEuMzc5LjEyOCAyLjgxNC4yOTQgNC4yLjMzNyAyLjgwMS42ODIgNS42ODUtLjY1NSA4LjUzMWExMSAxMSAwIDAgMS0uNTkyLTEuMjE4Yy0uMTY2LS40MDMtLjUyNy0xLjA1LTEuMDI3LTEuOTQ2LTEuOTQ0LTMuNDg3LTYuNDk3LTExLjY1Mi00LjE2Ny0xNC45ODQuNjk0LS45OTIgMi40NTYtMi4wMTEgNi44NzktMS40NjN6TTU2LjQzOSA0LjM3NGM2LjQ4Mi4xNDMgMTEuNjA5IDIuNTY4IDE1LjI0IDcuMjA3IDIuNzg0IDMuNTU4LS4yODIgMTkuNzQ5LTkuMTU4IDMzLjcxNmwtLjI2OS0uMzM5LS4xMTItLjE0YzIuMjk0LTMuNzg4IDEuODQ1LTcuNTM2IDEuNDQ2LTEwLjg1OS0uMTY0LTEuMzY0LS4zMTktMi42NTItLjI4LTMuODYxLjA0MS0xLjI4My4yMS0yLjM4Mi4zNzQtMy40NDYuMjAyLTEuMzExLjQwNy0yLjY2Ny4zNS00LjI2NWExLjggMS44IDAgMCAwIC4wMzctLjYwMWMtLjE0NC0xLjUzMy0xLjg5NC02LjEyLTUuNDYyLTEwLjI3My0xLjk1MS0yLjI3MS00Ljc5Ny00LjgxMy04LjY4Mi02LjUyN2EyOS4zIDI5LjMgMCAwIDEgNi41MTUtLjYxMnpNMjAuMTY3IDUzLjI5OGMtMS43OTMgMi4xNTUtMy4wMzEgMS43NDItMy40MzggMS42MDctMi42NTMtLjg4NS01LjczLTYuNDkxLTguNDQ0LTE1LjM4Mi0yLjM0OC03LjY5My0zLjcyLTE1LjQyOC0zLjgyOS0xNy41OTctLjM0My02Ljg2IDEuMzItMTEuNjQxIDQuOTQzLTE0LjIxIDUuODk2LTQuMTgxIDE1LjU4OS0xLjY3OSAxOS40ODQtLjQwOWwtLjE3LjE2M2MtNi4zOTEgNi40NTUtNi4yNCAxNy40ODMtNi4yMjQgMTguMTU3YTIyIDIyIDAgMCAwIC4wNTEgMS4xMzVjLjExIDEuODU1LjMxNSA1LjMwNy0uMjMyIDkuMjE3LS41MDggMy42MzMuNjEyIDcuMTg5IDMuMDcyIDkuNzU2cS4zODMuMzk4Ljc5NS43NWExNjQgMTY0IDAgMCAwLTYuMDA4IDYuODE0em02LjgzLTkuMTEzYy0xLjk4My0yLjA2OS0yLjg4NC00Ljk0Ny0yLjQ3MS03Ljg5Ni41NzctNC4xMy4zNjQtNy43MjcuMjUtOS42NTlsLS4wMzktLjY5NGMuOTM0LS44MjggNS4yNjEtMy4xNDYgOC4zNDYtMi40MzkgMS40MDguMzIzIDIuMjY2IDEuMjgxIDIuNjIzIDIuOTMxIDEuODQ2IDguNTM5LjI0NCAxMi4wOTgtMS4wNDMgMTQuOTU3LS4yNjUuNTg5LS41MTYgMS4xNDYtLjczIDEuNzIybC0uMTY2LjQ0NWMtLjQyIDEuMTI2LS44MTEgMi4xNzMtMS4wNTMgMy4xNjctMi4xMDgtLjAwNi00LjE1OS0uOTA3LTUuNzE4LTIuNTM0em0uMzI0IDExLjUxNmE1IDUgMCAwIDEtMS40OTQtLjY0MmMuMjcxLS4xMjguNzU0LS4zMDEgMS41OTEtLjQ3NCA0LjA1Mi0uODM0IDQuNjc4LTEuNDIzIDYuMDQ1LTMuMTU4LjMxMy0uMzk4LjY2OS0uODQ5IDEuMTYtMS4zOTguNzMzLS44MjEgMS4wNjgtLjY4MiAxLjY3Ni0uNDMuNDkzLjIwNC45NzIuODIxIDEuMTY3IDEuNTAxLjA5Mi4zMjEuMTk1LjkzLS4xNDMgMS40MDQtMi44NTUgMy45OTctNy4wMTUgMy45NDYtMTAuMDAzIDMuMTk4em0yMS4yMDcgMTkuNzM1Yy00Ljk1NyAxLjA2Mi02LjcxMy0xLjQ2Ny03Ljg2OS00LjM1OS0uNzQ3LTEuODY3LTEuMTEzLTEwLjI4NS0uODUzLTE5LjU4MmExLjEgMS4xIDAgMCAwLS4wNDgtLjM1NiA1IDUgMCAwIDAtLjEzOS0uNjU3Yy0uMzg3LTEuMzUzLTEuMzMxLTIuNDg0LTIuNDYyLTIuOTUzLS40NS0uMTg2LTEuMjc1LS41MjgtMi4yNjctLjI3NC4yMTItLjg3MS41NzgtMS44NTUuOTc2LTIuOTIxbC4xNjctLjQ0OGMuMTg4LS41MDUuNDIzLTEuMDI5LjY3My0xLjU4MyAxLjM0Ny0yLjk5MiAzLjE5Mi03LjA5MSAxLjE5LTE2LjM1LS43NS0zLjQ2OC0zLjI1NC01LjE2MS03LjA1LTQuNzY4LTIuMjc2LjIzNS00LjM1OCAxLjE1NC01LjM5NiAxLjY4cS0uMzM0LjE2OS0uNjE4LjMyOWMuMjktMy40OTQgMS4zODUtMTAuMDI0IDUuNDgxLTE0LjE1NiAyLjU3OS0yLjYwMSA2LjAxNC0zLjg4NiAxMC4xOTktMy44MTcgOC4yNDYuMTM1IDEzLjUzNCA0LjM2NyAxNi41MTggNy44OTMgMi41NzEgMy4wMzkgMy45NjQgNi4xIDQuNTIgNy43NTEtNC4xNzktLjQyNS03LjAyMi40LTguNDYzIDIuNDYtMy4xMzUgNC40ODEgMS43MTUgMTMuMTc4IDQuMDQ2IDE3LjM1OC40MjcuNzY2Ljc5NiAxLjQyOC45MTIgMS43MDkuNzU5IDEuODM5IDEuNzQyIDMuMDY3IDIuNDU5IDMuOTY0LjIyLjI3NS40MzMuNTQxLjU5Ni43NzQtMS4yNjYuMzY1LTMuNTM5IDEuMjA4LTMuMzMyIDUuNDIyLS4xNjcgMi4xMTUtMS4zNTYgMTIuMDE2LTEuOTU5IDE1LjUxNC0uNzk3IDQuNjIxLTIuNDk3IDYuMzQzLTcuMjc5IDcuMzY4em0yMC42OTMtMjMuNjhjLTEuMjk0LjYwMS0zLjQ2IDEuMDUyLTUuNTE4IDEuMTQ4LTIuMjczLjEwNy0zLjQzLS4yNTUtMy43MDItLjQ3Ny0uMTI4LTIuNjI2Ljg1LTIuOTAxIDEuODg0LTMuMTkxLjE2My0uMDQ2LjMyMS0uMDkuNDc0LS4xNDRhNCA0IDAgMCAwIC4zMTMuMjNjMS44MjcgMS4yMDYgNS4wODUgMS4zMzYgOS42ODUuMzg2bC4wNS0uMDFjLS42Mi41OC0xLjY4MiAxLjM1OS0zLjE4NyAyLjA1OHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Postgres",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 34,
+      "name": "Invoice Processing"
+    }
+  ],
+  "image": []
+}

@@ -1,0 +1,2034 @@
+{
+  "id": 13450,
+  "name": "Auto-respond and classify WhatsApp leads with Ollama AI and log to Google Sheets",
+  "views": 471,
+  "recentViews": 4,
+  "totalViews": 471,
+  "createdAt": "2026-02-17T09:03:12.363Z",
+  "description": "## **Who is this for**\n\nThis workflow is built for sales teams, agencies, and small businesses that receive inbound leads via WhatsApp and want to automate their first response, lead qualification, and CRM logging — without missing a single message.\n\n## **What this workflow does**\n\nIt listens for incoming WhatsApp messages, uses an AI agent to classify each message by intent (hot lead, warm lead, support, or needs qualification), sends a tailored auto-reply, logs every interaction to Google Sheets, and automatically books Google Calendar meetings with Meet links for qualified leads.\n\n## **How it works**\n\n\n- WhatsApp Trigger receives incoming messages and filters out bot/status messages to prevent loops.\n- AI Agent (powered by Ollama or any connected LLM) classifies the message into one of four intent categories with confidence scoring.\n- Smart Router directs each intent down a dedicated path.\n- Hot & Warm Leads receive an instant reply, get logged to Google Sheets, have a Google Calendar meeting auto-booked, and receive the Meet link via WhatsApp.\n- Support requests are logged and receive a ticket confirmation.\n- Vague or incomplete messages trigger a smart follow-up question. Conversation memory ensures the AI re-classifies correctly when the user replies with more context.\n\n## **Setup steps**\n\n\n- Connect your WhatsApp Business API credentials (Meta Cloud API).\n- Connect Google Sheets OAuth and set your spreadsheet ID in all three logging nodes.\n- Connect Google Calendar OAuth and select your calendar in both booking nodes.\n- Configure your LLM (Ollama endpoint, OpenAI, or any supported model).\n- Update the BOT_NUMBERS array in the \"Parse WhatsApp Message\" node to match your WhatsApp Business phone number ID.\n- Update the phoneNumberId in all WhatsApp Send nodes to your number.\n- Send a test message and verify the full flow.\n\n## **Requirements**\n\n\n- WhatsApp Business API (Meta Cloud API) access\n- Google Sheets and Google Calendar accounts with OAuth credentials\n- An LLM endpoint (Ollama, OpenAI, or any n8n-supported model)\n- n8n instance (cloud or self-hosted)\n\n## **How to customize**\n\n\n- Swap the AI model in the Ollama Chat Model node for OpenAI, Anthropic, or any supported LLM.\n- Edit the auto-reply templates in each Reply code node to match your brand voice.\n- Adjust meeting booking times (default: Hot = 2 hours out, Warm = 4 hours out).\n- Add Slack or email notifications by branching from the Google Sheets logging nodes.\n- Modify the AI classification prompt to add custom intent categories for your business.",
+  "workflow": {
+    "id": "OEKHk1t8dnJ9CA0e",
+    "meta": {
+      "instanceId": "8f8ee4eb853c20789e317beb113798e3d078c0c7ef754b4b9fad98c2eee7e79d"
+    },
+    "name": "Auto-respond and classify WhatsApp leads with AI and log to Google Sheets",
+    "tags": [
+      {
+        "id": "mHQntpbppFUpZPGm",
+        "name": "template",
+        "createdAt": "2026-02-17T08:30:26.885Z",
+        "updatedAt": "2026-02-17T08:30:26.885Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "59e9c93e-bcf1-4e6b-a773-b689bba5c0e0",
+        "name": "🔧 Parse WhatsApp Message",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          0,
+          752
+        ],
+        "parameters": {
+          "jsCode": "// Parse WhatsApp messages with loop prevention\nconst input = $input.all()[0].json;\nlet output = {};\n\n// ⚠️ UPDATE THESE to match your WhatsApp Business phone number ID and display number\nconst BOT_NUMBERS = ['YOUR_PHONE_NUMBER_ID', 'YOUR_DISPLAY_PHONE_NUMBER'];\n\nconst isBot = (number) => {\n  if (!number) return false;\n  const cleanNumber = String(number).replace(/\\D/g, '');\n  return BOT_NUMBERS.some(botNum => \n    cleanNumber.includes(botNum.replace(/\\D/g, ''))\n  );\n};\n\n// Process INCOMING messages only\nif (input.messages && input.messages[0]) {\n  const message = input.messages[0];\n  const contact = input.contacts?.[0] || {};\n  \n  // Ignore bot's own messages\n  if (isBot(message.from)) {\n    return {\n      json: {\n        eventType: 'outgoing',\n        skipProcessing: true,\n        receivedAt: new Date().toISOString()\n      }\n    };\n  }\n  \n  output = {\n    eventType: 'message',\n    skipProcessing: false,\n    from: message.from,\n    messageId: message.id,\n    timestamp: message.timestamp,\n    name: contact.profile?.name || 'Unknown',\n    messageBody: message.text?.body || '',\n    messageType: message.type || 'text',\n    waId: contact.wa_id || message.from,\n    phoneNumberId: input.metadata?.phone_number_id || '',\n    receivedAt: new Date(parseInt(message.timestamp) * 1000).toISOString()\n  };\n}\n// Process STATUS updates (skip)\nelse if (input.statuses && input.statuses[0]) {\n  return {\n    json: {\n      eventType: 'status',\n      skipProcessing: true,\n      receivedAt: new Date().toISOString()\n    }\n  };\n}\n// Unknown format\nelse {\n  return {\n    json: {\n      eventType: 'unknown',\n      skipProcessing: true,\n      receivedAt: new Date().toISOString()\n    }\n  };\n}\n\nreturn { json: output };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a68f112c-f642-4cae-b506-c333f8481f26",
+        "name": "🤖 AI Intent Classifier",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          224,
+          752
+        ],
+        "parameters": {
+          "text": "=Classify this WhatsApp message.\n\nFrom: {{ $json.name }}\nPhone: {{ $json.from }}\nMessage: {{ $json.messageBody }}",
+          "options": {
+            "systemMessage": "You are an intelligent lead qualification assistant for WhatsApp business messages.\n\nYour job is to analyze the incoming message and classify it into one of FOUR categories.\n\nIMPORTANT: You must determine if the message has ENOUGH information to be actionable, or if it requires further qualification.\n\n---\n\nINTENT CATEGORIES:\n\n1. hot_lead - Customer has provided COMPLETE information AND shows urgent buying intent.\n   REQUIRED signals (must have MULTIPLE):\n   - Explicit pricing, quote, or demo request\n   - Mentioned budget, timeline, or urgency\n   - Provided company name, industry, team size, or specific use case\n   - Language showing they are ready to proceed\n   Example: \"Hi, I run a 50-person SaaS company. We need WhatsApp automation for sales follow-ups. What is your pricing for 10 agents? We want to start in 2 weeks.\"\n\n2. warm_lead - Customer shows GENUINE interest AND has provided SOME qualifying context.\n   REQUIRED signals:\n   - Asking about features, capabilities, how it works\n   - Mentioned their business type or use case (even briefly)\n   - Evaluating or comparing solutions\n   - Has substance beyond just a greeting\n   Example: \"I saw your WhatsApp automation service. How does it work and what kind of businesses do you help?\"\n   Example: \"We are an e-commerce company looking for customer support automation. What features do you offer?\"\n\n3. support - Existing user with a technical or account issue.\n   REQUIRED signals:\n   - References existing setup, account, integration, or prior purchase\n   - Describes specific technical issue or malfunction\n   - Language like \"stopped working\", \"can not login\", \"since yesterday\"\n   Example: \"Our WhatsApp messages are not getting logged in the CRM since yesterday. Can you help?\"\n\n4. needs_qualification - Message does NOT have enough context to classify as hot, warm, or support.\n   This includes:\n   - Greetings only: \"Hi\", \"Hello\", \"Hey\", \"Good morning\"\n   - Vague messages: \"I need help\", \"Can you help me?\", \"Tell me more\"\n   - Single word or very short messages with no context\n   - Pricing questions with ZERO context: \"What is your pricing?\" (no industry, no use case, no company info)\n   - \"How are you?\", \"Is anyone there?\", \"Can I talk to someone?\"\n   - Any message where you genuinely cannot determine what the customer wants or needs\n   Example: \"Hi\"\n   Example: \"What is your pricing?\" (without any context)\n   Example: \"I need help with something\"\n   Example: \"Hello, good morning\"\n\n---\n\nCRITICAL RULES:\n\n1. If the message is JUST a greeting with no substance, it is ALWAYS needs_qualification. Never classify \"Hi\" or \"Hello\" as warm_lead.\n\n2. If someone asks about pricing but provides NO context about who they are, what industry, what use case, or what size company, it is needs_qualification, NOT warm_lead or hot_lead.\n\n3. warm_lead requires the customer to have shared SOME meaningful context about their business or needs, not just a generic question.\n\n4. hot_lead requires MULTIPLE qualifying signals including urgency or readiness to buy.\n\n5. support requires clear reference to an EXISTING product, account, or setup.\n\n6. When in doubt between warm_lead and needs_qualification, choose needs_qualification. It is better to ask a qualifying question than to misroute.\n\n7. For needs_qualification, always provide a friendly, specific nextQuestion that will help qualify the lead.\n\n---\n\nFor needs_qualification, generate a nextQuestion that is:\n- Friendly and conversational (include emoji)\n- ONE specific question (not multiple)\n- Designed to understand their business need\n- Examples:\n  - For \"Hi\": \"Hi there! Thanks for reaching out. How can I help you today?\"\n  - For \"What is your pricing?\": \"I would love to help with pricing! Could you tell me a bit about your business and what you are looking to achieve?\"\n  - For \"I need help\": \"Of course! Could you tell me more about what you need help with?\"\n\n---\n\nRESPOND WITH ONLY RAW JSON. No markdown fences. No explanation. Start with { end with }.\n\n{\n  \"intent\": \"hot_lead\" or \"warm_lead\" or \"support\" or \"needs_qualification\",\n  \"confidence\": 0.0 to 1.0,\n  \"reason\": \"Brief explanation of why this classification was chosen\",\n  \"hasEnoughInfo\": true or false,\n  \"missingInfo\": [\"list\", \"of\", \"missing\", \"items\"] or [],\n  \"nextQuestion\": \"The follow-up question to ask\" or \"\"\n}"
+          },
+          "promptType": "define",
+          "hasOutputParser": true
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "e0d448a3-cb12-44a1-92d8-5cc102cdc4e0",
+        "name": "🎯 Extract Classification",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          512,
+          752
+        ],
+        "parameters": {
+          "jsCode": "const messageData = $node[\"🔧 Parse WhatsApp Message\"].json;\nconst rawAiOutput = $json;\n\nlet aiOutput = {};\n\nfunction extractJSON(str) {\n  if (typeof str !== 'string') return null;\n  let cleaned = str.replace(/```json\\s*/gi, '').replace(/```\\s*/g, '').trim();\n  try {\n    return JSON.parse(cleaned);\n  } catch (e) {\n    const match = cleaned.match(/\\{[\\s\\S]*\"intent\"\\s*:[\\s\\S]*\\}/);\n    if (match) {\n      try { return JSON.parse(match[0]); } catch (e2) { return null; }\n    }\n    return null;\n  }\n}\n\nfunction findAIResponse(obj, depth = 0) {\n  if (depth > 5 || !obj || typeof obj !== 'object') return null;\n  if (obj.intent && typeof obj.intent === 'string') return obj;\n  \n  const props = ['output', 'text', 'message', 'content', 'response', 'result', 'data', 'json', 'kwargs', 'lc_kwargs'];\n  \n  for (const prop of props) {\n    if (obj[prop] !== undefined) {\n      if (typeof obj[prop] === 'string') {\n        const parsed = extractJSON(obj[prop]);\n        if (parsed && parsed.intent) return parsed;\n      } else if (typeof obj[prop] === 'object') {\n        const found = findAIResponse(obj[prop], depth + 1);\n        if (found) return found;\n      }\n    }\n  }\n  \n  for (const key of Object.keys(obj)) {\n    if (props.includes(key)) continue;\n    const val = obj[key];\n    if (typeof val === 'string' && val.includes('\"intent\"')) {\n      const parsed = extractJSON(val);\n      if (parsed && parsed.intent) return parsed;\n    } else if (typeof val === 'object' && val !== null) {\n      const found = findAIResponse(val, depth + 1);\n      if (found) return found;\n    }\n  }\n  return null;\n}\n\ntry {\n  if (rawAiOutput && rawAiOutput.intent) {\n    aiOutput = rawAiOutput;\n  } else {\n    const found = findAIResponse(rawAiOutput);\n    if (found) aiOutput = found;\n  }\n  \n  if (!aiOutput.intent) {\n    const fullString = JSON.stringify(rawAiOutput);\n    const parsed = extractJSON(fullString);\n    if (parsed && parsed.intent) aiOutput = parsed;\n  }\n  \n  if (!aiOutput.intent && typeof rawAiOutput === 'string') {\n    const parsed = extractJSON(rawAiOutput);\n    if (parsed && parsed.intent) aiOutput = parsed;\n  }\n} catch (error) {}\n\nconst validIntents = ['hot_lead', 'warm_lead', 'support', 'spam', 'needs_qualification'];\n\nif (!aiOutput.intent || !validIntents.includes(aiOutput.intent)) {\n  if (!aiOutput.intent) {\n    aiOutput = {\n      intent: 'needs_qualification',\n      confidence: 0.5,\n      reason: 'Could not parse AI response - defaulting to qualification',\n      hasEnoughInfo: false,\n      missingInfo: ['parsing failed - needs manual review'],\n      nextQuestion: 'Hi! Thanks for reaching out 😊 How can I help you today?'\n    };\n  } else {\n    aiOutput.intent = 'needs_qualification';\n  }\n}\n\nconst result = {\n  from: messageData.from || '',\n  name: messageData.name || '',\n  messageBody: messageData.messageBody || '',\n  messageId: messageData.messageId || '',\n  messageType: messageData.messageType || 'text',\n  timestamp: messageData.timestamp || '',\n  receivedAt: messageData.receivedAt || '',\n  waId: messageData.waId || '',\n  skipProcessing: messageData.skipProcessing || false,\n  phoneNumberId: messageData.phoneNumberId || '',\n  intent: aiOutput.intent,\n  confidence: parseFloat(aiOutput.confidence) || 0,\n  reason: aiOutput.reason || 'No reason provided',\n  hasEnoughInfo: aiOutput.hasEnoughInfo === true,\n  missingInfo: Array.isArray(aiOutput.missingInfo) ? aiOutput.missingInfo : [],\n  nextQuestion: aiOutput.nextQuestion || '',\n  processedAt: new Date().toISOString(),\n  model: 'your-ai-model'\n};\n\nreturn { json: result };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "29f47043-c208-41e5-b733-3c8d0c3d7e59",
+        "name": "🔀 Route by Intent",
+        "type": "n8n-nodes-base.switch",
+        "position": [
+          752,
+          752
+        ],
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "e6398bcf-f232-42e8-a25c-39e3d6796550",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.intent }}",
+                      "rightValue": "hot_lead"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "baa145e4-173e-404f-b468-085a6fecffa8",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.intent }}",
+                      "rightValue": "warm_lead"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "e47a1d18-dac3-41dd-8317-baf7deaa17ca",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.intent }}",
+                      "rightValue": "support"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "e7d23f7a-f7c2-463c-9a72-cd7bf2682235",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.intent }}",
+                      "rightValue": "needs_qualification"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "acff1980-6f84-4444-a47d-7dd30b44b854",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.intent }}",
+                      "rightValue": "spam"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              }
+            ]
+          },
+          "options": {
+            "allMatchingOutputs": false
+          }
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "cf872e56-6064-4480-a709-0b35f6b0aefe",
+        "name": "💬 Hot Lead Reply",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1024,
+          240
+        ],
+        "parameters": {
+          "jsCode": "const name = $json.name || 'there';\n\nconst replyMessage = `🎉 Excellent, ${name}!\n\nThank you for the detailed information. Our sales team is reviewing your requirements right now.\n\n📅 *Next Steps:*\nI've reserved a priority time slot for you. You'll receive a Google Meet link in the next message.\n\n⏰ *Response Time:* Within 30 minutes\n\nLet's get you set up! 🚀`;\n\nreturn {\n  json: {\n    ...($json),\n    autoReply: replyMessage,\n    shouldReply: true\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "57dc303c-58fd-4843-8713-a0723d08f4ef",
+        "name": "💬 Warm Lead Reply",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1040,
+          544
+        ],
+        "parameters": {
+          "jsCode": "const name = $json.name || 'there';\n\nconst replyMessage = `👋 Thanks for your interest, ${name}!\n\nHere's how we can help:\n\n✨ *What We Offer:*\n• Custom WhatsApp automation for your industry\n• Scalable from 10 to 10,000 users\n• 24/7 technical support\n• Free 14-day trial\n\n🔗 *Learn More:*\nWebsite: [your-site.com]\nCase studies: [your-site.com/cases]\n\n💬 A team member will follow up with you shortly!\n\nFeel free to ask any questions here.`;\n\nreturn {\n  json: {\n    ...($json),\n    autoReply: replyMessage,\n    shouldReply: true\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "92e58df8-3373-4903-af87-a0997a3b14fb",
+        "name": "💬 Support Reply",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1024,
+          848
+        ],
+        "parameters": {
+          "jsCode": "const name = $json.name || 'there';\nconst ticketId = ($json.messageId || 'UNKNOWN').substring(0, 8).toUpperCase();\nconst issuePreview = ($json.messageBody || 'No description').substring(0, 50);\n\nconst replyMessage = `Hello ${name},\n\nThank you for reaching out. We've logged your support request.\n\n🎫 *Ticket:* #${ticketId}\n📋 *Issue:* ${issuePreview}...\n⏰ *SLA:* Response within 2 hours (Mon-Fri, 9AM-6PM)\n\nOur support team is on it! 💪\n\n🚨 *Urgent?* Call: +1-XXX-XXX-XXXX`;\n\nreturn {\n  json: {\n    ...($json),\n    autoReply: replyMessage,\n    shouldReply: true\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "663e1710-f9ae-44c5-8535-e673987ac3b5",
+        "name": "🧠 Smart Qualification Reply",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1040,
+          1184
+        ],
+        "parameters": {
+          "jsCode": "// For needs_qualification - use the AI-generated nextQuestion\nconst name = $json.name || 'there';\nlet qualifyMessage = $json.nextQuestion || '';\n\n// If AI didn't generate a question, use smart defaults\nif (!qualifyMessage) {\n  const msg = ($json.messageBody || '').toLowerCase().trim();\n  \n  if (['hi', 'hello', 'hey', 'hii', 'hiii', 'good morning', 'good evening', 'good afternoon'].some(g => msg.startsWith(g))) {\n    qualifyMessage = `Hi ${name}! 👋 Thanks for reaching out. How can I help you today? Are you looking for:\\n\\n1️⃣ WhatsApp automation for your business\\n2️⃣ Pricing information\\n3️⃣ Technical support\\n\\nJust let me know! 😊`;\n  } else if (msg.includes('price') || msg.includes('pricing') || msg.includes('cost') || msg.includes('how much')) {\n    qualifyMessage = `I'd love to help with pricing, ${name}! 💰\\n\\nTo give you the most accurate quote, could you tell me:\\n\\n📌 What industry is your business in?\\n📌 How many team members would use it?\\n\\nThis helps me recommend the right plan for you! 😊`;\n  } else if (msg.includes('help') || msg.includes('assist')) {\n    qualifyMessage = `Of course, ${name}! I'm here to help 😊\\n\\nCould you tell me a bit more about what you're looking for? For example:\\n\\n• Are you exploring our product for the first time?\\n• Do you have a specific business challenge to solve?\\n• Or do you need help with an existing account?`;\n  } else {\n    qualifyMessage = `Thanks for your message, ${name}! 😊\\n\\nI'd love to help you better. Could you tell me a bit more about what you're looking for and what your business does?`;\n  }\n}\n\nreturn {\n  json: {\n    ...($json),\n    autoReply: qualifyMessage,\n    shouldReply: true,\n    requiresFollowUp: true\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "4b26367d-1454-410b-a00f-ccc4cd617041",
+        "name": "📊 Log Hot Lead",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1280,
+          240
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "From": "={{ $json.from }}",
+              "Name": "={{ $json.name }}",
+              "Intent": "={{ $json.intent }}",
+              "Reason": "={{ $json.reason }}",
+              "Status": "={{ $json.intent === 'hot_lead' ? 'URGENT' : $json.intent === 'warm_lead' ? 'Follow Up' : $json.intent === 'support' ? 'Support Ticket' : $json.intent === 'needs_qualification' ? 'Qualifying' : 'Ignored' }}",
+              "timestamp": "={{ $json.timestamp }}",
+              "Confidence": "={{ $json.confidence }}",
+              "message id": "={{ $json.messageId }}",
+              "recived at": "={{ $json.receivedAt }}",
+              "Message Type": "={{ $json.messageType }}",
+              "Missing Info": "={{ $json.missingInfo.join(', ') }}",
+              "message body": "={{ $json.messageBody }}",
+              "Question Asked": "={{ $json.nextQuestion }}"
+            },
+            "schema": [
+              {
+                "id": "From",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "From",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message body",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "message body",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "message id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestamp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timestamp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "recived at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "recived at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Intent",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Intent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Confidence",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Confidence",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reason",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Reason",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Message Type",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Message Type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Missing Info",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Missing Info",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Question Asked",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Question Asked",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "From"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit",
+            "cachedResultName": "Leads"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "1575f70e-2c71-4558-9f56-5b45ef1919c4",
+        "name": "📊 Log Warm Lead",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1280,
+          544
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "From": "={{ $json.from }}",
+              "Name": "={{ $json.name }}",
+              "Intent": "={{ $json.intent }}",
+              "Reason": "={{ $json.reason }}",
+              "Status": "Follow Up",
+              "timestamp": "={{ $json.timestamp }}",
+              "Confidence": "={{ $json.confidence }}",
+              "message id": "={{ $json.messageId }}",
+              "recived at": "={{ $json.receivedAt }}",
+              "Message Type": "={{ $json.messageType }}",
+              "Missing Info": "={{ $json.missingInfo.join(', ') }}",
+              "message body": "={{ $json.messageBody }}",
+              "Question Asked": "={{ $json.nextQuestion }}"
+            },
+            "schema": [
+              {
+                "id": "From",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "From",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message body",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "message body",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "message id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestamp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timestamp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "recived at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "recived at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Intent",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Intent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Confidence",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Confidence",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reason",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Reason",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Message Type",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Message Type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Missing Info",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Missing Info",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Question Asked",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Question Asked",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "From"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit",
+            "cachedResultName": "Leads"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "2429189f-2536-4ffc-b8a0-445188b2ac7e",
+        "name": "📊 Log Support",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1264,
+          848
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "From": "={{ $json.from }}",
+              "Name": "={{ $json.name }}",
+              "Intent": "={{ $json.intent }}",
+              "Reason": "={{ $json.reason }}",
+              "Status": "Support Ticket",
+              "timestamp": "={{ $json.timestamp }}",
+              "Confidence": "={{ $json.confidence }}",
+              "message id": "={{ $json.messageId }}",
+              "recived at": "={{ $json.receivedAt }}",
+              "Message Type": "={{ $json.messageType }}",
+              "Missing Info": "={{ $json.missingInfo.join(', ') }}",
+              "message body": "={{ $json.messageBody }}",
+              "Question Asked": "={{ $json.nextQuestion }}"
+            },
+            "schema": [
+              {
+                "id": "From",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "From",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message body",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "message body",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "message id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "timestamp",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "timestamp",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "recived at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "recived at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Intent",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Intent",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Confidence",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Confidence",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Reason",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Reason",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Message Type",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Message Type",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Missing Info",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Missing Info",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Question Asked",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Question Asked",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "From"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit",
+            "cachedResultName": "Leads"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "73ef34e9-abd8-42af-bf67-9397e07ab590",
+        "name": "📅 Book Meeting (Hot)",
+        "type": "n8n-nodes-base.googleCalendar",
+        "position": [
+          1536,
+          240
+        ],
+        "parameters": {
+          "end": "={{ $now.plus(3, 'hours').toISO() }}",
+          "start": "={{ $now.plus(2, 'hours').toISO() }}",
+          "calendar": {
+            "__rl": true,
+            "mode": "list",
+            "value": "user@example.com",
+            "cachedResultName": "Your Calendar"
+          },
+          "additionalFields": {
+            "description": "=Intent: {{ $json.Intent }}\nReason: {{ $json.Reason }}\nMessage: {{ $json['message body'] }}\nPhone: {{ $json.From }}",
+            "conferenceDataUi": {
+              "conferenceDataValues": {
+                "conferenceSolution": "={{ $json.Name }}"
+              }
+            }
+          },
+          "useDefaultReminders": false
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "d841bc4d-8899-4900-8d41-da02a603c192",
+        "name": "📅 Book Meeting (Warm)",
+        "type": "n8n-nodes-base.googleCalendar",
+        "position": [
+          1536,
+          544
+        ],
+        "parameters": {
+          "end": "={{ $now.plus(5, 'hours').toISO() }}",
+          "start": "={{ $now.plus(4, 'hours').toISO() }}",
+          "calendar": {
+            "__rl": true,
+            "mode": "list",
+            "value": "user@example.com",
+            "cachedResultName": "Your Calendar"
+          },
+          "additionalFields": {
+            "description": "=Intent: {{ $json.Intent }}\nReason: {{ $json.Reason }}\nMessage: {{ $json['message body'] }}\nPhone: {{ $json.From }}",
+            "conferenceDataUi": {
+              "conferenceDataValues": {
+                "conferenceSolution": "={{ $json.Name }}"
+              }
+            }
+          },
+          "useDefaultReminders": false
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "df2d4acc-320b-427b-a5eb-ef212eeb8642",
+        "name": "📱 Send Meeting (Hot)",
+        "type": "n8n-nodes-base.whatsApp",
+        "position": [
+          1744,
+          240
+        ],
+        "webhookId": "00000000-0000-0000-0000-000000000001",
+        "parameters": {
+          "textBody": "=📅 *Your meeting is confirmed!*\n\nHi {{ $('🎯 Extract Classification').item.json.name }},\n\n🔥 *Priority Booking*\n\n*Join the call:*\n{{ $json.hangoutLink }}\n\n*Scheduled for:*\n{{ $now.plus(2, 'hours').toFormat('MMMM dd, yyyy at hh:mm a') }}\n\nOur team is excited to discuss your requirements! 🚀\n\n_Reply \"RESCHEDULE\" if this time doesn't work._",
+          "operation": "send",
+          "phoneNumberId": "YOUR_PHONE_NUMBER_ID",
+          "additionalFields": {},
+          "recipientPhoneNumber": "={{ $('🎯 Extract Classification').item.json.from }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "3487d76d-3869-43fd-9d73-d53e624570c7",
+        "name": "📱 Send Meeting (Warm)",
+        "type": "n8n-nodes-base.whatsApp",
+        "position": [
+          1760,
+          544
+        ],
+        "webhookId": "00000000-0000-0000-0000-000000000002",
+        "parameters": {
+          "textBody": "=📅 *Meeting Invitation*\n\nHi {{ $('🎯 Extract Classification').item.json.name }},\n\nWe'd love to show you how we can help your business!\n\n*Join the call:*\n{{ $json.hangoutLink }}\n\n*Scheduled for:*\n{{ $now.plus(4, 'hours').toFormat('MMMM dd, yyyy at hh:mm a') }}\n\nLooking forward to chatting! 😊\n\n_Reply \"RESCHEDULE\" if this time doesn't work._",
+          "operation": "send",
+          "phoneNumberId": "YOUR_PHONE_NUMBER_ID",
+          "additionalFields": {},
+          "recipientPhoneNumber": "={{ $('🎯 Extract Classification').item.json.from }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "0bf7972f-c4b6-4c7d-b16a-c8f50e2a2e0f",
+        "name": "📱 Send Support Reply",
+        "type": "n8n-nodes-base.whatsApp",
+        "position": [
+          1504,
+          848
+        ],
+        "webhookId": "00000000-0000-0000-0000-000000000003",
+        "parameters": {
+          "textBody": "={{ $('💬 Support Reply').item.json.autoReply }}",
+          "operation": "send",
+          "phoneNumberId": "YOUR_PHONE_NUMBER_ID",
+          "additionalFields": {},
+          "recipientPhoneNumber": "={{ $('🎯 Extract Classification').item.json.from }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "781ca17f-0ece-4f8f-988a-a0d15eed09fa",
+        "name": "📱 Send Qualifying Question",
+        "type": "n8n-nodes-base.whatsApp",
+        "position": [
+          1312,
+          1184
+        ],
+        "webhookId": "00000000-0000-0000-0000-000000000004",
+        "parameters": {
+          "textBody": "={{ $('🧠 Smart Qualification Reply').item.json.autoReply }}",
+          "operation": "send",
+          "phoneNumberId": "YOUR_PHONE_NUMBER_ID",
+          "additionalFields": {},
+          "recipientPhoneNumber": "={{ $('🎯 Extract Classification').item.json.from }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "9a25bf7e-7b7f-4ced-8bf6-0399b6ab19fa",
+        "name": "WhatsApp Trigger",
+        "type": "n8n-nodes-base.whatsAppTrigger",
+        "position": [
+          -224,
+          752
+        ],
+        "webhookId": "00000000-0000-0000-0000-000000000005",
+        "parameters": {
+          "options": {},
+          "updates": [
+            "messages"
+          ]
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2bf8bb35-71d6-472e-93e0-d28447b61f00",
+        "name": "Simple Memory",
+        "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+        "position": [
+          352,
+          976
+        ],
+        "parameters": {
+          "sessionKey": "=={{ $json.waId }}",
+          "sessionIdType": "customKey",
+          "contextWindowLength": 20
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "a40b2a98-3117-4bb3-9205-3b95e526a3e3",
+        "name": "Ollama Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+        "position": [
+          224,
+          976
+        ],
+        "parameters": {
+          "model": "minimax-m2:cloud",
+          "options": {}
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "486ef98e-c024-4fcf-a17a-676557641b8f",
+        "name": "Sticky Note - Main Overview",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1024,
+          -96
+        ],
+        "parameters": {
+          "width": 680,
+          "height": 860,
+          "content": "## Auto-respond and classify WhatsApp leads with AI and log to Google Sheets\n\nAutomatically classify incoming WhatsApp messages using AI, route them by intent, log every interaction to Google Sheets, book Google Calendar meetings, and send smart auto-replies — all without lifting a finger.\n\n### How it works\n1. **WhatsApp Trigger** receives incoming messages and filters out bot/status messages to prevent infinite loops.\n2. **AI Agent** (Ollama or any LLM) classifies each message into: 🔥 Hot Lead, 🌡️ Warm Lead, 🛠️ Support, or ❓ Needs Qualification.\n3. **Smart Router** sends each intent down a dedicated path.\n4. **Hot & Warm Leads** get logged to Google Sheets, a Google Calendar meeting is auto-booked with a Meet link, and the customer receives the booking via WhatsApp.\n5. **Support** tickets are logged and a confirmation reply is sent.\n6. **Needs Qualification** triggers a smart follow-up question via WhatsApp. Conversation memory ensures the AI re-classifies correctly when the user replies with more context.\n\n### Setup steps\n1. Connect your **WhatsApp Business API** credentials (Meta Cloud API).\n2. Connect **Google Sheets** OAuth and set your spreadsheet ID in all three logging nodes.\n3. Connect **Google Calendar** OAuth and select your calendar in both booking nodes.\n4. Configure your **LLM** endpoint (Ollama, OpenAI, or any supported model).\n5. Update `BOT_NUMBERS` in the Parse node and `phoneNumberId` in all WhatsApp Send nodes to match your number.\n6. Send a test message to verify the full flow.\n\n### Customization\n- Swap the AI model for OpenAI, Anthropic, or any n8n-supported LLM.\n- Edit auto-reply templates in each Reply code node to match your brand.\n- Adjust meeting booking times (Hot = 2hrs, Warm = 4hrs).\n- Add Slack or email notifications by branching from the Sheet nodes."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "80ba5bf8-26e0-4da4-bd64-361489771a2e",
+        "name": "Sticky Note - Incoming",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -240,
+          640
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 384,
+          "height": 212,
+          "content": "## 📥 Incoming Message\nWhatsApp Trigger receives and parses incoming messages"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2b0afded-214d-480c-b853-ba23e604002c",
+        "name": "Sticky Note - AI",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          192,
+          640
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 448,
+          "height": 196,
+          "content": "## 🤖 AI Classification + Extraction\nAI classifies intent, then robust parser extracts the result"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6f0aada9-17f8-4914-92b8-66eccf2a2071",
+        "name": "Sticky Note - Router",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          688,
+          624
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 280,
+          "height": 396,
+          "content": "## 🔀 Intent Routing\nRoutes to the correct path based on AI classification"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "98e417e7-eb5d-4165-81e9-3ab0427b3511",
+        "name": "Sticky Note - Hot",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          992,
+          144
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 1024,
+          "height": 240,
+          "content": "## 🔥 Hot Lead Path\nReply → Log to Sheets → Book meeting → Send Google Meet invite"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "eaf2a4ed-9999-428e-be10-617c3878162b",
+        "name": "Sticky Note - Warm",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1008,
+          464
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 1008,
+          "height": 240,
+          "content": "## 🌡️ Warm Lead Path\nReply → Log to Sheets → Book meeting → Send Google Meet invite"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b9f1c25b-a26d-4f86-a389-244f81e2d6d6",
+        "name": "Sticky Note - Support",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1008,
+          752
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 1024,
+          "height": 256,
+          "content": "## 🛠️ Support Path\nReply → Log to Sheets → Send ticket confirmation via WhatsApp"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a9454d6c-a33d-4cdc-ae12-c796f31e2a88",
+        "name": "Sticky Note - Qualify",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1008,
+          1088
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 488,
+          "height": 256,
+          "content": "## ❓ Qualification Path\nSmart follow-up question via WhatsApp. Memory ensures re-classification on reply."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b7761232-2733-4579-aaff-ffd1a0c0f139",
+        "name": "Sticky Note - Warning",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -496,
+          992
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 376,
+          "content": "## ⚠️ Update Bot Number\nChange the `BOT_NUMBERS` array in the Parse node to match your WhatsApp Business phone number ID. This prevents infinite loops from the bot replying to itself."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {
+      "WhatsApp Trigger": [
+        {
+          "json": {
+            "field": "messages",
+            "contacts": [
+              {
+                "wa_id": "1234567890",
+                "profile": {
+                  "name": "Jane Doe"
+                }
+              }
+            ],
+            "messages": [
+              {
+                "id": "wamid.EXAMPLE_MESSAGE_ID_HERE",
+                "from": "1234567890",
+                "text": {
+                  "body": "One week 3 k usd"
+                },
+                "type": "text",
+                "timestamp": "1771070919"
+              }
+            ],
+            "metadata": {
+              "phone_number_id": "YOUR_PHONE_NUMBER_ID",
+              "display_phone_number": "15551234567"
+            },
+            "messaging_product": "whatsapp"
+          },
+          "pairedItem": {
+            "item": 0
+          }
+        }
+      ]
+    },
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "63d1fe57-de3f-4a9a-9a3c-34a8c1e17930",
+    "connections": {
+      "Simple Memory": {
+        "ai_memory": [
+          [
+            {
+              "node": "🤖 AI Intent Classifier",
+              "type": "ai_memory",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WhatsApp Trigger": {
+        "main": [
+          [
+            {
+              "node": "🔧 Parse WhatsApp Message",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📊 Log Support": {
+        "main": [
+          [
+            {
+              "node": "📱 Send Support Reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ollama Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "🤖 AI Intent Classifier",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📊 Log Hot Lead": {
+        "main": [
+          [
+            {
+              "node": "📅 Book Meeting (Hot)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "💬 Support Reply": {
+        "main": [
+          [
+            {
+              "node": "📊 Log Support",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📊 Log Warm Lead": {
+        "main": [
+          [
+            {
+              "node": "📅 Book Meeting (Warm)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "💬 Hot Lead Reply": {
+        "main": [
+          [
+            {
+              "node": "📊 Log Hot Lead",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "💬 Warm Lead Reply": {
+        "main": [
+          [
+            {
+              "node": "📊 Log Warm Lead",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🔀 Route by Intent": {
+        "main": [
+          [
+            {
+              "node": "💬 Hot Lead Reply",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "💬 Warm Lead Reply",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "💬 Support Reply",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "🧠 Smart Qualification Reply",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📅 Book Meeting (Hot)": {
+        "main": [
+          [
+            {
+              "node": "📱 Send Meeting (Hot)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "📅 Book Meeting (Warm)": {
+        "main": [
+          [
+            {
+              "node": "📱 Send Meeting (Warm)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🤖 AI Intent Classifier": {
+        "main": [
+          [
+            {
+              "node": "🎯 Extract Classification",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🎯 Extract Classification": {
+        "main": [
+          [
+            {
+              "node": "🔀 Route by Intent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🔧 Parse WhatsApp Message": {
+        "main": [
+          [
+            {
+              "node": "🤖 AI Intent Classifier",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🧠 Smart Qualification Reply": {
+        "main": [
+          [
+            {
+              "node": "📱 Send Qualifying Question",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 29,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.switch": {
+        "count": 1
+      },
+      "n8n-nodes-base.whatsApp": {
+        "count": 4
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 9
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 3
+      },
+      "n8n-nodes-base.googleCalendar": {
+        "count": 2
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.whatsAppTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOllama": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.memoryBufferWindow": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Tony Adijah",
+    "username": "togo",
+    "bio": "Automating the boring stuff so you don’t have to. 🤖 📐 n8n Workflows & Templates 🚀 Helping you save 10+ hours a week. 👇 Grab free workflows below.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/tony-adijah-965903131/"
+    ],
+    "avatar": "https://gravatar.com/avatar/e2635712dd01a1dae354636c1a925735948ada9697e9d55824f24558a3eab732?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.switch",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "If",
+            "Path",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Branch",
+            "Case"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Switch",
+        "color": "#506000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "Switch",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 317,
+      "icon": "file:googleCalendar.svg",
+      "name": "n8n-nodes-base.googleCalendar",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-host-virtual-coffee-breaks-with-n8n/",
+                "icon": "☕️",
+                "label": "How to host virtual coffee breaks with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automation for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/tracking-time-spent-in-meetings-with-google-calendar-twilio-and-n8n/",
+                "icon": "🗓",
+                "label": "Tracking Time Spent in Meetings With Google Calendar, Twilio, and n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlecalendar/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Calendar"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgODIiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZD0iTTYxLjA1MiAxOC45NDdIMTguOTQ3djQyLjEwNWg0Mi4xMDV6Ii8+PHBhdGggZmlsbD0iI2VhNDMzNSIgZD0iTTYxLjA1MyA4MCA4MCA2MS4wNTNINjEuMDUzeiIvPjxwYXRoIGZpbGw9IiNmYmJjMDQiIGQ9Ik04MCAxOC45NDdINjEuMDUzdjQyLjEwNUg4MHoiLz48cGF0aCBmaWxsPSIjMzRhODUzIiBkPSJNNjEuMDUyIDYxLjA1M0gxOC45NDdWODBoNDIuMTA1eiIvPjxwYXRoIGZpbGw9IiMxODgwMzgiIGQ9Ik0wIDYxLjA1M3YxMi42MzJBNi4zMTQgNi4zMTQgMCAwIDAgNi4zMTYgODBoMTIuNjMyVjYxLjA1M3oiLz48cGF0aCBmaWxsPSIjMTk2N2QyIiBkPSJNODAgMTguOTQ3VjYuMzE2QTYuMzE0IDYuMzE0IDAgMCAwIDczLjY4NSAwSDYxLjA1M3YxOC45NDd6Ii8+PHBhdGggZmlsbD0iIzQyODVmNCIgZD0iTTYxLjA1MyAwSDYuMzE2QTYuMzE0IDYuMzE0IDAgMCAwIDAgNi4zMTZ2NTQuNzM3aDE4Ljk0N1YxOC45NDdoNDIuMTA1VjB6TTI3LjU4NCA1MS42MTFjLTEuNTc0LTEuMDYzLTIuNjYzLTIuNjE2LTMuMjU4LTQuNjY4bDMuNjUzLTEuNTA1cS40OTggMS44OTQgMS43MzcgMi45MzdjMS4yMzkgMS4wNDMgMS44MjEgMS4wMzcgMi45ODkgMS4wMzdxMS43OTIgMCAzLjA3OS0xLjA4OWMxLjI4Ny0xLjA4OSAxLjI5LTEuNjUzIDEuMjktMi43NzRhMy40NCAzLjQ0IDAgMCAwLTEuMzU4LTIuODExYy0uOTA1LS43MjctMi4wNDItMS4wODktMy40LTEuMDg5aC0yLjExMXYtMy42MTZIMzIuMXExLjc1MiAwIDIuOTUzLS45NDdjMS4yMDEtLjk0NyAxLjItMS40OTUgMS4yLTIuNTk1cTAtMS40NjctMS4wNzQtMi4zNDJjLTEuMDc0LS44NzUtMS42MjEtLjg3OS0yLjcyMS0uODc5cS0xLjYxLS4wMDItMi41NTguODU4Yy0uOTQ4Ljg2LTEuMTA2IDEuMzAxLTEuMzc5IDIuMTExbC0zLjYxNi0xLjUwNWMuNDc5LTEuMzU4IDEuMzU4LTIuNTU4IDIuNjQ3LTMuNTk1czIuOTM3LTEuNTU4IDQuOTM3LTEuNTU4cTIuMjItLjAwMiAzLjk4OS44NThjMS43NjkuODYgMi4xMDUgMS4zNjggMi43NzQgMi4zNzlzMSAyLjE1MyAxIDMuNDE2cTAgMS45MzItLjkzMiAzLjI3NGMtLjkzMiAxLjM0Mi0xLjM4NCAxLjU3OS0yLjI4OSAyLjA1OHYuMjE2YTYuOTUgNi45NSAwIDAgMSAyLjkzNyAyLjI4OXExLjE0NiAxLjUzOCAxLjE0NyAzLjY4NGMuMDAxIDIuMTQ2LS4zNjMgMi43MTEtMS4wODkgMy44MzJzLTEuNzMyIDIuMDA1LTMuMDA1IDIuNjQ3Yy0xLjI3OS42NDItMi43MTYuOTY4LTQuMzExLjk2OC0xLjg0Ny4wMDUtMy41NTMtLjUyNi01LjEyNi0xLjU4OXptMjIuNDM3LTE4LjEyNi00LjAxIDIuOS0yLjAwNS0zLjA0MiA3LjE5NS01LjE4OWgyLjc1OHYyNC40NzloLTMuOTM3VjMzLjQ4NHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Calendar",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 827,
+      "icon": "file:whatsapp.svg",
+      "name": "n8n-nodes-base.whatsApp",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.whatsapp/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/whatsapp/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "WhatsApp Business Cloud"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0ibTQuODY4IDQzLjMwMyAyLjY5NC05LjgzNWExOC45NCAxOC45NCAwIDAgMS0yLjUzNS05LjQ4OUM1LjAzMiAxMy41MTQgMTMuNTQ4IDUgMjQuMDE0IDVhMTguODcgMTguODcgMCAwIDEgMTMuNDMgNS41NjZBMTguODcgMTguODcgMCAwIDEgNDMgMjMuOTk0Yy0uMDA0IDEwLjQ2NS04LjUyMiAxOC45OC0xOC45ODYgMTguOThoLS4wMDhhMTkgMTkgMCAwIDEtOS4wNzMtMi4zMTF6Ii8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQuODY4IDQzLjgwM2EuNS41IDAgMCAxLS40ODItLjYzMWwyLjYzOS05LjYzNmExOS41IDE5LjUgMCAwIDEtMi40OTctOS41NTZDNC41MzIgMTMuMjM4IDEzLjI3MyA0LjUgMjQuMDE0IDQuNWExOS4zNyAxOS4zNyAwIDAgMSAxMy43ODQgNS43MTNBMTkuMzYgMTkuMzYgMCAwIDEgNDMuNSAyMy45OTRjLS4wMDQgMTAuNzQxLTguNzQ2IDE5LjQ4LTE5LjQ4NiAxOS40OGExOS41NCAxOS41NCAwIDAgMS05LjE0NC0yLjI3N2wtOS44NzUgMi41ODlhLjUuNSAwIDAgMS0uMTI3LjAxNyIvPjxwYXRoIGZpbGw9IiNjZmQ4ZGMiIGQ9Ik0yNC4wMTQgNWExOC44NyAxOC44NyAwIDAgMSAxMy40MyA1LjU2NkExOC44NyAxOC44NyAwIDAgMSA0MyAyMy45OTRjLS4wMDQgMTAuNDY1LTguNTIyIDE4Ljk4LTE4Ljk4NiAxOC45OGgtLjAwOGExOSAxOSAwIDAgMS05LjA3My0yLjMxMWwtMTAuMDY1IDIuNjQgMi42OTQtOS44MzVhMTguOTQgMTguOTQgMCAwIDEtMi41MzUtOS40ODlDNS4wMzIgMTMuNTE0IDEzLjU0OCA1IDI0LjAxNCA1bTAtMUMxMi45OTggNCA0LjAzMiAxMi45NjIgNC4wMjcgMjMuOTc5YTIwIDIwIDAgMCAwIDIuNDYxIDkuNjIyTDMuOTAzIDQzLjA0YS45OTguOTk4IDAgMCAwIDEuMjE5IDEuMjMxbDkuNjg3LTIuNTRhMjAgMjAgMCAwIDAgOS4xOTcgMi4yNDRjMTEuMDI0IDAgMTkuOTktOC45NjMgMTkuOTk1LTE5Ljk4QTE5Ljg2IDE5Ljg2IDAgMCAwIDM4LjE1MyA5Ljg2IDE5Ljg3IDE5Ljg3IDAgMCAwIDI0LjAxNCA0Ii8+PHBhdGggZmlsbD0iIzQwYzM1MSIgZD0iTTM1LjE3NiAxMi44MzJhMTUuNjcgMTUuNjcgMCAwIDAtMTEuMTU3LTQuNjI2Yy04LjcwNCAwLTE1Ljc4MyA3LjA3Ni0xNS43ODcgMTUuNzc0YTE1Ljc0IDE1Ljc0IDAgMCAwIDIuNDEzIDguMzk2bC4zNzYuNTk3LTEuNTk1IDUuODIxIDUuOTczLTEuNTY2LjU3Ny4zNDJhMTUuNzUgMTUuNzUgMCAwIDAgOC4wMzIgMi4xOTloLjAwNmM4LjY5OCAwIDE1Ljc3Ny03LjA3NyAxNS43OC0xNS43NzZhMTUuNjggMTUuNjggMCAwIDAtNC42MTgtMTEuMTYxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE5LjI2OCAxNi4wNDVjLS4zNTUtLjc5LS43MjktLjgwNi0xLjA2OC0uODItLjI3Ny0uMDEyLS41OTMtLjAxMS0uOTA5LS4wMTFzLS44My4xMTktMS4yNjUuNTk0LTEuNjYxIDEuNjIyLTEuNjYxIDMuOTU2IDEuNyA0LjU5IDEuOTM3IDQuOTA2IDMuMjgyIDUuMjU5IDguMTA0IDcuMTYxYzQuMDA3IDEuNTggNC44MjMgMS4yNjYgNS42OTMgMS4xODdzMi44MDctMS4xNDcgMy4yMDItMi4yNTUuMzk1LTIuMDU3LjI3Ny0yLjI1NWMtLjExOS0uMTk4LS40MzUtLjMxNi0uOTA5LS41NTRzLTIuODA3LTEuMzg1LTMuMjQyLTEuNTQzLS43NTEtLjIzNy0xLjA2OC4yMzhjLS4zMTYuNDc0LTEuMjI1IDEuNTQzLTEuNTAyIDEuODU5cy0uNTU0LjM1Ny0xLjAyOC4xMTktMi4wMDItLjczOC0zLjgxNS0yLjM1NGMtMS40MS0xLjI1Ny0yLjM2Mi0yLjgxLTIuNjM5LTMuMjg1LS4yNzctLjQ3NC0uMDMtLjczMS4yMDgtLjk2OC4yMTMtLjIxMy40NzQtLjU1NC43MTItLjgzMS4yMzctLjI3Ny4zMTYtLjQ3NS40NzQtLjc5MXMuMDc5LS41OTQtLjA0LS44MzFjLS4xMTctLjIzOC0xLjAzOS0yLjU4NC0xLjQ2MS0zLjUyMiIvPjwvc3ZnPg=="
+      },
+      "displayName": "WhatsApp Business Cloud",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1151,
+      "icon": "file:ollama.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatollama/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Ollama Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNDEuMzMzIiBoZWlnaHQ9IjM0MS4zMzMiIHZlcnNpb249IjEuMCIgdmlld0JveD0iMCAwIDE4MSAyNTYiPjxnIGZpbGw9IiM3RDdEODciPjxwYXRoIGQ9Ik0zNy43IDE5LjVjLTUuMiAxLjgtOC4zIDQuOS0xMS43IDExLjYtNC41IDguOS02LjIgMTkuMi01LjggMzUuNWwuMyAxNC4yLTUuOCA2LjFjLTE0LjggMTUuNS0xOC41IDM4LjctOS4yIDU3LjRsMy40IDYuOS0yIDQuNGMtMy40IDguMi01IDE2LjQtNSAyNi4zIDAgMTAuOCAxLjggMTkgNS44IDI2LjJsMi42IDQuOC0yLjEgNC45Yy0xLjIgMi43LTIuNiA3LjEtMy4yIDkuOC0xLjQgNi4yLTEuNSAyMi4xLS4xIDI1LjcgMSAyLjYgMS40IDIuNyA3LjYgMi43IDcuMyAwIDcgLjQgNS4zLTguNi0xLjUtOC4yLjItMTguOCA0LjItMjYuNiAzLjctNyAzLjgtMTAuNC41LTE0LjgtNC43LTYuNC02LjgtMTMuNi02LjktMjQtLjEtMTAuMyAxLjQtMTYgNi42LTI2LjEgMy4xLTYuMSAyLjktOC43LTEtMTIuMi0xLjEtMS0zLjEtNC4yLTQuMy03LTEuOS00LjItMi40LTYuOS0yLjMtMTQuMiAwLTExLjQgMi41LTE4LjMgOS41LTI2IDctNy42IDE0LjItMTEgMjMuOS0xMS4yIDQuMSAwIDcuOC0uMiA4LjItLjIuNC0uMSAxLjctMi4yIDIuOS00LjcgMy01LjkgOS42LTExLjkgMTYuNy0xNS4yIDQuOS0yLjMgNy0yLjcgMTQuNy0yLjcgNy45IDAgOS43LjQgMTQuOSAyLjkgNi44IDMuMyAxMy4zIDkuNCAxNS45IDE0LjggMSAyIDIuMyA0LjEgMyA0LjUuNi40IDQuNi44IDguNy44IDYuNy4xIDguMy41IDE0IDMuNiAxMi4zIDYuOCAxOS4zIDE4LjcgMTkuMyAzMy40LjEgNi43LS40IDktMi43IDE0LjItMS42IDMuNS0zLjUgNi44LTQuMyA3LjUtMy40IDIuOC0zLjUgNS44LS41IDExLjcgNS4yIDEwLjEgNi43IDE1LjggNi42IDI2LjEtLjEgMTAuNC0yLjIgMTcuNi02LjkgMjQtMy4zIDQuNC0zLjIgNy44LjUgMTQuOCA0IDcuOCA1LjcgMTguNCA0LjIgMjYuNi0xLjcgOS0yIDguNiA1LjMgOC42IDYuMiAwIDYuNi0uMSA3LjYtMi43IDEuNC0zLjYgMS4zLTE5LjUtLjEtMjUuNy0uNi0yLjctMi03LjEtMy4yLTkuOGwtMi4xLTQuOSAyLjYtNC44YzcuNi0xMy45IDcuOS0zNS45LjYtNTIuOGwtMi00LjcgMi41LTQuNmM5LjktMTguMyA2LjQtNDMuOS04LjEtNTkuMWwtNS44LTYuMS4zLTE0LjJjLjQtMTYuNC0xLjMtMjYuNi01LjgtMzUuNy02LjQtMTIuNi0xNy4yLTE1LjktMjYuMy03LjktNS40IDQuNy05LjIgMTMuOC0xMi4zIDI5LjgtLjMgMS40LTEgMi4yLTEuNyAxLjgtMTguMi04LTI5LjctOC41LTQ0LjMtMi4xTDY1IDU0LjlsLS40LTIuMkM2MSAzNC4yIDU2LjEgMjQuMiA0OSAyMC41Yy00LjMtMi4xLTcuNC0yLjQtMTEuMy0xbTcuNyAxNi44YzQuMiA3LjEgOC4xIDMwLjEgNS43IDMzLjYtLjUuOC0zLjEgMS42LTUuOCAxLjgtMi42LjItNi4yLjgtOCAxLjNsLTMuMS44LS43LTQuOWMtLjgtNS45LjItMTcuMiAyLjItMjQuOEMzNy4xIDM4LjQgNDAuNSAzMiA0MiAzMmMuNSAwIDIgMS45IDMuNCA0LjNtOTYuNS0xYzQgNi41IDYuOSAyMy45IDUuNiAzMy42bC0uNyA0LjktMy4xLS44Yy0xLjgtLjUtNS40LTEuMS04LTEuMy0yLjctLjItNS4zLTEtNS44LTEuOC0xLjItMS43LS4zLTE0LjEgMS43LTIyLjkgMS41LTYuNCA1LjctMTUgNy40LTE1IC40IDAgMS44IDEuNSAyLjkgMy4zIi8+PHBhdGggZD0iTTc3LjggMTE5LjljLTcuMyAyLjQtMTEuNiA1LjEtMTYuNSAxMC40LTUuNSA2LTcuNiAxMi03LjEgMjAuMS41IDcuNiAzLjUgMTIuOSAxMC42IDE4LjMgNi4yIDQuNyAxMi43IDYuMyAyNS43IDYuMyAxNy4yIDAgMjUuOC0zLjYgMzIuOS0xMy44IDQuMi01LjkgNC44LTE1LjUgMS42LTIzLTIuOS02LjgtMTEuMS0xNC4zLTE4LjgtMTcuMy04LTMuMS0yMC43LTMuNi0yOC40LTFtMjUuNyAxMGMxNi4xIDcuMSAxOS40IDIzLjIgNi42IDMxLjgtNC45IDMuMy05LjQgNC4zLTE5LjYgNC4zcy0xNC43LTEtMTkuNi00LjNjLTE3LjgtMTItMy4yLTM1LjYgMjEuMS0zNC4zIDMuOS4yIDguNiAxLjIgMTEuNSAyLjUiLz48cGF0aCBkPSJNODMuOCAxNDAuMWMtMi41IDEuNC0yLjIgNC40LjcgNi43IDIgMS42IDIuNCAyLjYgMS45IDQuOS0uNyAzLjYgMS41IDUuOCA1LjEgNC45IDIuMS0uNSAyLjUtMS4yIDIuNS00LjYgMC0yLjkuNS00LjIgMi01IDIuNy0xLjUgMi43LTYuNiAwLTcuNS0xLS4zLTIuOC0uMS00IC41LTEuNC43LTIuNi44LTMuOSAwLTIuMy0xLjItMi4yLTEuMi00LjMuMW0tNDQuMS0xOC45Yy0uOS43LTIuMyAzLTMuMiA1LTIuMSA1LjMtLjEgMTAuMyA0LjcgMTEuNiA0LjMgMS4xIDYgLjYgOS4yLTIuNyA0LTQuMSA0LjMtOC4xIDEuMS0xMS45LTIuMS0yLjUtMy40LTMuMi02LjQtMy4yLTIgMC00LjUuNi01LjQgMS4ybTg5LjggMmMtMy4yIDMuOC0yLjkgNy44IDEuMSAxMS45IDMuMiAzLjMgNC45IDMuOCA5LjIgMi43IDQuOS0xLjMgNi44LTYuMiA0LjYtMTEuOC0xLjktNC43LTMuOC02LTguNy02LTIuNyAwLTQuMS43LTYuMiAzLjIiLz48L2c+PC9zdmc+"
+      },
+      "displayName": "Ollama Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1163,
+      "icon": "fa:database",
+      "name": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.memorybufferwindow/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Memory"
+            ],
+            "Memory": [
+              "For beginners"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Simple Memory"
+      },
+      "iconData": {
+        "icon": "database",
+        "type": "icon"
+      },
+      "displayName": "Simple Memory",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1260,
+      "icon": "file:whatsapp.svg",
+      "name": "n8n-nodes-base.whatsAppTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.whatsapptrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/whatsapp/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "WhatsApp Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0ibTQuODY4IDQzLjMwMyAyLjY5NC05LjgzNWExOC45NCAxOC45NCAwIDAgMS0yLjUzNS05LjQ4OUM1LjAzMiAxMy41MTQgMTMuNTQ4IDUgMjQuMDE0IDVhMTguODcgMTguODcgMCAwIDEgMTMuNDMgNS41NjZBMTguODcgMTguODcgMCAwIDEgNDMgMjMuOTk0Yy0uMDA0IDEwLjQ2NS04LjUyMiAxOC45OC0xOC45ODYgMTguOThoLS4wMDhhMTkgMTkgMCAwIDEtOS4wNzMtMi4zMTF6Ii8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTQuODY4IDQzLjgwM2EuNS41IDAgMCAxLS40ODItLjYzMWwyLjYzOS05LjYzNmExOS41IDE5LjUgMCAwIDEtMi40OTctOS41NTZDNC41MzIgMTMuMjM4IDEzLjI3MyA0LjUgMjQuMDE0IDQuNWExOS4zNyAxOS4zNyAwIDAgMSAxMy43ODQgNS43MTNBMTkuMzYgMTkuMzYgMCAwIDEgNDMuNSAyMy45OTRjLS4wMDQgMTAuNzQxLTguNzQ2IDE5LjQ4LTE5LjQ4NiAxOS40OGExOS41NCAxOS41NCAwIDAgMS05LjE0NC0yLjI3N2wtOS44NzUgMi41ODlhLjUuNSAwIDAgMS0uMTI3LjAxNyIvPjxwYXRoIGZpbGw9IiNjZmQ4ZGMiIGQ9Ik0yNC4wMTQgNWExOC44NyAxOC44NyAwIDAgMSAxMy40MyA1LjU2NkExOC44NyAxOC44NyAwIDAgMSA0MyAyMy45OTRjLS4wMDQgMTAuNDY1LTguNTIyIDE4Ljk4LTE4Ljk4NiAxOC45OGgtLjAwOGExOSAxOSAwIDAgMS05LjA3My0yLjMxMWwtMTAuMDY1IDIuNjQgMi42OTQtOS44MzVhMTguOTQgMTguOTQgMCAwIDEtMi41MzUtOS40ODlDNS4wMzIgMTMuNTE0IDEzLjU0OCA1IDI0LjAxNCA1bTAtMUMxMi45OTggNCA0LjAzMiAxMi45NjIgNC4wMjcgMjMuOTc5YTIwIDIwIDAgMCAwIDIuNDYxIDkuNjIyTDMuOTAzIDQzLjA0YS45OTguOTk4IDAgMCAwIDEuMjE5IDEuMjMxbDkuNjg3LTIuNTRhMjAgMjAgMCAwIDAgOS4xOTcgMi4yNDRjMTEuMDI0IDAgMTkuOTktOC45NjMgMTkuOTk1LTE5Ljk4QTE5Ljg2IDE5Ljg2IDAgMCAwIDM4LjE1MyA5Ljg2IDE5Ljg3IDE5Ljg3IDAgMCAwIDI0LjAxNCA0Ii8+PHBhdGggZmlsbD0iIzQwYzM1MSIgZD0iTTM1LjE3NiAxMi44MzJhMTUuNjcgMTUuNjcgMCAwIDAtMTEuMTU3LTQuNjI2Yy04LjcwNCAwLTE1Ljc4MyA3LjA3Ni0xNS43ODcgMTUuNzc0YTE1Ljc0IDE1Ljc0IDAgMCAwIDIuNDEzIDguMzk2bC4zNzYuNTk3LTEuNTk1IDUuODIxIDUuOTczLTEuNTY2LjU3Ny4zNDJhMTUuNzUgMTUuNzUgMCAwIDAgOC4wMzIgMi4xOTloLjAwNmM4LjY5OCAwIDE1Ljc3Ny03LjA3NyAxNS43OC0xNS43NzZhMTUuNjggMTUuNjggMCAwIDAtNC42MTgtMTEuMTYxIi8+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE5LjI2OCAxNi4wNDVjLS4zNTUtLjc5LS43MjktLjgwNi0xLjA2OC0uODItLjI3Ny0uMDEyLS41OTMtLjAxMS0uOTA5LS4wMTFzLS44My4xMTktMS4yNjUuNTk0LTEuNjYxIDEuNjIyLTEuNjYxIDMuOTU2IDEuNyA0LjU5IDEuOTM3IDQuOTA2IDMuMjgyIDUuMjU5IDguMTA0IDcuMTYxYzQuMDA3IDEuNTggNC44MjMgMS4yNjYgNS42OTMgMS4xODdzMi44MDctMS4xNDcgMy4yMDItMi4yNTUuMzk1LTIuMDU3LjI3Ny0yLjI1NWMtLjExOS0uMTk4LS40MzUtLjMxNi0uOTA5LS41NTRzLTIuODA3LTEuMzg1LTMuMjQyLTEuNTQzLS43NTEtLjIzNy0xLjA2OC4yMzhjLS4zMTYuNDc0LTEuMjI1IDEuNTQzLTEuNTAyIDEuODU5cy0uNTU0LjM1Ny0xLjAyOC4xMTktMi4wMDItLjczOC0zLjgxNS0yLjM1NGMtMS40MS0xLjI1Ny0yLjM2Mi0yLjgxLTIuNjM5LTMuMjg1LS4yNzctLjQ3NC0uMDMtLjczMS4yMDgtLjk2OC4yMTMtLjIxMy40NzQtLjU1NC43MTItLjgzMS4yMzctLjI3Ny4zMTYtLjQ3NS40NzQtLjc5MXMuMDc5LS41OTQtLjA0LS44MzFjLS4xMTctLjIzOC0xLjAzOS0yLjU4NC0xLjQ2MS0zLjUyMiIvPjwvc3ZnPg=="
+      },
+      "displayName": "WhatsApp Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 37,
+      "name": "Lead Generation"
+    },
+    {
+      "id": 47,
+      "name": "AI Chatbot"
+    }
+  ],
+  "image": []
+}

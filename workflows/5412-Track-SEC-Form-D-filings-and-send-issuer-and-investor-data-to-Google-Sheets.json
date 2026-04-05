@@ -1,0 +1,1901 @@
+{
+  "id": 12851,
+  "name": "Track SEC Form D filings and send issuer and investor data to Google Sheets",
+  "views": 89,
+  "recentViews": 0,
+  "totalViews": 89,
+  "createdAt": "2026-01-20T14:52:20.473Z",
+  "description": "### Who's it for\n\nThis workflow is designed for venture capitalists, private equity professionals, investment analysts, and financial researchers who need to track private securities offerings and fundraising activities in real-time. It's particularly valuable for firms building deal flow pipelines, monitoring competitor fundraising, or conducting private market research.\n\n### What it does\n\nThis automation continuously monitors the SEC's EDGAR database for new Form D filings, which companies file when raising capital through private placements. Every 10 minutes during business hours (Monday-Friday, 6 AM - 9 PM), it checks for new filings, downloads the complete documents, and extracts critical information into a structured Google Sheets database.\n\nThe workflow captures comprehensive details including company name and contact information, key executives and their roles, fund classification, target offering amount, current capital raised, total investor count, sale status, filing dates, and regulatory exemptions being utilized (such as Rule 506(b) or 3(c)(7)).\n\n### How it works\n\nThe workflow operates in five main stages:\n\n**Stage 1 - Feed Monitoring**: A scheduled trigger activates every 10 minutes during business hours, fetching the latest Form D filing feed from the SEC EDGAR system in XML format.\n\n**Stage 2 - Initial Processing**: The XML feed is parsed to extract basic filing metadata including CIK numbers, company names, form types, and document URLs. The system then filters out any previously processed filings using deduplication logic and adds only new filings to your Google Sheet tracking database.\n\n**Stage 3 - Selective Processing**: The workflow identifies unprocessed Form D and Form D/A (amendment) filings that need detailed extraction, filtering out other form types and already-processed entries.\n\n**Stage 4 - Deep Data Extraction**: For each unprocessed filing, the workflow downloads the complete Form D text document, parses the embedded XML structure, and systematically extracts four categories of information: issuer details (company name, address, CIK, jurisdiction, entity type, industry classification), key personnel (executives, directors, promoters with their specific roles), offering information (total offering amount, amount already sold, remaining amount, investor count, accredited investor status), and regulatory details (exemptions claimed, sale status, offering duration).\n\n**Stage 5 - Database Update**: All extracted data is consolidated into a summary format and used to update the corresponding row in your Google Sheet, marking the filing as \"processed\". A wait node introduces a brief delay between document retrievals to comply with SEC rate limiting policies.\n\n### Requirements\n\nTo use this workflow, you'll need:\n\n- A Google Sheet configured with these specific columns: cikNumber, title, formType, filingLinkHtml, filingLinkTxt, updated, companyName, keyExecutive, executiveRole, fundType, targetAmount, amountRaised, investorCount, salesStatus, filingDate, exemptions, status, and comment\n\n- Google Sheets OAuth2 credentials connected in n8n to enable read/write access\n\n- Compliance with SEC EDGAR requirements: you must update the User-Agent headers in both HTTP Request nodes (replacing the placeholder email with your own valid email address as required by SEC's fair access policy)\n\n### Setup instructions\n\n**Step 1**: Create or prepare your Google Sheet with the exact column structure listed in the requirements section. Note your Google Sheet ID from the browser URL.\n\n**Step 2**: In n8n, configure your Google Sheets OAuth2 credentials through the credentials panel. Test the connection to ensure it's working properly.\n\n**Step 3**: Open both Google Sheets nodes in the workflow (\"Add New Filing to Tracking Sheet\" and \"Update Filing Status in Sheet\"). Update the Document ID field with your Google Sheet ID.\n\n**Step 4**: Critical compliance step - Open both HTTP Request nodes (\"Fetch SEC Form D Feed\" and \"Retrieve Form D Document\"). In the headers section, replace `nchoudhary110792@gmail.com` with your actual email address. The SEC requires this for their access logs.\n\n**Step 5**: Test the workflow manually first by clicking \"Execute Workflow\" to ensure everything connects properly and data flows to your sheet correctly.\n\n**Step 6**: Once verified, activate the workflow using the toggle switch. It will now run automatically on the configured schedule.\n\n### Customization options\n\n**Adjust monitoring frequency**: Modify the Schedule Trigger node's cron expression to run more or less frequently. The default `*/10 6-21 * * 1-5` runs every 10 minutes during business hours on weekdays.\n\n**Filter by fund type or size**: Add a Filter (IF) node after \"Consolidate Filing Data\" to only process filings that meet specific criteria (e.g., offerings above $10M, specific fund types like hedge funds or venture capital).\n\n**Add real-time notifications**: Connect a Slack, Discord, or Email node after \"Update Filing Status in Sheet\" to receive instant alerts when high-priority filings are detected (based on criteria you define).\n\n**Enrich with external data**: Add HTTP Request nodes to query APIs like Crunchbase, PitchBook, or LinkedIn to supplement SEC data with additional company intelligence, funding history, or executive backgrounds.\n\n**CRM integration**: Replace or supplement the Google Sheets nodes with connections to your CRM (Salesforce, HubSpot, Pipedrive) to automatically create deal records or update company profiles when relevant filings appear.\n\n**Historical analysis**: Add a Set node to calculate metrics like month-over-month filing volume, average raise sizes by industry, or track specific companies' filing patterns over time.\n\n**Multi-sheet organization**: Use Router nodes to send different filing types to separate sheets (e.g., venture capital funds vs. hedge funds vs. real estate offerings) for easier analysis.",
+  "workflow": {
+    "meta": {
+      "instanceId": "8d41476c63702cd0f2be55363b48153c5d4820bb18197ca147e7be50ef236112",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "47cd563b-454a-452c-be87-d687b7430594",
+        "name": "Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1744,
+          256
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "*/10 6-21 * * 1-5"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "d709c9a0-5711-469a-844d-9590a13342e3",
+        "name": "Extract Key Personnel",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -832,
+          752
+        ],
+        "parameters": {
+          "jsCode": "const xmlContent = $('Parse JSON and Extract SEC Document').first().json.rawXml;\n\n// Extract all related persons\nconst relatedPersonsRegex = /<relatedPersonInfo>([\\s\\S]*?)<\\/relatedPersonInfo>/g;\nconst personnel = [];\n\nlet match;\nwhile ((match = relatedPersonsRegex.exec(xmlContent)) !== null) {\n  const personXml = match[1];\n  \n  const firstName = personXml.match(/<firstName>(.*?)<\\/firstName>/)?.[1];\n  const lastName = personXml.match(/<lastName>(.*?)<\\/lastName>/)?.[1];\n  const clarification = personXml.match(/<relationshipClarification>(.*?)<\\/relationshipClarification>/)?.[1];\n  \n  // Extract all relationships for this person\n  const relationshipRegex = /<relationship>(.*?)<\\/relationship>/g;\n  const relationships = [];\n  let relMatch;\n  while ((relMatch = relationshipRegex.exec(personXml)) !== null) {\n    relationships.push(relMatch[1]);\n  }\n  \n  // Handle company entities vs individuals\n  const name = firstName === '-' ? lastName : `${firstName} ${lastName}`;\n  \n  personnel.push({\n    name: name,\n    roles: relationships,\n    clarification: clarification || null,\n    type: firstName === '-' ? 'Entity' : 'Individual'\n  });\n}\n\nreturn [{\n  json: {\n    keyPersonnel: personnel\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c18e8863-7e28-422a-a36b-b13a4f9480bf",
+        "name": "Extract Offering Financial Details",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -608,
+          752
+        ],
+        "parameters": {
+          "jsCode": "const xmlContent = $('Parse JSON and Extract SEC Document').first().json.rawXml;\n\n// Extract financial information\nconst totalOffering = xmlContent.match(/<totalOfferingAmount>(.*?)<\\/totalOfferingAmount>/)?.[1];\nconst totalSold = xmlContent.match(/<totalAmountSold>(.*?)<\\/totalAmountSold>/)?.[1];\nconst totalRemaining = xmlContent.match(/<totalRemaining>(.*?)<\\/totalRemaining>/)?.[1];\nconst totalInvestors = xmlContent.match(/<totalNumberAlreadyInvested>(.*?)<\\/totalNumberAlreadyInvested>/)?.[1];\nconst hasNonAccredited = xmlContent.match(/<hasNonAccreditedInvestors>(.*?)<\\/hasNonAccreditedInvestors>/)?.[1];\nconst yetToOccur = xmlContent.match(/<yetToOccur>(.*?)<\\/yetToOccur>/)?.[1];\nconst moreThanOneYear = xmlContent.match(/<moreThanOneYear>(.*?)<\\/moreThanOneYear>/)?.[1];\n\n// Extract exemptions\nconst exemptionRegex = /<item>(.*?)<\\/item>/g;\nconst exemptions = [];\nlet exemptionMatch;\nwhile ((exemptionMatch = exemptionRegex.exec(xmlContent)) !== null) {\n  exemptions.push(exemptionMatch[1]);\n}\n\n// Format currency function\nconst formatCurrency = (amount) => {\n  if (amount === 'Indefinite' || amount === '0' || !amount) {\n    return amount === 'Indefinite' ? 'Indefinite' : '$0';\n  }\n  return new Intl.NumberFormat('en-US', {\n    style: 'currency',\n    currency: 'USD',\n    minimumFractionDigits: 0\n  }).format(parseInt(amount));\n};\n\nreturn [{\n  json: {\n    offeringDetails: {\n      totalOfferingAmount: totalOffering,\n      totalAmountSold: formatCurrency(totalSold),\n      totalRemaining: totalRemaining,\n      numberOfInvestors: totalInvestors,\n      allAccreditedInvestors: hasNonAccredited === 'false',\n      exemptionsUsed: exemptions.map(e => {\n        if (e === '06b') return 'Rule 506(b)';\n        if (e === '3C') return 'Investment Company Act Section 3(c)';\n        if (e === '3C.7') return 'Section 3(c)(7)';\n        return e;\n      }),\n      saleStatus: yetToOccur === 'true' ? 'Not yet commenced' : 'Active',\n      offeringDuration: moreThanOneYear === 'false' ? 'Less than one year' : 'More than one year'\n    }\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "83a62bab-d2a5-4caf-912f-17ae4b43d584",
+        "name": "Parse JSON and Extract SEC Document",
+        "type": "n8n-nodes-base.code",
+        "onError": "continueRegularOutput",
+        "position": [
+          -1280,
+          752
+        ],
+        "parameters": {
+          "jsCode": "// Parse the input data structure\nconst inputData = $input.all()[0].json;\nlet docText;\n\nconst filingLinkTxt = $(\"Process Filings Batch\").first().json;\n\n// Handle different input formats\nif (Array.isArray(inputData)) {\n  docText = inputData[0].data;\n} else if (inputData.data) {\n  docText = inputData.data;\n} else {\n  docText = inputData.body || inputData;\n}\n\n// Extract basic document info\nconst xmlMatch = docText.match(/<XML>([\\s\\S]*?)<\\/XML>/);\nif (!xmlMatch) {\n  throw new Error('No XML content found');\n}\n\nconst xmlContent = xmlMatch[1];\n\nreturn [{\n  json: {\n    rawXml: xmlContent,\n    filingDate: docText.match(/FILED AS OF DATE:\\s*(\\d+)/)?.[1],\n    accessionNumber: docText.match(/ACCESSION NUMBER:\\s*([^\\n]+)/)?.[1]?.trim(),\n    submissionType: docText.match(/CONFORMED SUBMISSION TYPE:\\s*([^\\n]+)/)?.[1]?.trim(),\n    filingLinkTxt: filingLinkTxt.filingLinkTxt\n  }\n}];"
+        },
+        "notesInFlow": false,
+        "typeVersion": 2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "232301b1-ecab-40fe-b535-c544233c5e76",
+        "name": "Fetch SEC Form D Feed",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -1520,
+          256
+        ],
+        "parameters": {
+          "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&CIK=&type=D&company=&dateb=&owner=include&start=0&count=40&output=atom",
+          "options": {},
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Nick Automations user@example.com"
+              },
+              {
+                "name": "Accept-Encoding",
+                "value": "gzip, deflate"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "bc802f11-052b-42f4-8d66-1c043948aa75",
+        "name": "Parse XML Feed",
+        "type": "n8n-nodes-base.xml",
+        "position": [
+          -1296,
+          256
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c940154e-1f71-4691-8db3-ceefc6b84597",
+        "name": "Transform Feed Entries",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1072,
+          256
+        ],
+        "parameters": {
+          "jsCode": "// Extract the entries array\nconst entries = $('Parse XML Feed').first().json.feed.entry;\n\n// Map each entry to a flat object\nreturn entries.map(entry => {\n  // Best method: Extract CIK from title (in parentheses)\n  const titleMatch = entry.title.match(/\\((\\d{10})\\)/);\n  const cikNumber = titleMatch ? titleMatch[1].replace(/^0+/, '') : '';\n  \n  // Get the HTML link\n  const htmlLink = entry.link.href;\n  \n  // Convert to TXT link by:\n  // 1. Removing \"-index.htm\" at the end\n  // 2. Adding \".txt\" extension\n  const txtLink = htmlLink.replace('-index.htm', '.txt');\n  \n  return {\n    cikNumber: cikNumber || '',\n    title: entry.title,\n    formType: entry.category.term,\n    filingLinkHtml: htmlLink,\n    filingLinkTxt: txtLink,\n    updated: entry.updated,\n    status: \"\"\n  };\n});"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "de02ee8d-7fa0-4e7a-86e2-1e0c572f8296",
+        "name": "Filter Previously Processed Filings",
+        "type": "n8n-nodes-base.removeDuplicates",
+        "position": [
+          -848,
+          256
+        ],
+        "parameters": {
+          "options": {
+            "historySize": 1000000
+          },
+          "operation": "removeItemsSeenInPreviousExecutions",
+          "dedupeValue": "={{ $json.filingLinkTxt }}"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d4dda878-4eee-4678-92c9-8effebf76bc7",
+        "name": "Add New Filing to Tracking Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -624,
+          256
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "title": "={{ $json.title }}",
+              "status": "={{ $json.status }}",
+              "updated": "={{ $json.updated.toDateTime().format('yyyy-MM-dd') }}",
+              "formType": "={{ $json.formType }}",
+              "cikNumber": "={{ $json.cikNumber }}",
+              "filingLinkTxt": "={{ $json.filingLinkTxt }}",
+              "filingLinkHtml": "={{ $json.filingLinkHtml }}"
+            },
+            "schema": [
+              {
+                "id": "cikNumber",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "cikNumber",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "title",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "title",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "formType",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "formType",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "filingLinkHtml",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "filingLinkHtml",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "filingLinkTxt",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "filingLinkTxt",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "updated",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "updated",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "companyName",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "companyName",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "keyExecutive",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "keyExecutive",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "executiveRole",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "executiveRole",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "fundType",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "fundType",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "targetAmount",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "targetAmount",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "amountRaised",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "amountRaised",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "investorCount",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "investorCount",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "salesStatus",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "salesStatus",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "filingDate",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "filingDate",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "exemptions",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "exemptions",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "comment",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "comment",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1VoGfVpk1mMrqKIc5hsO7peYuLx0SwhsbW7uUeYJCmrU/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1VoGfVpk1mMrqKIc5hsO7peYuLx0SwhsbW7uUeYJCmrU",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1VoGfVpk1mMrqKIc5hsO7peYuLx0SwhsbW7uUeYJCmrU/edit?usp=drivesdk",
+            "cachedResultName": "SEC Data"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "[Naveen]Google Sheets account"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "cf3aa200-c9ca-4013-bfca-104e1e210fc5",
+        "name": "Filter Unprocessed Form D Filings",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -400,
+          256
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "9474efbb-620f-4107-b529-b4b5a991fc55",
+                "operator": {
+                  "type": "string",
+                  "operation": "empty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.status }}",
+                "rightValue": ""
+              },
+              {
+                "id": "a6be67cf-39b3-4286-b91a-9e9ccf1ae5d0",
+                "operator": {
+                  "type": "string",
+                  "operation": "regex"
+                },
+                "leftValue": "={{ $json.formType }}",
+                "rightValue": "^D(/A)?$"
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "33de9328-23c9-4bf4-9ad4-f8395c47088d",
+        "name": "Process Filings Batch",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -1760,
+          608
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "088a9f5e-f571-4938-bb37-f7c5e5076194",
+        "name": "Retrieve Form D Document",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -1504,
+          752
+        ],
+        "parameters": {
+          "url": "={{ $json.filingLinkTxt }}",
+          "options": {
+            "response": {
+              "response": {}
+            }
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "iRocket VC user@example.com"
+              },
+              {
+                "name": "Accept-Encoding",
+                "value": "gzip, deflate"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "58faa687-8356-448b-b92d-eb6c5ef776a2",
+        "name": "Parse Issuer Details",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1056,
+          752
+        ],
+        "parameters": {
+          "jsCode": "const xmlContent = $input.first().json.rawXml;\n\n// Extract company details\nconst companyName = xmlContent.match(/<entityName>(.*?)<\\/entityName>/)?.[1];\nconst cik = xmlContent.match(/<cik>(.*?)<\\/cik>/)?.[1];\nconst street1 = xmlContent.match(/<street1>(.*?)<\\/street1>/)?.[1];\nconst street2 = xmlContent.match(/<street2>(.*?)<\\/street2>/)?.[1];\nconst city = xmlContent.match(/<city>(.*?)<\\/city>/)?.[1];\nconst state = xmlContent.match(/<stateOrCountry>([^<]*)<\\/stateOrCountry>/)?.[1];\nconst zipCode = xmlContent.match(/<zipCode>(.*?)<\\/zipCode>/)?.[1];\nconst phone = xmlContent.match(/<issuerPhoneNumber>(.*?)<\\/issuerPhoneNumber>/)?.[1];\nconst jurisdiction = xmlContent.match(/<jurisdictionOfInc>(.*?)<\\/jurisdictionOfInc>/)?.[1];\nconst yearOfInc = xmlContent.match(/<value>(\\d{4})<\\/value>/)?.[1];\nconst entityType = xmlContent.match(/<entityType>(.*?)<\\/entityType>/)?.[1];\n\n// Extract fund-specific info\nconst industryGroup = xmlContent.match(/<industryGroupType>(.*?)<\\/industryGroupType>/)?.[1];\nconst investmentFundType = xmlContent.match(/<investmentFundType>(.*?)<\\/investmentFundType>/)?.[1];\n\n// Build address\nlet address = street1;\nif (street2) address += `, ${street2}`;\naddress += `, ${city}, ${state} ${zipCode}`;\n\nreturn [{\n  json: {\n    companyInfo: {\n      name: companyName,\n      cik: cik,\n      address: address,\n      phone: phone,\n      jurisdiction: jurisdiction,\n      yearIncorporated: yearOfInc,\n      entityType: entityType,\n      industry: industryGroup,\n      fundType: investmentFundType,\n    }\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ee9cfb77-73b7-4ca5-bc66-742f27cd9248",
+        "name": "Consolidate Filing Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -384,
+          752
+        ],
+        "parameters": {
+          "jsCode": "const companyInfo = $('Parse Issuer Details').all()[0].json.companyInfo;\nconst personnel = $('Extract Key Personnel').all()[0].json.keyPersonnel;\nconst offering = $('Extract Offering Financial Details').all()[0].json.offeringDetails;\nconst docInfo = $('Parse JSON and Extract SEC Document').all()[0].json;\n\n// Separate entities from individuals\nconst individuals = personnel.filter(p => p.type === 'Individual');\nconst entities = personnel.filter(p => p.type === 'Entity');\n\n// Find key executive (prefer CEO, then any Executive Officer)\nlet keyExecutive = '';\nlet executiveRole = '';\n\nif (individuals.length > 0) {\n  // Look for CEO first\n  const ceo = individuals.find(p => \n    p.roles.some(role => \n      role.toLowerCase().includes('chief executive') || \n      role.toLowerCase().includes('ceo')\n    )\n  );\n  \n  if (ceo) {\n    keyExecutive = ceo.name;\n    executiveRole = ceo.roles.find(role => \n      role.toLowerCase().includes('chief executive') || \n      role.toLowerCase().includes('ceo')\n    ) || ceo.roles[0];\n  } else {\n    // If no CEO, take first Executive Officer\n    const execOfficer = individuals.find(p => \n      p.roles.some(role => \n        role.toLowerCase().includes('executive officer')\n      )\n    );\n    \n    if (execOfficer) {\n      keyExecutive = execOfficer.name;\n      executiveRole = execOfficer.roles.find(role => \n        role.toLowerCase().includes('executive officer')\n      ) || execOfficer.roles[0];\n    } else {\n      // If no Executive Officer, take first individual\n      keyExecutive = individuals[0].name;\n      executiveRole = individuals[0].roles[0] || '';\n    }\n  }\n}\n\nreturn [{\n  json: {\n    summary: {\n      filingLinkText: docInfo.filingLinkTxt,\n      companyName: companyInfo.name,\n      keyExecutive: keyExecutive,\n      executiveRole: executiveRole,      \n      fundType: companyInfo.fundType,\n      targetAmount: offering.totalOfferingAmount,\n      amountRaised: offering.totalAmountSold,\n      investorCount: offering.numberOfInvestors,\n      saleStatus: offering.saleStatus,\n      filingDate: docInfo.filingDate,\n      exemptions: offering.exemptionsUsed\n    },\n    fullDetails: {\n      company: companyInfo,\n      executiveTeam: individuals,\n      relatedEntities: entities,\n      offering: offering,\n      document: {\n        filingLinkText: docInfo.filingLinkTxt,\n        accessionNumber: docInfo.accessionNumber,\n        submissionType: docInfo.submissionType,\n        filingDate: docInfo.filingDate\n      }\n    }\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c21ec4dd-89c7-4305-b9b9-78fb4812aec1",
+        "name": "Rate Limit Delay",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          -1232,
+          1152
+        ],
+        "webhookId": "93557849-f25b-42e7-8ffe-70634b45e0ed",
+        "parameters": {},
+        "typeVersion": 1.1
+      },
+      {
+        "id": "0df9ab57-ca28-4109-a862-8a1b7e936e83",
+        "name": "Update Filing Status in Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -1456,
+          1072
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "status": "processed",
+              "fundType": "={{ $json.summary.fundType }}",
+              "exemptions": "={{ $json.summary.exemptions }}",
+              "filingDate": "={{ $json.summary.filingDate }}",
+              "companyName": "={{ $json.summary.companyName }}",
+              "salesStatus": "={{ $json.summary.saleStatus }}",
+              "amountRaised": "={{ $json.summary.amountRaised }}",
+              "keyExecutive": "={{ $json.summary.keyExecutive }}",
+              "targetAmount": "={{ $json.summary.targetAmount }}",
+              "executiveRole": "={{ $json.summary.executiveRole }}",
+              "filingLinkTxt": "={{ $json.summary.filingLinkText }}",
+              "investorCount": "={{ $json.summary.investorCount }}"
+            },
+            "schema": [
+              {
+                "id": "cikNumber",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "cikNumber",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "title",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "title",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "formType",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "formType",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "filingLinkHtml",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "filingLinkHtml",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "filingLinkTxt",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "filingLinkTxt",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "updated",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "updated",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "companyName",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "companyName",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "keyExecutive",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "keyExecutive",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "executiveRole",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "executiveRole",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "fundType",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "fundType",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "targetAmount",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "targetAmount",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "amountRaised",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "amountRaised",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "investorCount",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "investorCount",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "salesStatus",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "salesStatus",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "filingDate",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "filingDate",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "exemptions",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "exemptions",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "status",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "status",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "comment",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "comment",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "filingLinkTxt"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1VoGfVpk1mMrqKIc5hsO7peYuLx0SwhsbW7uUeYJCmrU/edit#gid=0",
+            "cachedResultName": "Summary"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1VoGfVpk1mMrqKIc5hsO7peYuLx0SwhsbW7uUeYJCmrU",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1VoGfVpk1mMrqKIc5hsO7peYuLx0SwhsbW7uUeYJCmrU/edit?usp=drivesdk",
+            "cachedResultName": "SEC Data"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "[Naveen]Google Sheets account"
+          }
+        },
+        "typeVersion": 4.6
+      },
+      {
+        "id": "004a0490-1d70-4df7-b158-3b5357e1bbfc",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2480,
+          496
+        ],
+        "parameters": {
+          "width": 560,
+          "height": 592,
+          "content": "📊 SEC Form D Filing Tracker\n\nThis workflow automatically monitors SEC EDGAR for new Form D filings \n(private securities offerings) and extracts key data to Google Sheets.\n\n🎯 WHO'S IT FOR\nVCs, PE firms, investment analysts tracking private market fundraising\n\n⚙️ HOW IT WORKS\n1. Fetches SEC Form D feed every 10 minutes (business hours)\n2. Filters new filings and logs them to Google Sheets\n3. Retrieves full filing documents for unprocessed entries\n4. Extracts company info, executives, and offering details\n5. Updates Google Sheet with complete data\n\n📋 REQUIREMENTS\n- Google Sheet with tracking columns (see description)\n- Google Sheets OAuth credentials\n- Replace nchoudhary110792@gmail.com with your email in HTTP nodes\n\n⏱️ SCHEDULE\nRuns every 10 minutes, Mon-Fri, 6 AM - 9 PM\n(Customizable via Schedule Trigger node)\n\n💡 TIP: This workflow respects SEC rate limits. The Wait node \nprevents overwhelming the EDGAR system."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "383a80df-e75b-4bbe-a06e-436da0a78942",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1808,
+          32
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 368,
+          "height": 192,
+          "content": "📥 STEP 1: Collect New Filings\n\nFetches the SEC EDGAR atom feed for Form D filings\nand parses the XML response into structured data.\n\nEach entry contains the filing title, CIK number,\nform type, and links to the full document."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5b992091-a18c-401d-be03-22aafd83452d",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -896,
+          16
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 336,
+          "height": 224,
+          "content": "🔍 STEP 2: Filter & Track\n\nTransforms feed entries into clean data objects,\nremoves duplicates based on filing URL, and adds\nnew filings to Google Sheets with empty status.\n\nThis creates a queue for detailed processing."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "580b3675-be3f-4d62-a17a-deecb0af4ec3",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1520,
+          480
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 384,
+          "height": 224,
+          "content": "⚡ STEP 3: Batch Processing\n\nFilters for unprocessed Form D filings (status = empty)\nand processes them in batches to avoid overwhelming\nthe SEC servers.\n\nOnly processes actual Form D and Form D/A (amendments)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5232eea7-84fc-4d14-be2e-00a17812a015",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -848,
+          480
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 448,
+          "height": 224,
+          "content": "🔬 STEP 4: Extract Filing Details\n\nDownloads the full Form D document and parses\nthe XML content to extract:\n\n- Company name, address, CIK, industry\n- Key executives and their roles\n- Offering amount, funds raised, investor count\n- Regulatory exemptions used (e.g., 506(b))"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "25093afa-98e1-42f9-993e-8c17ffb8eac9",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1072,
+          992
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 416,
+          "height": 192,
+          "content": "✅ STEP 5: Update & Rate Limit\n\nConsolidates all extracted data into a summary format,\nupdates the Google Sheet row with complete information,\nand marks status as \"processed\".\n\nThe Wait node adds a delay between filings to comply\nwith SEC's rate limiting requirements."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Parse XML Feed": {
+        "main": [
+          [
+            {
+              "node": "Transform Feed Entries",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Rate Limit Delay": {
+        "main": [
+          [
+            {
+              "node": "Process Filings Batch",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Fetch SEC Form D Feed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Issuer Details": {
+        "main": [
+          [
+            {
+              "node": "Extract Key Personnel",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Key Personnel": {
+        "main": [
+          [
+            {
+              "node": "Extract Offering Financial Details",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch SEC Form D Feed": {
+        "main": [
+          [
+            {
+              "node": "Parse XML Feed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Filings Batch": {
+        "main": [
+          [],
+          [
+            {
+              "node": "Retrieve Form D Document",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Transform Feed Entries": {
+        "main": [
+          [
+            {
+              "node": "Filter Previously Processed Filings",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consolidate Filing Data": {
+        "main": [
+          [
+            {
+              "node": "Update Filing Status in Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Retrieve Form D Document": {
+        "main": [
+          [
+            {
+              "node": "Parse JSON and Extract SEC Document",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Filing Status in Sheet": {
+        "main": [
+          [
+            {
+              "node": "Rate Limit Delay",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Add New Filing to Tracking Sheet": {
+        "main": [
+          [
+            {
+              "node": "Filter Unprocessed Form D Filings",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter Unprocessed Form D Filings": {
+        "main": [
+          [
+            {
+              "node": "Process Filings Batch",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Offering Financial Details": {
+        "main": [
+          [
+            {
+              "node": "Consolidate Filing Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter Previously Processed Filings": {
+        "main": [
+          [
+            {
+              "node": "Add New Filing to Tracking Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse JSON and Extract SEC Document": {
+        "main": [
+          [
+            {
+              "node": "Parse Issuer Details",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 22,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.xml": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.removeDuplicates": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Naveen Choudhary",
+    "username": "n8nstein",
+    "bio": "I create AI-driven n8n workflows that turn repetitive tasks into smooth, hands-off automations. Want to explore an idea? Book a quick consult: https://cal.com/nickchoudhary/30min",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/naveen-choudhary/"
+    ],
+    "avatar": "https://gravatar.com/avatar/6d9ee4873c6912965622290c866bbb3edf795dd73d3c8b16b7c5886db7e59070?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "icon": "fa:file-code",
+      "name": "n8n-nodes-base.xml",
+      "codex": {
+        "data": {
+          "alias": [
+            "Parse"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.xml/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "XML",
+        "color": "#333377"
+      },
+      "iconData": {
+        "icon": "file-code",
+        "type": "icon"
+      },
+      "displayName": "XML",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1238,
+      "icon": "file:removeDuplicates.svg",
+      "name": "n8n-nodes-base.removeDuplicates",
+      "codex": {
+        "data": {
+          "alias": [
+            "Dedupe",
+            "Deduplicate",
+            "Duplicates",
+            "Remove",
+            "Unique",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.removeduplicates/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Remove Duplicates"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjNTRCOEM5IiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGQ9Ik0xMzQuMDk3IDExMWgzOC44Mjl2MzIuNTA4SDEzOC4xNnYzNC42MzVoLTMyLjUwOHYtMzguNjk5YzAtMTUuNzA5IDEyLjczNS0yOC40NDQgMjguNDQ1LTI4LjQ0NG03Ny42NTggMzIuNTA4VjExMWg3Ny42NTd2MzIuNTA4em0xMTYuNDg2IDBWMTExaDc3LjY1OHYzMi41MDh6bTExNi40ODcgMFYxMTFoMzguODI5YzE1LjcxIDAgMjguNDQ1IDEyLjczNSAyOC40NDUgMjguNDQ0djM4LjY5OWgtMzIuNTA4di0zNC42MzV6bTM0Ljc2NiA3My4yMzhoMzIuNTA4djM4LjY5OGMwIDE1LjcxLTEyLjczNSAyOC40NDUtMjguNDQ1IDI4LjQ0NWgtMzguODI5di0zMi41MDhoMzQuNzY2ek0wIDI0NC41MzdDMCAyMjkuMzI5IDEyLjczNSAyMTcgMjguNDQ0IDIxN2gzNDkuNDYxYzE1LjcwOSAwIDI4LjQ0NCAxMi4zMjkgMjguNDQ0IDI3LjUzN3YxMjkuODE1YzAgMTUuMjA4LTEyLjczNSAyNy41MzctMjguNDQ0IDI3LjUzN0gyOC40NDVDMTIuNzM0IDQwMS44ODkgMCAzODkuNTYgMCAzNzQuMzUyeiIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik0wIDBoNTEydjUxMkgweiIvPjwvY2xpcFBhdGg+PC9kZWZzPjwvc3ZnPg=="
+      },
+      "displayName": "Remove Duplicates",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    }
+  ],
+  "image": []
+}

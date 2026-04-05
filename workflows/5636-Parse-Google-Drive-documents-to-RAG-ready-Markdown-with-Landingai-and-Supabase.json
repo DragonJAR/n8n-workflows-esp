@@ -1,0 +1,1650 @@
+{
+  "id": 13244,
+  "name": "Parse Google Drive documents to RAG-ready Markdown with Landing.ai and Supabase cache",
+  "views": 14,
+  "recentViews": 0,
+  "totalViews": 14,
+  "createdAt": "2026-02-06T12:54:48.617Z",
+  "description": "## Make your unstructured large documents LLM ready markdown using LandingAI Document Parsing.\n\n- Automatically watches a Google Drive folder, submits new documents to Landing.ai for parsing, caches processed files in - Supabase to avoid reprocessing, and reliably polls results with retry and timeout handling.\n---\n\n## Use Cases\n- Automated document ingestion for RAG pipelines  \n- Invoice, contract, or report parsing  \n- AI-powered document analysis workflows  \n- Knowledge base ingestion from Google Drive  \n- Preventing duplicate document processing in ETL pipelines  \n---\n\nExternal services:\n- Google Drive\n- Landing.ai\n- Supabase\n---\n\n## Credentials Required\n\n### Required\n- Google Drive OAuth2\n- Landing.ai API (HTTP Bearer Token)\n- Supabase API\n---\n\n## How it works \n\nOnce the pdf land in google drive location it trigger and it convert pdf (even more then 200 pages to LLM ready markdown). \nIt also check in database if the parsing is already done or not, this help to avoid any unnecessary landingAI api call.  \n\n## Setup Instructions\n\n### Step 1: Google Drive\n1. Create or select a folder in Google Drive\n2. Copy the folder ID\n3. Update the **Google Drive Trigger** node with this folder ID\n\n### Step 2: Landing.ai\n1. Create a Landing.ai account\n2. Generate an API key\n3. Add it in n8n as an **HTTP Bearer Auth** credential\n4. Update the `organization-id` header if required\n\n### Step 3: Supabase\n1. Create a Supabase project\n2. Create a table named `landing_parse_cache`\n3. Add fields such as:\n   - `file_id`\n   - `document_name`\n   - `mime_type`\n   - `file_size_bytes`\n   - `job_id`\n   - `job_status`\n   - `markdown`\n   - `uploaded_at`\n   - `workflow_run_id`\n4. Connect Supabase credentials in n8n\n\n## Expected Input\n- A document uploaded into the configured Google Drive folder  \n  (PDF, DOCX, or other supported formats)\n\n---\n\n## Expected Output\n- Parsed markdown content stored in Supabase\n- Metadata including:\n  - File ID\n  - File name\n  - MIME type\n  - File size\n  - Job ID\n  - Processing status\n- Early exit if the document already exists in cache\n\n---\n\n## Error Handling & Edge Cases\n- Cache check to prevent duplicate processing  \n- Retry-based polling for async job completion  \n- Timeout detection for stuck jobs  \n- Large file output URL handling  \n- Detailed logging for debugging and audits  \n\n---\n\n## Customization Ideas\n- Push parsed output to a vector database\n- Trigger Slack or email notifications\n- Store results in cloud storage (S3, GCS)\n- Extend into a RAG or AI agent pipeline\n---\n\n## Categories\n- Document Processing\n- AI & LLM\n- Knowledge Management\n- Automation\n\n---\n\n## Difficulty Level\nAdvanced\n\n\n---\n\nHappy Automating - from Alok",
+  "workflow": {
+    "meta": {
+      "instanceId": "fe4cf822b922bbc95f425fd1a5f50fb2330538b7466df1c048221443979ac3d9",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "ae71b344-7c55-44c4-aa85-0bf7c98b01ed",
+        "name": "Google Drive Trigger",
+        "type": "n8n-nodes-base.googleDriveTrigger",
+        "position": [
+          -4752,
+          1056
+        ],
+        "parameters": {
+          "event": "fileCreated",
+          "options": {},
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          },
+          "triggerOn": "specificFolder",
+          "folderToWatch": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1sRweV-tuSoNts1w9H3bYIb2ps9vfZ-G7",
+            "cachedResultUrl": "https://drive.google.com/drive/folders/1sRweV-tuSoNts1w9H3bYIb2ps9vfZ-G7",
+            "cachedResultName": "n8n-Rag"
+          }
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "ISIWL8vUTCVWzMYb",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a1ddcd25-b6ed-4e7f-997d-6f0f893b5579",
+        "name": "Download File",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          -4512,
+          1056
+        ],
+        "parameters": {
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json[\"id\"] }}"
+          },
+          "options": {},
+          "operation": "download"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "ISIWL8vUTCVWzMYb",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "58bfad03-641b-435b-b82b-9c0d3e7e6cfa",
+        "name": "Build Metadata",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -4256,
+          1056
+        ],
+        "parameters": {
+          "jsCode": "/**\n * BUILD METADATA — CANONICAL SHAPE\n * This node defines the contract for the rest of the workflow\n */\n\n// Prefer Drive-reported size, fall back to binary metadata if needed\nconst fileSize =\n  Number($json.size) ||\n  Number($binary?.data?.fileSize) ||\n  null;\n\nconsole.log('=== BUILD METADATA ===' );\nconsole.log('File ID:', $json.id);\nconsole.log('File Name:', $json.name);\nconsole.log('File Size:', fileSize);\n\nreturn {\n  json: {\n    // Canonical fields used everywhere downstream\n    file_id: $json.id,\n    document_name: $json.name,\n    mime_type: $json.mimeType,\n    file_size_bytes: fileSize,\n    drive_modified_time: $json.modifiedTime || null,\n    drive_created_time: $json.createdTime || null\n  },\n  binary: $binary\n};\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "837cba7e-cbfa-46e3-a41c-0af41cb9c79c",
+        "name": "Check Cache",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          -4064,
+          1408
+        ],
+        "parameters": {
+          "limit": 1,
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "file_id",
+                "keyValue": "={{$json.file_id}}",
+                "condition": "eq"
+              }
+            ]
+          },
+          "tableId": "landing_parse_cache",
+          "operation": "getAll"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "6b6A4hi8qkszv0yK",
+            "name": "Supabase account 2"
+          }
+        },
+        "typeVersion": 1,
+        "continueOnFail": true,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "91528ec2-6093-416b-92a5-b815fccaeef8",
+        "name": "Debug Cache Results",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -3872,
+          1408
+        ],
+        "parameters": {
+          "jsCode": "\nconst metadata = $items('Build Metadata')[0].json;\nconst fileId = metadata.file_id;\n\nconsole.log('=== CHECKING CACHE ===');\nconsole.log('File ID to check:', fileId);\n\n// Get the Supabase result from the previous node\nconst supabaseResults = $items('Check Cache');\n\nconsole.log('Supabase node returned:', supabaseResults.length, 'items');\nconsole.log('Full Supabase response:', JSON.stringify(supabaseResults, null, 2));\n\nlet cacheHit = false;\nlet cacheRecord = null;\n\nif (supabaseResults && supabaseResults.length > 0) {\n  const result = supabaseResults[0].json;\n  console.log('First result:', JSON.stringify(result, null, 2));\n  \n  // Check if this is a real record with data\n  if (result && typeof result === 'object') {\n    const keys = Object.keys(result);\n    console.log('Keys in result:', keys);\n    \n    if (keys.length > 0 && result.file_id) {\n      cacheHit = true;\n      cacheRecord = result;\n      console.log('✅ CACHE HIT - Found record with file_id:', result.file_id);\n    } else if (keys.length === 0) {\n      console.log('❌ CACHE MISS - Empty object returned');\n    } else {\n      console.log('❌ CACHE MISS - No file_id in result');\n    }\n  }\n} else {\n  console.log('❌ CACHE MISS - No results from Supabase');\n}\n\nconsole.log('Final cache_hit decision:', cacheHit);\n\nreturn {\n  json: {\n    ...metadata,\n    cache_hit: cacheHit,\n    cache_record: cacheRecord,\n    debug_supabase_length: supabaseResults.length,\n    debug_raw_response: supabaseResults.length > 0 ? supabaseResults[0].json : null\n  },\n  binary: $items('Build Metadata')[0].binary\n};\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ccffb457-d7c9-42db-b844-2f2c76f8b634",
+        "name": "If Cache Exists",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -3664,
+          1408
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "3e925fb1-714c-4732-93d3-adadd20bef11",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $items('Check Cache')[0]?.json?.file_id }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "43498f50-76e1-4306-9250-676af4a6472f",
+        "name": "STOP — Cached",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -3504,
+          1216
+        ],
+        "parameters": {
+          "jsCode": "console.log('✅ WORKFLOW STOPPED - File already in cache');\nconsole.log('File:', $json.document_name);\nconsole.log('File ID:', $json.file_id);\n\nreturn $input.all();"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "1618f07d-4cbf-417a-9398-158d1f430783",
+        "name": "Submit to Landing.ai",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -3296,
+          1424
+        ],
+        "parameters": {
+          "url": "https://api.va.landing.ai/v1/ade/parse/jobs",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "contentType": "multipart-form-data",
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "document",
+                "parameterType": "formBinaryData",
+                "inputDataFieldName": "data"
+              },
+              {
+                "name": "model",
+                "value": "dpt-2-latest"
+              },
+              {
+                "name": "split_by",
+                "value": "page"
+              }
+            ]
+          },
+          "genericAuthType": "httpBearerAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "organization-id",
+                "value": "=t74be7bbi3yr"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "dhpcG0ZiStGdcOaX",
+            "name": "landing-ai"
+          }
+        },
+        "typeVersion": 4
+      },
+      {
+        "id": "7b0eac38-d28d-4688-aa43-2d1e15735d9e",
+        "name": "Merge Metadata + Job",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          -3184,
+          1072
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {},
+          "combineBy": "combineByPosition"
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "5292d205-eae3-4bc8-8df2-8d757a35941c",
+        "name": "Init Loop State",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -3008,
+          1264
+        ],
+        "parameters": {
+          "jsCode": "/**\n * COMBINE METADATA + JOB ID\n * Merge file metadata with the Landing.ai job_id\n */\n\nconst metadata = $items('Debug Cache Results')[0].json;\nconst jobResponse = $items('Submit to Landing.ai')[0].json;\n\nconsole.log('=== MERGING DATA ===');\nconsole.log('Metadata:', metadata);\nconsole.log('Job Response:', jobResponse);\n\nreturn {\n  json: {\n    // File metadata\n    file_id: metadata.file_id,\n    document_name: metadata.document_name,\n    mime_type: metadata.mime_type,\n    file_size_bytes: metadata.file_size_bytes,\n    \n    // Job info\n    job_id: jobResponse.job_id,\n    \n    // Loop control\n    max_retries: 20,\n    poll_interval_sec: 10,\n    loop_start_time: Date.now(),\n    max_loop_duration_sec: 3600\n  }\n};\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "129dcf01-4e0a-497a-98ee-8ac9edb4d747",
+        "name": "Poll Job Status",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -2448,
+          1056
+        ],
+        "parameters": {
+          "url": "=https://api.va.landing.ai/v1/ade/parse/jobs/{{$json.job_id}}",
+          "options": {},
+          "sendHeaders": true,
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBearerAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpBearerAuth": {
+            "id": "dhpcG0ZiStGdcOaX",
+            "name": "landing-ai"
+          }
+        },
+        "typeVersion": 4
+      },
+      {
+        "id": "e8e00ff9-db14-48d1-9f1a-830f918cadf0",
+        "name": "If Completed",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -2144,
+          1040
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "completed_status",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.status }}",
+                "rightValue": "completed"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2bbc5bd9-b34a-4c8f-acea-679ea867f901",
+        "name": "If Timeout",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -1920,
+          1280
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 1,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "timeout_by_retries",
+                "operator": {
+                  "type": "number",
+                  "operation": "gte"
+                },
+                "leftValue": "={{ $runIndex }}",
+                "rightValue": "={{ $json.max_retries }}"
+              },
+              {
+                "id": "timeout_by_duration",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.is_stuck_loop }}",
+                "rightValue": "true"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "bc3c2ed9-2a88-41d5-a590-517796b347cc",
+        "name": "Save Parse Result",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          -1312,
+          944
+        ],
+        "parameters": {
+          "tableId": "landing_parse_cache",
+          "fieldsUi": {
+            "fieldValues": [
+              {
+                "fieldId": "file_id",
+                "fieldValue": "={{ $('If Cache Exists').item.json.file_id }}"
+              },
+              {
+                "fieldId": "job_status",
+                "fieldValue": "completed"
+              },
+              {
+                "fieldId": "markdown",
+                "fieldValue": "={{ $json.data.markdown }}"
+              },
+              {
+                "fieldId": "uploaded_at",
+                "fieldValue": "={{$now}}"
+              },
+              {
+                "fieldId": "workflow_run_id",
+                "fieldValue": "={{$execution.id}}"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "6b6A4hi8qkszv0yK",
+            "name": "Supabase account 2"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dfef6daa-f3d3-497d-a69e-9552ff320e38",
+        "name": "Log Timeout",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          -1296,
+          1264
+        ],
+        "parameters": {
+          "tableId": "landing_parse_cache",
+          "fieldsUi": {
+            "fieldValues": [
+              {
+                "fieldId": "file_id",
+                "fieldValue": "={{$json.file_id}}"
+              },
+              {
+                "fieldId": "document_name",
+                "fieldValue": "={{$json.document_name}}"
+              },
+              {
+                "fieldId": "mime_type",
+                "fieldValue": "={{$json.mime_type}}"
+              },
+              {
+                "fieldId": "file_size_bytes",
+                "fieldValue": "={{$json.file_size_bytes}}"
+              },
+              {
+                "fieldId": "job_id",
+                "fieldValue": "={{$json.job_id}}"
+              },
+              {
+                "fieldId": "job_status",
+                "fieldValue": "timeout"
+              },
+              {
+                "fieldId": "page_count",
+                "fieldValue": "={{$json.page_count}}"
+              },
+              {
+                "fieldId": "markdown",
+                "fieldValue": "={{$json.markdown}}"
+              },
+              {
+                "fieldId": "failure_reason",
+                "fieldValue": "={{$json.is_stuck_loop ? 'Loop exceeded max duration (' + $json.elapsed_seconds + 's)' : ($json.api_raw?.failure_reason ?? 'Max retries exceeded')}}"
+              },
+              {
+                "fieldId": "source_system",
+                "fieldValue": "landing.ai"
+              },
+              {
+                "fieldId": "uploaded_at",
+                "fieldValue": "={{$now}}"
+              },
+              {
+                "fieldId": "workflow_run_id",
+                "fieldValue": "={{$execution.id}}"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "6b6A4hi8qkszv0yK",
+            "name": "Supabase account 2"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2d1212f3-a11d-4bfa-9e89-2ffa6291744c",
+        "name": "STOP — Success",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1104,
+          944
+        ],
+        "parameters": {
+          "jsCode": "console.log('✅ WORKFLOW COMPLETE - Parse successful');\nconsole.log('File:', $json.document_name);\nconsole.log('Pages:', $json.page_count);\nconsole.log('Job ID:', $json.job_id);\n\nreturn $input.all();"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "37cdc78f-7bc6-451f-a294-778f40d4caf4",
+        "name": "STOP — Timeout",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1072,
+          1264
+        ],
+        "parameters": {
+          "jsCode": "console.log('❌ WORKFLOW FAILED - Parse timeout');\nconsole.log('File:', $json.document_name);\nconsole.log('Retries:', $json.retry_count);\nconsole.log('Elapsed:', $json.elapsed_seconds + 's');\n\nreturn $input.all();"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c3bdb340-189a-4d97-a9f8-d596af91eb34",
+        "name": "check-large-file",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -1920,
+          928
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "95b25c8b-fea9-4f3c-8a79-0102f47a1975",
+                "operator": {
+                  "type": "string",
+                  "operation": "exists",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.output_url }}",
+                "rightValue": "null"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "7b1b831c-4238-49b7-a189-91b3fa1973e8",
+        "name": "HTTP Request1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -1664,
+          656
+        ],
+        "parameters": {
+          "url": "={{ $json.output_url }}",
+          "options": {}
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "aa24e110-5823-45fa-9be8-4fc62b15277a",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -5712,
+          704
+        ],
+        "parameters": {
+          "width": 896,
+          "height": 1632,
+          "content": "## Make your unstructured large documents LLM ready markdown using LandingAI Document Parsing.\n\n- Automatically watches a Google Drive folder, submits new documents to Landing.ai for parsing, caches processed files in - Supabase to avoid reprocessing, and reliably polls results with retry and timeout handling.\n---\n\n## Use Cases\n- Automated document ingestion for RAG pipelines  \n- Invoice, contract, or report parsing  \n- AI-powered document analysis workflows  \n- Knowledge base ingestion from Google Drive  \n- Preventing duplicate document processing in ETL pipelines  \n---\n\nExternal services:\n- Google Drive\n- Landing.ai\n- Supabase\n---\n\n## Credentials Required\n\n### Required\n- Google Drive OAuth2\n- Landing.ai API (HTTP Bearer Token)\n- Supabase API\n---\n\n## How it works \n\nOnce the pdf land in google drive location it trigger and it convert pdf (even more then 200 pages to LLM ready markdown). \nIt also check in database if the parsing is already done or not, this help to avoid any unnecessary landingAI api call.  \n\n## Setup Instructions\n\n### Step 1: Google Drive\n1. Create or select a folder in Google Drive\n2. Copy the folder ID\n3. Update the **Google Drive Trigger** node with this folder ID\n\n### Step 2: Landing.ai\n1. Create a Landing.ai account\n2. Generate an API key\n3. Add it in n8n as an **HTTP Bearer Auth** credential\n4. Update the `organization-id` header if required\n\n### Step 3: Supabase\n1. Create a Supabase project\n2. Create a table named `landing_parse_cache`\n3. Add fields such as:\n   - `file_id`\n   - `document_name`\n   - `mime_type`\n   - `file_size_bytes`\n   - `job_id`\n   - `job_status`\n   - `markdown`\n   - `uploaded_at`\n   - `workflow_run_id`\n4. Connect Supabase credentials in n8n\n\n## Expected Input\n- A document uploaded into the configured Google Drive folder  \n  (PDF, DOCX, or other supported formats)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e7d787ba-ca6a-41d1-843d-9d29e65dc47d",
+        "name": "wait till interval set time",
+        "type": "n8n-nodes-base.wait",
+        "onError": "continueRegularOutput",
+        "position": [
+          -2816,
+          1264
+        ],
+        "webhookId": "0ca3ae07-30cb-4d50-b388-6aab75814b53",
+        "parameters": {
+          "amount": "={{ $json.poll_interval_sec }}"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "dfba2cb1-988c-4c68-9eff-63e201c5ef9a",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -4800,
+          944
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 752,
+          "height": 336,
+          "content": "##  Fetch file from Google drive"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "dd97df20-c80d-4ff1-b660-3489e4d43123",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -4112,
+          1344
+        ],
+        "parameters": {
+          "width": 576,
+          "height": 256,
+          "content": "Check Cache"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e60c91b1-aa45-4640-94b5-552e49f5e33d",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3344,
+          608
+        ],
+        "parameters": {
+          "width": 2576,
+          "height": 1088,
+          "content": "## Get Parse data "
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c9e65414-6724-4508-9426-15c833fc963e",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3344,
+          1712
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 336,
+          "height": 128,
+          "content": "Check how to get api key for landingAI here https://docs.landing.ai/ade/agentic-api-key"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0b157a3e-9599-4841-a87b-cf300d237b7e",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1344,
+          1488
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 400,
+          "height": 192,
+          "content": "## Supabase setup\n\n - Create a **Supabase account** and set up a project.  \n- Create a **bucket** in Supabase (e.g., `test-n8n`).  \n- Get your **Project URL** and **Anon Key** from Supabase.  \n- In n8n, create a **Supabase API Credential** using your keys. "
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "If Timeout": {
+        "main": [
+          [
+            {
+              "node": "Log Timeout",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "wait till interval set time",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Cache": {
+        "main": [
+          [
+            {
+              "node": "Debug Cache Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log Timeout": {
+        "main": [
+          [
+            {
+              "node": "STOP — Timeout",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "If Completed": {
+        "main": [
+          [
+            {
+              "node": "check-large-file",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "If Timeout",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download File": {
+        "main": [
+          [
+            {
+              "node": "Build Metadata",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request1": {
+        "main": [
+          [
+            {
+              "node": "Save Parse Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Metadata": {
+        "main": [
+          [
+            {
+              "node": "Check Cache",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Metadata + Job",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "If Cache Exists": {
+        "main": [
+          [
+            {
+              "node": "STOP — Cached",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Submit to Landing.ai",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Init Loop State": {
+        "main": [
+          [
+            {
+              "node": "wait till interval set time",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Poll Job Status": {
+        "main": [
+          [
+            {
+              "node": "If Completed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "check-large-file": {
+        "main": [
+          [
+            {
+              "node": "HTTP Request1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Save Parse Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Parse Result": {
+        "main": [
+          [
+            {
+              "node": "STOP — Success",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Debug Cache Results": {
+        "main": [
+          [
+            {
+              "node": "If Cache Exists",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Drive Trigger": {
+        "main": [
+          [
+            {
+              "node": "Download File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Metadata + Job": {
+        "main": [
+          [
+            {
+              "node": "Init Loop State",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Submit to Landing.ai": {
+        "main": [
+          [
+            {
+              "node": "Merge Metadata + Job",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "wait till interval set time": {
+        "main": [
+          [
+            {
+              "node": "Poll Job Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 26,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 4
+      },
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.supabase": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.googleDrive": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.googleDriveTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Alok Kumar",
+    "username": "alokkumar",
+    "bio": "I am a Principal Software Engineer based in Ireland with a deep passion for AI and emerging technologies. With extensive experience in designing and implementing scalable software solutions, I focus on leveraging artificial intelligence to solve real-world problems. I enjoy exploring innovative applications of AI, from intelligent automation to data-driven insights, and I’m dedicated to building systems that are both efficient and impactful.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/alokkumarsunny/"
+    ],
+    "avatar": "https://gravatar.com/avatar/4a7b82daca6f3af6e5650483811c5e9d8464b9e64389e34ea2a4d6a04dbd5ae3?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googledrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Drive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 531,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDriveTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.googledrivetrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Google Drive Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 545,
+      "icon": "file:supabase.svg",
+      "name": "n8n-nodes-base.supabase",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.supabase/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/supabase/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Supabase"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDkiIGhlaWdodD0iMTEzIiBmaWxsPSJub25lIj48cGF0aCBmaWxsPSJ1cmwoI2EpIiBkPSJNNjMuNzA4IDExMC4yODRjLTIuODYgMy42MDEtOC42NTggMS42MjgtOC43MjctMi45N2wtMS4wMDctNjcuMjUxaDQ1LjIyYzguMTkgMCAxMi43NTggOS40NiA3LjY2NSAxNS44NzR6Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZmlsbC1vcGFjaXR5PSIuMiIgZD0iTTYzLjcwOCAxMTAuMjg0Yy0yLjg2IDMuNjAxLTguNjU4IDEuNjI4LTguNzI3LTIuOTdsLTEuMDA3LTY3LjI1MWg0NS4yMmM4LjE5IDAgMTIuNzU4IDkuNDYgNy42NjUgMTUuODc0eiIvPjxwYXRoIGZpbGw9IiMzRUNGOEUiIGQ9Ik00NS4zMTcgMi4wNzFjMi44Ni0zLjYwMSA4LjY1Ny0xLjYyOCA4LjcyNiAyLjk3bC40NDIgNjcuMjUxSDkuODNjLTguMTkgMC0xMi43NTktOS40Ni03LjY2NS0xNS44NzV6Ii8+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJhIiB4MT0iNTMuOTc0IiB4Mj0iOTQuMTYzIiB5MT0iNTQuOTc0IiB5Mj0iNzEuODI5IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agc3RvcC1jb2xvcj0iIzI0OTM2MSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzNFQ0Y4RSIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iMzYuMTU2IiB4Mj0iNTQuNDg0IiB5MT0iMzAuNTc4IiB5Mj0iNjUuMDgxIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3AvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1vcGFjaXR5PSIwIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Supabase",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 35,
+      "name": "Document Extraction"
+    },
+    {
+      "id": 48,
+      "name": "AI RAG"
+    }
+  ],
+  "image": []
+}

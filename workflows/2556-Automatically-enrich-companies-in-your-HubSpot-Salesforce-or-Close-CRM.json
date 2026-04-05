@@ -1,0 +1,1311 @@
+{
+  "id": 11928,
+  "name": "Automatically enrich companies in your HubSpot, Salesforce or Close CRM",
+  "views": 51,
+  "recentViews": 0,
+  "totalViews": 51,
+  "createdAt": "2025-12-18T14:31:09.269Z",
+  "description": "This n8n template automatically enriches company records in your CRM using CompanyEnrich and keeps your data up to date without manual work.\n\nThis workflow is ideal for RevOps, Sales Ops, and GTM teams who want cleaner CRM data for segmentation, scoring, and outbound workflows.\n\n## Good to know\n- Company enrichment is performed by domain, so a valid company domain is required.\n- The template includes HubSpot, Salesforce, and Close CRM paths. Disable the CRM nodes you don’t use and remove their connection into the Extract Domain node.\n- The workflow processes companies in batches to avoid rate limits.\n- Enrichment is only applied when the API request is successful.\n\n## How it works\n1. A Schedule Trigger runs the workflow on a recurring basis (weekly by default).\n2. Extracts the domain seeds of the companies for CompanyEnrich enrichment API. Pulls companies from:\n- HubSpot: accounts created/updated within the time window (and can fetch full records if needed)\n- Salesforce: accounts created/updated within the time window (and can fetch full records if needed)\n- Close CRM: leads created within the time window via the Close search endpoint\n3. The company domain is safely extracted, even if stored in different fields.\n4. Each domain is sent to the CompanyEnrich enrichment API.\n5. The workflow checks whether the enrichment request was successful.\n6. Enriched data is mapped into HubSpot-compatible fields.\n7. The corresponding HubSpot company record is updated.\n8. The workflow continues looping until all companies are processed.\n\n\n## How to use\n1. HubSpot\n- Create a HubSpot private app with Company read + write scopes.\n- Add your HubSpot credentials to the HubSpot nodes (get companies + update company).\n\n2. Salesforce\n- Connect your Salesforce account on all Salesforce nodes used in the workflow.\n\n3. Close CRM\n- In the Close CRM node, create a Basic Auth credential.\n- Put your Close CRM API key in the username field.\n- Append a colon: to the end of the API key.\n- Leave the password field empty. ⚠️ Important: If you don’t add: and keep password blank, authentication will fail.\n4. Add your CompanyEnrich API key as an HTTP credential.\n5. Adjust the schedule if you want the workflow to run daily or on-demand.\n6. Make sure your HubSpot companies have a domain set.\n7. Once active, the workflow will keep your company data enriched automatically.\n\n## Requirements\n1. CompanyEnrich API key\n2. n8n instance with HTTP Request node enabled\n3. At least one CRM connection:\n- HubSpot private app token, or\n- Salesforce OAuth, or\n- Close CRM API key (Basic Auth with : rule)\n\n## Customising this workflow\n- Change the schedule to run more frequently or trigger via webhook.\n- Add filters to enrich only specific company segments or pipelines.\n- Map additional enriched fields to custom HubSpot properties.",
+  "workflow": {
+    "id": "1yJTPMbE7n3YfDDf",
+    "meta": {
+      "instanceId": "08f9f428afd234e114ec97ff7f86661df0ddc03847c7df5ade37126368e99491",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Automated CRM enrichment: enrich companies in your CRM with CompanyEnrich",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "482e8b85-415f-43f7-bace-14215bd01fee",
+        "name": "Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -96,
+          336
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "weeks"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "cee018f0-2095-4bd9-bd96-bc21b419efa5",
+        "name": "Extract Domain1",
+        "type": "n8n-nodes-base.function",
+        "position": [
+          432,
+          336
+        ],
+        "parameters": {
+          "functionCode": "let results = [];\n\n// n8n'den gelen her bir ana öğeyi dönüyoruz\nfor (const item of items) {\n  const raw = item.json;\n\n  // Close CRM veriyi 'data' array'i içinde gönderir.\n  // Diğerleri (Salesforce/HubSpot) direkt liste gönderir.\n  // Eğer 'data' varsa onu kullan, yoksa öğeyi bir liste içine al.\n  const records = (raw.data && Array.isArray(raw.data)) ? raw.data : [raw];\n\n  for (const src of records) {\n    const p = src.properties || {};\n\n    // Değer bir objeyse (HubSpot) .value kısmını al, değilse direkt döndür\n    const getValue = (val) => {\n      if (val && typeof val === 'object' && val.hasOwnProperty('value')) {\n        return val.value;\n      }\n      return val;\n    };\n\n    // DOMAIN TESPİTİ\n    const domain =\n      getValue(src.Website) ||      // Salesforce\n      getValue(src.url) ||          // Close CRM\n      getValue(p[\"domain\"]) ||      // HubSpot\n      getValue(p[\"website\"]) ||     // HubSpot Alternatif\n      getValue(src.domain) ||       // Genel\n      getValue(src.website) ||      // Genel\n      \"\";\n\n    // ID TESPİTİ\n    const companyId =\n      getValue(src.Id) ||           // Salesforce\n      getValue(src.id) ||           // Close & HubSpot (Yeni)\n      getValue(src.objectId) ||     // HubSpot (Eski)\n      getValue(p[\"hs_object_id\"]) ||\n      \"\";\n\n    // Eğer ID veya Domain ikisi de boşsa bu kaydı ekleme (temizlik)\n    if (companyId || domain) {\n      results.push({\n        json: {\n          companyId: String(companyId),\n          domain: domain\n        }\n      });\n    }\n  }\n}\n\nreturn results;"
+        },
+        "retryOnFail": false,
+        "typeVersion": 1,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "cae6aae0-ce28-4aec-bb8b-075c72dbe824",
+        "name": "CompanyEnrich - Enrich by Domain1",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          800,
+          400
+        ],
+        "parameters": {
+          "url": "https://api.companyenrich.com/companies/enrich",
+          "options": {},
+          "sendQuery": true,
+          "jsonHeaders": "{\n  \"Authorization\": \"Bearer FO0SxxBFPd6rCQLcyKoTSJ\",        \n  \"Accept\": \"application/json\"\n}\n",
+          "sendHeaders": true,
+          "specifyHeaders": "json",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "domain",
+                "value": "={{ $json.domain }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4
+      },
+      {
+        "id": "82197139-da1c-4634-a1cf-5caf36e7001b",
+        "name": "HubSpot - Update Company1",
+        "type": "n8n-nodes-base.hubspot",
+        "disabled": true,
+        "position": [
+          1152,
+          352
+        ],
+        "parameters": {
+          "resource": "company",
+          "companyId": "={{ $json.companyId }}",
+          "operation": "update",
+          "updateFields": {
+            "city": "={{ $json.location.city.name }}",
+            "name": "={{ $json.name }}",
+            "postalCode": "={{ $json.location.postal_code }}",
+            "websiteUrl": "={{ $json.website }}",
+            "description": "={{ $json.description }}",
+            "phoneNumber": "={{ $json.location.phone }}",
+            "stateRegion": "={{ $json.location.state.name }}",
+            "yearFounded": "={{ $json.founded_year }}",
+            "countryRegion": "={{ $json.location.country.name }}",
+            "streetAddress": "={{ $json.location.address }}",
+            "twitterHandle": "={{ $json.socials.twitter_url }}",
+            "companyDomainName": "={{ $json.domain }}",
+            "linkedInCompanyPage": "={{ $json.socials.linkedin_url }}"
+          },
+          "authentication": "appToken"
+        },
+        "credentials": {
+          "hubspotAppToken": {
+            "id": "SeyWem8zGG489pBy",
+            "name": "HubSpot App Token account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "90bce036-f97a-4ac8-8e57-74e96a471436",
+        "name": "Loop Over Items1",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          608,
+          336
+        ],
+        "parameters": {
+          "options": {
+            "reset": false
+          }
+        },
+        "typeVersion": 3,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "b5baf50d-5f97-4698-94d8-c1af42417726",
+        "name": "Merge1",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          944,
+          352
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {},
+          "combineBy": "combineByPosition"
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "4ff252cf-471a-4f5c-b522-4c146b1c0847",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -752,
+          -160
+        ],
+        "parameters": {
+          "width": 608,
+          "height": 864,
+          "content": "## AI COMPANY ENRICHMENT FOR NEW OR UPDATED HUBSPOT/SALESFORCE COMMPANIES\n\n### 📌 How This Workflow Works?\n1. **Schedule Trigger:** Finds the newly created or updated companies in a set time period.\n2. **Extract Domain:** Extracts the domain seeds of the companies for CompanyEnrich enrichment API.\n3. **Hubspot/SalesForce/Close CRM Update node:** Updates the corresponding company with enriched data if enrichment success is false we log the error\n\n### 🛠️ Before using\nFor HUBSPOT:\n✔ Create an Hubspot private app with company read and write scopes, add your app's credentials for both hubspot nodes.  \n\nFor SALESFORCE:\n✔ Connect your Salesforce account on all the **Salesforce** nodes.\n\nFor Close CRM\n✔ In the Close CRM node, create a Basic Auth credential.\n✔ Enter your Close CRM API key in the username field.\n✔ Add a colon \":\" at the end of the API key.\n✔ Leave the password field empty.\n⚠️ Important:\nYou must append : to the end of your API key and keep the password field blank, otherwise authentication will fail.\n\n✔ Ensure companies have a valid domain (required for enrichment)  \n✔ Create an Company Enrich account and enter your api key to HTTP Request node's header where it says `YOUR_API_KEY`.  \n✔ Map the enriched datas in Hubspot\\Salesforce\\Close CRM Update nodes.\n\n\n### CUSTOMIZATION\n1. **Filters:** Change the time period in schedule trigger and get recently updated companies nodes  \n2. **Fields to Update:** Map the custom company properties in Update companies node\n\n\nFor more customization instructions, check the respective node’s sticky notes."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d7495e07-e349-4e64-b1d2-b13d3f168ee3",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -96,
+          -352
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 640,
+          "height": 1056,
+          "content": "## Schedule Trigger & Extract Domain\n\nControl how far back companies are enriched:\n⚠️ Disable the Crm nodes you do not use\n⚠️ Delete the connection to the EXTRACT DOMAIN NODE for the crm you do not use\n\n1. **Schedule Trigger:**  \n   Set how often the workflow runs.\n\n2. **HubSpot Get Companies node:**  \n   Change the number in `7*24*60*60*1000`.  \n   - `7` = last 7 days  \n   -  Change this number to any value you want (e.g. `1` = last 1 day, `14` = last 14 days)\n\n3. **Salesforce Get Companies node:**  \n   Change the number in `({ days: 7 })`.  \n   - `7` = last 7 days  \n   -  Change this number to any value you want (e.g. `1` = last 1 day, `14` = last 14 days)\n\n4. **Close CRM node:**  \n   Change the number in BODY which is `7*24*60*60*1000`.  \n   - `7` = last 7 days  \n   -  Change this number to any value you want (e.g. `1` = last 1 day, `14` = last 14 days)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "85f63476-9e70-4d9e-af55-9c38a5346961",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          944,
+          64
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 704,
+          "height": 480,
+          "content": "## Update Companies\n\nControl which properties are sent to HubSpot/Salesforce by mapping them in the **HubSpot/Salesforce Update Company** node.\n\n⚠️ Disable the Crm you do not use\n⚠️ Be careful to map **only one value per field** to avoid HubSpot API errors.\n \n📘 Close CRM Mapping Guide\nSince Close CRM is managed via an HTTP Request node, you must map properties manually within the request body using keys like display_name or url. To map Custom Fields, locate their specific API Keys (e.g., custom.cf_XXXX) in Close Settings > Custom Fields and add them to the body JSON and map CompanyEnrich api response to those custom fields key you added.\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6dc4ac02-5b53-44da-a000-c2211b13e684",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          608,
+          176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 288,
+          "height": 368,
+          "content": "## Enrichment Loop\n\nEnter your CompanyEnrich API key in the **HTTP Request** node where it says `YOUR_API_KEY`.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "418263f3-7005-408a-a036-2c3c766e837d",
+        "name": "Get many accounts",
+        "type": "n8n-nodes-base.salesforce",
+        "position": [
+          112,
+          480
+        ],
+        "parameters": {
+          "options": {
+            "conditionsUi": {
+              "conditionValues": [
+                {
+                  "field": "CreatedDate",
+                  "value": "={{ $json.timestamp.toDateTime().minus({ days: 7 }).toISO() }}",
+                  "operation": ">="
+                }
+              ]
+            }
+          },
+          "resource": "account",
+          "operation": "getAll",
+          "returnAll": true
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "KdSV3FOs9ATFvDLl",
+            "name": "Salesforce account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "22cb1134-f52e-4534-a346-ff7325324ffe",
+        "name": "Get an account",
+        "type": "n8n-nodes-base.salesforce",
+        "position": [
+          448,
+          608
+        ],
+        "parameters": {
+          "resource": "account",
+          "accountId": "={{ $json.Id }}",
+          "operation": "get"
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "KdSV3FOs9ATFvDLl",
+            "name": "Salesforce account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "af2856ae-bbff-440d-892a-d687d057774e",
+        "name": "Loop Over Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          272,
+          480
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "52d81ddf-9176-42d6-bb35-f2d65c783c42",
+        "name": "Get recently created/updated companies",
+        "type": "n8n-nodes-base.hubspot",
+        "position": [
+          112,
+          336
+        ],
+        "parameters": {
+          "resource": "company",
+          "operation": "getRecentlyCreatedUpdated",
+          "returnAll": true,
+          "authentication": "appToken",
+          "additionalFields": {
+            "since": "={{ new Date(new Date($json.timestamp).getTime() - 7*24*60*60*1000)\n    .toISOString()\n    .slice(0,10) }}\n"
+          }
+        },
+        "credentials": {
+          "hubspotAppToken": {
+            "id": "SeyWem8zGG489pBy",
+            "name": "HubSpot App Token account"
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "1916face-8796-45ff-9f85-413b781bf926",
+        "name": "Create or update an account",
+        "type": "n8n-nodes-base.salesforce",
+        "disabled": true,
+        "position": [
+          1328,
+          352
+        ],
+        "parameters": {
+          "name": "={{ $json.name }}",
+          "resource": "account",
+          "operation": "upsert",
+          "externalId": "Id",
+          "externalIdValue": "={{ $json.companyId }}",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "KdSV3FOs9ATFvDLl",
+            "name": "Salesforce account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9c571d4e-0ff2-4cf8-b2fb-0faf8cf584d9",
+        "name": "Close CRM",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          112,
+          176
+        ],
+        "parameters": {
+          "url": "https://api.close.com/api/v1/data/search/",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"query\": {\n    \"type\": \"and\",\n    \"queries\": [\n      {\n        \"type\": \"object_type\",\n        \"object_type\": \"lead\"\n      },\n      {\n        \"type\": \"field_condition\",\n        \"field\": {\n          \"type\": \"regular_field\",\n          \"object_type\": \"lead\",\n          \"field_name\": \"date_created\"\n        },\n        \"condition\": {\n          \"type\": \"moment_range\",\n          \"gte\": \"{{ $now.minus({ days: 7 }).toISO() }}\",\n          \"lte\": \"{{ $now.toISO() }}\"\n        }\n      }\n    ]\n  },\n  \"_fields\": {\n    \"lead\": [\"id\", \"display_name\", \"url\"]\n  },\n  \"limit\": 100\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBasicAuth"
+        },
+        "credentials": {
+          "httpBasicAuth": {
+            "id": "QKkOmLC9ZMJKXfxi",
+            "name": "Unnamed credential"
+          },
+          "httpBearerAuth": {
+            "id": "YtYWWxDCWgUGmnq1",
+            "name": "Close crm"
+          }
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "6791efcf-b56e-44ff-8049-12aab7b556ed",
+        "name": "Close Crm Update",
+        "type": "n8n-nodes-base.httpRequest",
+        "disabled": true,
+        "position": [
+          1504,
+          352
+        ],
+        "parameters": {
+          "url": "=https://api.close.com/api/v1/lead/{{ $json.companyId }}/",
+          "method": "PUT",
+          "options": {},
+          "jsonBody": "={\n  \"display_name\": \"{{ $json.name || '' }}\",\n  \"url\": \"{{ $json.website || '' }}\",\n  \"description\": \"{{ $json.description || '' }}\",\n  \"external_id\": \"{{ $json.companyId || '' }}\",\n  \"addresses\": [\n    {\n      \"label\": \"office\",\n      \"address_1\": \"{{ $json.location.address || '' }}\",\n      \"city\": \"{{ $json.location.city.name || '' }}\",\n      \"state\": \"{{ $json.location.state.name || '' }}\",\n      \"zip\": \"{{ $json.location.postal_code || '' }}\",\n      \"country\": \"{{ $json.location.country.name || '' }}\"\n    }\n  ]\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpBasicAuth"
+        },
+        "credentials": {
+          "httpBasicAuth": {
+            "id": "QKkOmLC9ZMJKXfxi",
+            "name": "Unnamed credential"
+          }
+        },
+        "typeVersion": 4.3
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "f6365f28-8bdf-4d59-992b-0e13eb1b1d95",
+    "connections": {
+      "Merge1": {
+        "main": [
+          [
+            {
+              "node": "HubSpot - Update Company1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Loop Over Items1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Create or update an account",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Close Crm Update",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Close CRM": {
+        "main": [
+          [
+            {
+              "node": "Extract Domain1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get an account": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Domain1": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items": {
+        "main": [
+          [
+            {
+              "node": "Extract Domain1",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Get an account",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Close Crm Update": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items1": {
+        "main": [
+          [],
+          [
+            {
+              "node": "CompanyEnrich - Enrich by Domain1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Get many accounts",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Get recently created/updated companies",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Close CRM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get many accounts": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HubSpot - Update Company1": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create or update an account": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "CompanyEnrich - Enrich by Domain1": {
+        "main": [
+          [
+            {
+              "node": "Merge1",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Get recently created/updated companies": {
+        "main": [
+          [
+            {
+              "node": "Extract Domain1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 17,
+    "nodeTypes": {
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.hubspot": {
+        "count": 2
+      },
+      "n8n-nodes-base.function": {
+        "count": 1
+      },
+      "n8n-nodes-base.salesforce": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 2
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "CompanyEnrich",
+    "username": "companyenrich",
+    "bio": "Acess exclusive company data of local and global businesses. Power your products, agentic workflows, and sales operations with fresh, instant company data APIs.",
+    "verified": true,
+    "links": [
+      "https://companyenrich.com"
+    ],
+    "avatar": "https://gravatar.com/avatar/cccba97a74580b46e9539debfadc4bba22cd0362604a2b0dd1bf41b5c54d0043?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 14,
+      "icon": "fa:code",
+      "name": "n8n-nodes-base.function",
+      "codex": {
+        "data": {
+          "alias": [
+            "Code",
+            "Javascript",
+            "Custom Code",
+            "Script",
+            "cpde"
+          ],
+          "details": "The Function node allows you to execute JavaScript in your workflow. Unlike the Function Item node, this node does not operate on incoming node data per-item. Instead, you must iterate over multiple items of incoming data yourself. This can be useful if you're performing data transformation where you want to manipulate the number of items being outputted by the node (i.e. 1 item is inputted in with nested object, 10 items are outputted without any nested objects)",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-host-virtual-coffee-breaks-with-n8n/",
+                "icon": "☕️",
+                "label": "How to host virtual coffee breaks with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/tracking-time-spent-in-meetings-with-google-calendar-twilio-and-n8n/",
+                "icon": "🗓",
+                "label": "Tracking Time Spent in Meetings With Google Calendar, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-error-workflows-in-n8n/",
+                "icon": "🌪",
+                "label": "Creating Error Workflows in n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Function",
+        "color": "#FF9922"
+      },
+      "iconData": {
+        "icon": "code",
+        "type": "icon"
+      },
+      "displayName": "Function",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 76,
+      "icon": "file:hubspot.svg",
+      "name": "n8n-nodes-base.hubspot",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.hubspot/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/hubspot/"
+              }
+            ]
+          },
+          "categories": [
+            "Sales"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HubSpot"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNjIuODgzIDY5Ljg4MyI+PHVzZSB4bGluazpocmVmPSIjYSIgeD0iMi40NDIiIHk9IjIuNDQyIi8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxwYXRoIGZpbGw9IiNmODc2MWYiIGZpbGwtcnVsZT0ibm9uemVybyIgc3Ryb2tlPSJub25lIiBkPSJNNTUuNTA0IDMwLjQwMWExNi4yNiAxNi4yNiAwIDAgMC01LjkwNC01Ljg2NGMtMS44NjUtMS4wODQtMy43OTQtMS43NzMtNS45NzItMi4wN3YtNy43OThhNS43MSA1LjcxIDAgMCAwIDMuNTI1LTUuMzU3IDUuODYgNS44NiAwIDAgMC01Ljg1OS01Ljg4OSA1LjkxIDUuOTEgMCAwIDAtNS45MDggNS44ODljMCAyLjM5MyAxLjI3IDQuNDM0IDMuNDUyIDUuMzU3djcuNzU0YTE3IDE3IDAgMCAwLTUuMTk1IDEuNjMxTDEyLjc2OSA4LjI0N2MuMTQ2LS41NTIuMjczLTEuMTIzLjI3My0xLjcyNEE2LjUyIDYuNTIgMCAwIDAgNi41MTkgMCA2LjUyIDYuNTIgMCAwIDAgMCA2LjUyNGE2LjUyMyA2LjUyMyAwIDAgMCA2LjUyNCA2LjUyNCA2LjQ3IDYuNDcgMCAwIDAgMy4zNS0uOTUybDEuMzY3IDEuMDM1IDE4LjcyNiAxMy41MDFjLS45OTEuOTA4LTEuOTE0IDEuOTQzLTIuNjUxIDMuMTA1LTEuNDk0IDIuMzY4LTIuNDA3IDQuOTcxLTIuNDA3IDcuODEzdi41ODZhMTYuNCAxNi40IDAgMCAwIDEuMDI1IDUuNjQ1QzI2LjUgNDUuMzI0IDI3LjMzIDQ2LjczIDI4LjM2MSA0OGwtNi4yMjEgNi4yMzVhNS4wMSA1LjAxIDAgMCAwLTUuMjk4IDEuMTYyYy0uOTQ3Ljk0Mi0xLjQ4IDIuMjI3LTEuNDc1IDMuNTY1cy41MjcgMi42MTIgMS40NzkgMy41NjQgMi4yMjcgMS40OCAzLjU2NSAxLjQ4YTUgNSAwIDAgMCAzLjU2NS0xLjQ4IDUuMDUgNS4wNSAwIDAgMCAxLjQ3NS0zLjU2NCA1IDUgMCAwIDAtLjIzNC0xLjUxNGw2LjQyNi02LjQyNmExNiAxNiAwIDAgMCAyLjg1NiAxLjU2MyAxNi43IDE2LjcgMCAwIDAgNi42ODUgMS40MDZoLjQzOWExNS43NiAxNS43NiAwIDAgMCA3LjYyNy0xLjkyOSAxNS43NyAxNS43NyAwIDAgMCA1Ljk3Ny01LjYzYzEuNDk5LTIuMzkzIDIuMzE5LTUuMDQ0IDIuMzE5LTcuOTU5di0uMTQ2YzAtMi44NjYtLjY2NC01LjUwOC0yLjA1MS03Ljkzem0tNy44NDcgMTMuNDg3Yy0xLjc0MyAxLjkzOC0zLjc1IDMuMTM1LTYuMDE2IDMuMTM1aC0uNDNjLTEuMjk0IDAtMi41NjQtLjM1Ni0zLjc5OS0xLjAxMWE4LjggOC44IDAgMCAxLTMuMzMtMy4wMzJjLS44OTgtMS4yNy0xLjM4Ny0yLjY1Ni0xLjM4Ny00LjEyNnYtLjQzOWMwLTEuNDQ1LjI3OC0yLjgxNy45NzctNC4xMTEuNzQ3LTEuNDY1IDEuNzU4LTIuNTE1IDMuMTAxLTMuMzg5YTcuNiA3LjYgMCAwIDEgNC4yOTctMS4yOTRoLjE0N2MxLjQxNiAwIDIuNzY5LjI3OCA0LjAzOC45MjhhOC41NiA4LjU2IDAgMCAxIDMuMTc0IDIuODg2IDkuMiA5LjIgMCAwIDEgMS40MjEgNC4wNTNsLjAzNC45MTNjMCAxLjk4Ny0uNzYyIDMuODI4LTIuMjggNS40OTh6Ii8+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "HubSpot",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 2,
+          "name": "Sales"
+        }
+      ]
+    },
+    {
+      "id": 324,
+      "icon": "file:salesforce.svg",
+      "name": "n8n-nodes-base.salesforce",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.salesforce/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/salesforce/"
+              }
+            ]
+          },
+          "categories": [
+            "Sales",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Salesforce"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzUgNTMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwYTFlMCIgZD0iTTMwLjc3NyA1LjY1M2MyLjQtMi40NzYgNS43Mi00LjA0IDkuMzkyLTQuMDQgNC44OTUgMCA5LjEzNiAyLjczMiAxMS40MTIgNi43NzNhMTUuNyAxNS43IDAgMCAxIDYuNDYtMS4zNjZjOC44MjMgMCAxNS45MzcgNy4yIDE1LjkzNyAxNi4wOHMtNy4xNDMgMTYuMDg4LTE1LjkzNyAxNi4wODhjLTEuMDggMC0yLjEzNC0uMTE0LTMuMTMtLjMxM2ExMS42OCAxMS42OCAwIDAgMS0xMC4yIDUuOTc3IDExLjc1IDExLjc1IDAgMCAxLTUuMDk0LTEuMTY3Yy0yLjAyIDQuNzUzLTYuNzQ1IDguMS0xMi4yMzggOC4xLTUuNzIgMC0xMC42MTUtMy42MTQtMTIuNDk0LTguNy0uODMzLjE3MS0xLjY4Mi4yNTctMi41MzMuMjU2QzUuNTIyIDQzLjM0MSAwIDM3Ljc2MyAwIDMwLjg0N2ExMi41MiAxMi41MiAwIDAgMSA2LjE3Ni0xMC44MTUgMTQuMSAxNC4xIDAgMCAxLTEuMTk1LTUuNzJDNC45NTUgNi40MzIgMTEuNDE1IDAgMTkuMzI1IDBhMTQuMzQgMTQuMzQgMCAwIDEgMTEuNDQxIDUuNjYzIi8+PHBhdGggZD0ibTEwLjcxMiAyNi44NTYuMzEzLS44MjVjLjA1Ny0uMTQyLjE0Mi0uMDg1LjItLjA1N2wuMjU2LjE3YTMuNTMgMy41MyAwIDAgMCAxLjk2NC41N2MuNjU1IDAgMS4wOC0uMzQyIDEuMDgtLjgyNXYtLjAyOGMwLS41MTItLjYyNi0uNy0xLjM2Ni0uOTRsLS4xNy0uMDU3Yy0uOTk2LS4yODUtMi4wNzgtLjctMi4wNzgtMS45NjR2LS4wMjhjMC0xLjE5NS45NjgtMi4wNSAyLjM2Mi0yLjA1aC4xNDJjLjgyNSAwIDEuNTk0LjIyOCAyLjE2My41OTguMDU3LjAyOC4xMTQuMDg1LjA4NS4xN2wtLjMxMy44MjVjLS4wNTcuMTQyLS4yLjA1Ny0uMi4wNTdhNC4zIDQuMyAwIDAgMC0xLjkzNS0uNDg0Yy0uNTk4IDAtLjk2OC4zMTMtLjk2OC43NHYuMDI4YzAgLjQ4NC42NTUuNyAxLjM5NS45NGwuMTQyLjAyOGMuOTk2LjMxMyAyLjA1Ljc0IDIuMDUgMS45NjR2LjAyOGMwIDEuMy0uOTQgMi4xMDYtMi40NDggMi4xMDYtLjc0IDAtMS40NS0uMTE0LTIuMjItLjUxMi0uMTQyLS4wODUtLjI4NS0uMTQyLS40MjctLjI1Ni0uMDI4LS4wNTctLjA4NS0uMDg1LS4wMjgtLjJ6bTIyLjIgMCAuMzEzLS44MjVjLjA1Ny0uMTQyLjE3LS4wODUuMi0uMDU3bC4yNTYuMTdhMy41MyAzLjUzIDAgMCAwIDEuOTY0LjU3Yy42NTUgMCAxLjA4LS4zNDIgMS4wOC0uODI1di0uMDI4YzAtLjUxMi0uNjI2LS43LTEuMzY2LS45NGwtLjE3LS4wNTdjLS45OTYtLjI4NS0yLjA3OC0uNy0yLjA3OC0xLjk2NHYtLjAyOGMwLTEuMTk1Ljk2OC0yLjA1IDIuMzYyLTIuMDVoLjE0MmMuODI1IDAgMS41OTQuMjI4IDIuMTYzLjU5OC4wNTcuMDI4LjExNC4wODUuMDg1LjE3bC0uMzEzLjgyNWMtLjA1Ny4xNDItLjIuMDU3LS4yLjA1N2E0LjMgNC4zIDAgMCAwLTEuOTM1LS40ODRjLS41OTggMC0uOTY4LjMxMy0uOTY4Ljc0di4wMjhjMCAuNDg0LjY1NS43IDEuMzk1Ljk0bC4xNDIuMDI4Yy45OTYuMzEzIDIuMDUuNzQgMi4wNSAxLjk2NHYuMDI4YzAgMS4zLS45NCAyLjEwNi0yLjQ0OCAyLjEwNi0uNzQgMC0xLjQ1LS4xMTQtMi4yMi0uNTEyLS4xNDItLjA4NS0uMjg1LS4xNDItLjQyNy0uMjU2IDAtLjA1Ny0uMDU3LS4wODUtLjAyOC0uMnptMTYuNDUtMy45Yy4xMTQuNDI3LjIuODgyLjIgMS4zNjZzLS4wNTcuOTQtLjIgMS4zNjZhMi44IDIuOCAwIDAgMS0uNTcgMS4xIDIuNzUgMi43NSAwIDAgMS0uOTY4Ljc0cS0uNTk3LjI1NS0xLjM2Ni4yNTZjLS43NjkuMDAxLS45NjgtLjA4NS0xLjM2Ni0uMjU2cy0uNy0uNDI3LS45NjgtLjc0YTMgMyAwIDAgMS0uNTctMS4xYy0uMTE1LS40MTctLjItLjg4Mi0uMi0xLjM2NnMuMDU3LS45NC4yLTEuMzY2Yy4xMTQtLjQyNy4zMTMtLjc5Ny41Ny0xLjFhMi43NSAyLjc1IDAgMCAxIC45NjgtLjc0IDMuNCAzLjQgMCAwIDEgMS4zNjYtLjI4NWMuNTEyIDAgLjk2OC4wODUgMS4zNjYuMjg1LjM5OC4xNy43LjQyNy45NjguNzRhMyAzIDAgMCAxIC41NyAxLjFtLTEuMjggMS4zMzhjMC0uNzQtLjE0Mi0xLjMtLjM5OC0xLjcwOHMtLjY4My0uNTk4LTEuMjI0LS41OThjLS41NyAwLS45NjguMi0xLjIyNC41OThzLS4zOTguOTY4LS4zOTggMS43MDguMTQyIDEuMy4zOTggMS43MzZjLjI1Ni4zOTguNjU1LjU5OCAxLjIyNC41OThzLjk2OC0uMiAxLjIyNC0uNTk4Yy4yODUtLjM5OC4zOTgtLjk5Ni4zOTgtMS43MzZtMTEuNjk3IDIuMTM0LjMxMy44NTRjLjAyOC4xMTQtLjA1Ny4xNDItLjA1Ny4xNDItLjQ4NC4yLTEuMTM4LjMxMy0xLjc5My4zMTNxLTEuNjUgMC0yLjUwNC0uOTRjLS44NTQtLjk0LS44NTQtMS40OC0uODU0LTIuNTMzIDAtLjQ4NC4wNTctLjk0LjItMS4zNjZzLjM0Mi0uNzk3LjYyNi0xLjFhMyAzIDAgMCAxIDEuMDI1LS43NCAzLjYgMy42IDAgMCAxIDEuNDIzLS4yODUgOCA4IDAgMCAxIC45MzkuMDU3Yy4yODUuMDU3LjY4My4xNDIuODU0LjIyOC4wMjggMCAuMTE0LjA1Ny4wODUuMTQybC0uMzEzLjg1NGMtLjA1Ny4xNDItLjE0Mi4wODUtLjE0Mi4wODVhNCA0IDAgMCAwLTEuMzM4LS4yYy0uNjI2IDAtMS4xLjItMS4zOTUuNjI2LS4zMTMuMzk4LS40ODQuOTQtLjQ4NCAxLjY4IDAgLjc5Ny4yIDEuMzY2LjU0IDEuNzM2cy44MjUuNTQgMS40NS41NGMuMjU2IDAgLjQ4NC0uMDI4LjY4My0uMDU3cy4zOTgtLjA4NS41OTgtLjE3Yy0uMDI4LjA1Ny4wODUuMDI4LjE0Mi4xNDJ6bTYuNDYtMy43MjhjLjI4NS45NjguMTQyIDEuNzkzLjExNCAxLjg1IDAgLjExNC0uMTE0LjExNC0uMTE0LjExNGgtNC4yOTdjLjAyOC42NTUuMTcgMS4xLjUxMiAxLjQyMy4zMTMuMzEzLjc5Ny41MTIgMS40OC41MTIgMS4wMjUgMCAxLjQ1LS4yIDEuNzY1LS4zMTMgMCAwIC4xMTQtLjAyOC4xNy4wODVsLjI4NS43OTdjLjA1Ny4xNDIgMCAuMTctLjAyOC4yLS4yNTYuMTQyLS45LjQyNy0yLjE2My40MjctLjU5OCAwLTEuMTM4LS4wODUtMS41NjUtLjI1NnMtLjc5Ny0uMzk4LTEuMDgtLjctLjQ4NC0uNjgzLS42MjYtMS4wOGMtLjE0Mi0uNDI3LS4yLS44ODItLjItMS4zNjZzLjA1Ny0uOTQuMi0xLjM2NmMuMTE0LS40MjcuMzEzLS43OTcuNTctMS4xcy41OTgtLjU3Ljk5Ni0uNzRjLjM5OC0uMi44ODItLjI4NSAxLjQyMy0uMjg1LjQ1NSAwIC44ODIuMDg1IDEuMjI0LjI1Ni4yNTYuMTE0LjU0LjMxMy44MjUuNjI2LjE0Mi4xMTQuMzk4LjU0LjUxMi45NHptLTQuMjcuOWgzLjA0NWMtLjAyOC0uMzk4LS4xMTQtLjc0LS4yODUtMS4wMjUtLjI1Ni0uMzk4LS42MjYtLjYyNi0xLjE5NS0uNjI2cy0uOTY4LjIyOC0xLjIyNC42MjZjLS4xNy4yNTYtLjI1Ni41OTgtLjM0MiAxLjAyNXptLTMwLjA4Mi0uOWMuMjg1Ljk2OC4xNDIgMS43OTMuMTQyIDEuODUgMCAuMTE0LS4xMTQuMTE0LS4xMTQuMTE0aC00LjI5N2MuMDI4LjY1NS4xNyAxLjEuNTEyIDEuNDIzLjMxMy4zMTMuNzk3LjUxMiAxLjQ4LjUxMiAxLjAyNSAwIDEuNDUtLjIgMS43NjUtLjMxMyAwIDAgLjExNC0uMDI4LjE3LjA4NWwuMjg1Ljc5N2MuMDU3LjE0MiAwIC4xNy0uMDI4LjItLjI1Ni4xNDItLjkuNDI3LTIuMTYzLjQyNy0uNTk4IDAtMS4xMzgtLjA4NS0xLjU2NS0uMjU2cy0uNzk3LS4zOTgtMS4wOC0uNy0uNDg0LS42ODMtLjYyNi0xLjA4Yy0uMTQyLS40MjctLjItLjg4Mi0uMi0xLjM2NnMuMDU3LS45NC4yLTEuMzY2Yy4xMTQtLjQyNy4zMTMtLjc5Ny41Ny0xLjFzLjU5OC0uNTcuOTk2LS43NGMuMzk4LS4yLjg4Mi0uMjg1IDEuNDIzLS4yODUuNDU1IDAgLjg4Mi4wODUgMS4yMjQuMjU2LjI1Ni4xMTQuNTQuMzEzLjgyNS42MjYuMTE0LjExNC4zOTguNTQuNDg0Ljk0em0tNC4yNy45aDMuMDc0Yy0uMDI4LS4zOTgtLjExNC0uNzQtLjI4NS0xLjAyNS0uMjU2LS4zOTgtLjYyNi0uNjI2LTEuMTk1LS42MjZzLS45NjguMjI4LTEuMjI0LjYyNmMtLjIuMjU2LS4yODUuNTk4LS4zNyAxLjAyNW0tNy41NDItLjIyOC43LjA4NXYtLjE3YzAtLjU3LS4xMTQtLjg1NC0uMzQyLTEuMDI1cy0uNTk4LS4yODUtMS4wNTMtLjI4NWMwIDAtMS4wNTMgMC0xLjg3OC40MjctLjAyOC4wMjgtLjA1Ny4wMjgtLjA1Ny4wMjhzLS4xMTQuMDI4LS4xNDItLjA1N2wtLjMxMy0uODI1Yy0uMDU3LS4xMTQuMDI4LS4xNy4wMjgtLjE3LjM5OC0uMzEzIDEuMy0uNDg0IDEuMy0uNDg0YTggOCAwIDAgMSAxLjEzOC0uMTE0cTEuMjggMCAxLjk2NC41OThjLjY4NC41OTguNjgzIDEuMDI1LjY4MyAxLjkwN3YzLjkyN3MwIC4xMTQtLjA4NS4xNDJjMCAwLS4xNy4wNTctLjMxMy4wODVsLTEuMDguMmE2LjYgNi42IDAgMCAxLTEuMy4xMTRjLS40MjcgMC0uNzk3LS4wMjgtMS4xMzgtLjExNGEyLjggMi44IDAgMCAxLS44ODItLjM3IDEuOSAxLjkgMCAwIDEtLjU3LS42ODNjLS4xNDItLjI1Ni0uMi0uNTk4LS4yLS45NjhhMi4yNiAyLjI2IDAgMCAxIC4yMjgtLjk5NmMuMTQzLS4yOTYuMzctLjUxMi42MjYtLjdzLjU3LS4zMTMuODgyLS40MjdhNC4zIDQuMyAwIDAgMSAxLjA1My0uMTQybC43NC4wMjh6bS0xLjcwOCAzLjAxN3MuMzk4LjMxMyAxLjI1Mi4yNTZjLjYyNi0uMDI4IDEuMTY3LS4xNDIgMS4xNjctLjE0MnYtMS45NTVzLS41NC0uMDg1LTEuMTY3LS4wODVjLS44ODIgMC0xLjI1Mi4zMTMtMS4yNTIuMzEzLS4yNTYuMTctLjM3LjQ1NS0uMzcuODI1YTEuMSAxLjEgMCAwIDAgLjE0Mi41NjljLjAyOC4wNTcuMDU3LjExNC4yMjguMjI4em0zNi4yODYtNS4yMDhjLS4wMjguMTE0LS4yNTYuNy0uMzEzLjktLjAyOC4wODUtLjA4NS4xMTQtLjE3LjExNCAwIDAtLjI1Ni0uMDU3LS40ODQtLjA1N2EyLjMgMi4zIDAgMCAwLS41NjkuMDg1Yy0uMi4wNTctLjM3LjE3LS41NC4zMTNzLS4yODUuMzctLjM3LjYyNi0uMTQyLjY4My0uMTQyIDEuMTM4djMuMTg3YzAgLjA4NS0uMDU3LjE0Mi0uMTQyLjE0MmgtMS4xMjhjLS4wODUgMC0uMTQyLS4wNTctLjE0Mi0uMTQydi02LjRjMC0uMDg1LjA1Ny0uMTQyLjExNC0uMTQyaDEuMWMuMDg1IDAgLjExNC4wNTcuMTE0LjE0MnYuNTEyYTEuOSAxLjkgMCAwIDEgLjctLjU0Yy4yNDUtLjExMy41Ny0uMiAxLjEtLjE3LjI4NS4wMjguNjU1LjA4NS43LjExNC4xMTQuMDI4LjE3LjA1Ny4xNDIuMTd6bS0xMC41Ni0yLjk2Yy4wMjggMCAuMTE0LjA1Ny4wODUuMTQybC0uMzQyLjljLS4wMjguMDU3LS4wNTcuMTE0LS4yLjA1Ny0uMDI4IDAtLjA4NS0uMDI4LS4yMjgtLjA1Ny0uMDg1LS4wMjgtLjIyOC0uMDI4LS4zNDItLjAyOC0uMTcgMC0uMzEzLjAyOC0uNDU1LjA1N3MtLjI1Ni4xMTQtLjM3LjIyOC0uMjI4LjI1Ni0uMzEzLjQ1NWE0LjMgNC4zIDAgMCAwLS4yMjguOTY4aDEuMzY2Yy4xMTQgMCAuMTQyLjA1Ny4xNDIuMTQybC0uMTcuODgyYy0uMDI4LjE0Mi0uMTQyLjExNC0uMTQyLjExNGgtMS40MjNsLS45IDUuNDkzYy0uMTE0LjU3LS4yMjggMS4wNTMtLjM3IDEuNDVzLS4zMTMuNjgzLS41Ny45NjhjLS4yMjguMjU2LS40ODQuNDU1LS43OTcuNTQtLjI4NS4xMTQtLjY1NS4xNy0xLjA1My4xNy0uMiAwLS4zOTggMC0uNjI2LS4wNTdhMS42IDEuNiAwIDAgMS0uMzk4LS4xMTRjLS4wNTctLjAyOC0uMDg1LS4wODUtLjA1Ny0uMTdsLjI5My0uODYzYy4wNTctLjExNC4xNDItLjA1Ny4xNDItLjA1N2wuMjI4LjA4NWMuMTE0LjAyOC4yMjguMDI4LjM0Mi4wMjhxLjMgMCAuNTEyLS4wODVjLjE3LS4wNTcuMjg1LS4xNy4zOTgtLjMxM3MuMi0uMzQyLjMxMy0uNTk4cS4xNTgtLjUxOS4yNTYtMS4wNTNsLjk2OC01LjM4aC0uOTRjLS4xMTQgMC0uMTQyLS4wNTctLjE0Mi0uMTQybC4xNy0uODgyYy4wMjgtLjE0Mi4xNDItLjExNC4xNDItLjExNGguOTY4bC4wNTctLjI4NWMuMTQyLS44NTQuNDI3LTEuNTA4Ljg1NC0xLjkzNXMxLjA1My0uNjU1IDEuODItLjY1NXEuMzAyLjAwMy41OTguMDU3Yy4xMTQtLjAyOC4yNTYgMCAuMzk4LjA1N3ptLTE5LjE4MiA5LjI1YzAgLjA4NS0uMDU3LjE0Mi0uMTE0LjE0MmgtMS4xMzhjLS4wODUgMC0uMTE0LS4wNTctLjExNC0uMTQydi05LjEzNmMwLS4wNTcuMDU3LS4xNDIuMTE0LS4xNDJoMS4xMzhjLjA4NSAwIC4xMTQuMDU3LjExNC4xNDJ6Ii8+PC9nPjwvc3ltYm9sPjwvc3ZnPg=="
+      },
+      "displayName": "Salesforce",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 2,
+          "name": "Sales"
+        },
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 37,
+      "name": "Lead Generation"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

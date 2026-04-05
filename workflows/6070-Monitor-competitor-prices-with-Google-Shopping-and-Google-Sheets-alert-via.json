@@ -1,0 +1,1539 @@
+{
+  "id": 13836,
+  "name": "Monitor competitor prices with Google Shopping and Google Sheets, alert via Slack and Gmail",
+  "views": 32,
+  "recentViews": 1,
+  "totalViews": 32,
+  "createdAt": "2026-03-03T12:26:00.799Z",
+  "description": "## Who is this for?\n\nE-commerce store owners, product managers, marketplace sellers, and pricing analysts who want to automatically track competitor pricing and get actionable alerts when their products are overpriced or underpriced relative to the market.\n\n## What this workflow does\n\nThis workflow runs daily to compare your product prices against live competitor prices from Google Shopping. It identifies pricing gaps, calculates suggested prices that protect your margins, sends instant Slack alerts for critical issues, logs everything to a historical price tracking sheet, and delivers a comprehensive daily summary via Slack and email.\n\n## How it works\n\n1. **Daily trigger** fires on a configurable schedule (default: every 24 hours).\n2. **Reads your product catalog** from a Google Sheet — auto-detects column names regardless of naming convention.\n3. **Searches Google Shopping** for each product using SearchAPI to find real-time competitor prices.\n4. **Analyzes the pricing gap** — compares your price to the market average and classifies each product as `UNDERPRICED`, `SLIGHTLY_UNDER`, `COMPETITIVE`, `SLIGHTLY_OVER`, or `OVERPRICED`.\n5. **Suggests optimal prices** based on market averages while maintaining a minimum margin above your cost.\n6. **Sends instant Slack alerts** when a product hits critical or warning thresholds.\n7. **Logs all results** to a `price_log` tab in your Google Sheet for trend analysis.\n8. **Sends a daily summary** via Slack message and HTML email with a full breakdown of all products.\n\n## Setup steps\n\n1. Create a **Google Sheet** with a `products` tab containing columns: `product_name`, `my_price` (required), and optionally `sku`, `my_cost`.\n2. Add a second tab called **`price_log`** with headers: `date`, `product_name`, `sku`, `my_price`, `my_cost`, `margin_now`, `competitor_lowest`, `competitor_average`, `competitor_highest`, `competitor_count`, `gap_pct`, `signal`, `suggested_price`, `action`.\n3. Get a **SearchAPI key** from [searchapi.io](https://www.searchapi.io) and set it as the n8n environment variable `SEARCHAPI_KEY`.\n4. Connect **Google Sheets OAuth2** credentials and update the sheet ID in both Sheets nodes.\n5. Connect **Slack OAuth2** credentials and configure your alert channel.\n6. Connect **Gmail OAuth2** credentials and update the recipient email address.\n\n## Requirements\n\n- n8n instance (self-hosted or cloud)\n- [SearchAPI.io](https://www.searchapi.io) account and API key\n- Google Cloud project with Sheets API enabled\n- Slack workspace with a bot configured\n- Gmail account with OAuth2 credentials\n\n## How to customize\n\n- **Pricing thresholds** — Adjust the `0.85`, `0.95`, `1.05`, `1.15` multipliers in the \"Analyze Pricing Gap\" node to change sensitivity.\n- **Minimum margin** — Change the `1.15` cost multiplier to set your floor margin (default: 15%).\n- **Schedule** — Modify the trigger interval for more or less frequent checks.\n- **Notifications** — Replace or add Slack/email with Telegram, Discord, Microsoft Teams, or webhooks.\n- **Region** — Change the `gl` parameter in the search node from `us` to your target market country code.",
+  "workflow": {
+    "id": "ZLYpvDUbFyNpTcyg",
+    "meta": {
+      "instanceId": "8f8ee4eb853c20789e317beb113798e3d078c0c7ef754b4b9fad98c2eee7e79d"
+    },
+    "name": "Monitor competitor prices and alert via Slack and email",
+    "tags": [
+      {
+        "id": "mHQntpbppFUpZPGm",
+        "name": "template",
+        "createdAt": "2026-02-17T08:30:26.885Z",
+        "updatedAt": "2026-02-17T08:30:26.885Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "df38f72a-ee3a-4877-894a-4a8fdbf32362",
+        "name": "Daily Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          928,
+          608
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 24
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "7a378618-0238-44b8-84f9-4e6f2a94cc78",
+        "name": "Get Products from Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1152,
+          608
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_PRODUCTS_SHEET_GID",
+            "cachedResultUrl": "YOUR_PRODUCTS_SHEET_URL",
+            "cachedResultName": "products"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "YOUR_GOOGLE_SHEET_URL",
+            "cachedResultName": "Your Products Sheet"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "10216fd3-331c-47da-bab8-104b27fca398",
+        "name": "Clear Memory and Normalize Columns",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1376,
+          608
+        ],
+        "parameters": {
+          "jsCode": "// Clear previous run data AND normalize column names\n// This handles any column name format from your sheet\nconst staticData = $getWorkflowStaticData('global');\nstaticData.allResults = [];\n\nconst items = $input.all();\nconst normalized = [];\n\nfor (const item of items) {\n  const raw = item.json;\n  const keys = Object.keys(raw);\n  \n  // Find product name column (flexible matching)\n  const nameKey = keys.find(k => \n    k.toLowerCase().replace(/[^a-z]/g, '') === 'productname' ||\n    k.toLowerCase() === 'product_name' ||\n    k.toLowerCase() === 'product name' ||\n    k.toLowerCase() === 'name' ||\n    k.toLowerCase() === 'title' ||\n    k.toLowerCase() === 'item' ||\n    k.toLowerCase() === 'product'\n  );\n  \n  // Find SKU column\n  const skuKey = keys.find(k => \n    k.toLowerCase() === 'sku' ||\n    k.toLowerCase() === 'id' ||\n    k.toLowerCase() === 'product_id'\n  );\n  \n  // Find price column\n  const priceKey = keys.find(k => \n    k.toLowerCase().replace(/[^a-z]/g, '') === 'myprice' ||\n    k.toLowerCase() === 'my_price' ||\n    k.toLowerCase() === 'price' ||\n    k.toLowerCase() === 'selling_price' ||\n    k.toLowerCase() === 'our price' ||\n    k.toLowerCase() === 'my price'\n  );\n  \n  // Find cost column\n  const costKey = keys.find(k => \n    k.toLowerCase().replace(/[^a-z]/g, '') === 'mycost' ||\n    k.toLowerCase() === 'my_cost' ||\n    k.toLowerCase() === 'cost' ||\n    k.toLowerCase() === 'our cost' ||\n    k.toLowerCase() === 'my cost'\n  );\n  \n  const productName = nameKey ? raw[nameKey] : null;\n  const price = priceKey ? raw[priceKey] : null;\n  \n  if (!productName || !price) continue; // Skip empty rows\n  \n  normalized.push({\n    json: {\n      product_name: String(productName).trim(),\n      sku: skuKey ? String(raw[skuKey]).trim() : '',\n      my_price: String(price).replace(/[^0-9.]/g, ''),\n      my_cost: costKey ? String(raw[costKey]).replace(/[^0-9.]/g, '') : '0'\n    }\n  });\n}\n\nif (normalized.length === 0) {\n  return [{ json: { error: 'No products found. Check your sheet column names. Found columns: ' + Object.keys(items[0]?.json || {}).join(', ') } }];\n}\n\nreturn normalized;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "caa91554-2313-4564-b41a-4cf47b33eb00",
+        "name": "Loop Through Each Product",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          1600,
+          608
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "678bc0f1-7512-427c-a604-1e18f55a6aa7",
+        "name": "Prepare Search Query",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1824,
+          320
+        ],
+        "parameters": {
+          "jsCode": "// Pass through product data for search\nconst item = $input.first().json;\nreturn $input.all();"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "9c474c8e-9eef-4f12-bd32-3b75a27d58f4",
+        "name": "Search Google Shopping Prices",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2048,
+          320
+        ],
+        "parameters": {
+          "url": "https://www.searchapi.io/api/v1/search",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "api_key",
+                "value": "={{ $env.SEARCHAPI_KEY }}"
+              },
+              {
+                "name": "engine",
+                "value": "google_shopping"
+              },
+              {
+                "name": "q",
+                "value": "={{ $json.product_name }}"
+              },
+              {
+                "name": "gl",
+                "value": "us"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "4699bd51-4c99-430a-9b3e-416014a48cf0",
+        "name": "Analyze Pricing Gap",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2272,
+          320
+        ],
+        "parameters": {
+          "jsCode": "const product = $('Loop Through Each Product').first().json;\nconst response = $input.first().json;\n\nconst results = response.shopping_results || response.inline_shopping_results || [];\nconst prices = [];\n\nfor (const item of results) {\n  let price = item.price || item.extracted_price || 0;\n  if (typeof price === 'string') {\n    price = parseFloat(price.replace(/[^0-9.]/g, ''));\n  }\n  if (price > 0) {\n    prices.push({\n      seller: item.source || item.merchant || 'Unknown',\n      price: price,\n      title: item.title || ''\n    });\n  }\n}\n\nif (prices.length === 0) {\n  return [{\n    json: {\n      product_name: product.product_name,\n      sku: product.sku || '',\n      my_price: parseFloat(product.my_price),\n      my_cost: parseFloat(product.my_cost || 0),\n      margin_now: null,\n      competitor_lowest: null,\n      competitor_average: null,\n      competitor_highest: null,\n      competitor_count: 0,\n      gap_pct: null,\n      signal: 'NO_DATA',\n      severity: 'info',\n      suggested_price: null,\n      margin_suggested: null,\n      action: 'No competitor prices found',\n      date: new Date().toISOString().split('T')[0]\n    }\n  }];\n}\n\nconst priceValues = prices.map(p => p.price).sort((a, b) => a - b);\nconst lowest = Math.min(...priceValues);\nconst highest = Math.max(...priceValues);\nconst average = parseFloat((priceValues.reduce((a, b) => a + b, 0) / priceValues.length).toFixed(2));\n\nconst myPrice = parseFloat(product.my_price);\nconst myCost = parseFloat(product.my_cost || 0);\nconst gapPct = parseFloat(((myPrice - average) / average * 100).toFixed(1));\n\nlet signal, severity, action, suggestedPrice;\n\nif (myPrice < average * 0.85) {\n  signal = 'UNDERPRICED';\n  severity = 'critical';\n  suggestedPrice = parseFloat((average * 0.95).toFixed(2));\n  if (myCost > 0 && suggestedPrice < myCost * 1.15) suggestedPrice = parseFloat((myCost * 1.15).toFixed(2));\n  action = 'RAISE to $' + suggestedPrice + ' — you are ' + Math.abs(gapPct) + '% below market';\n} else if (myPrice < average * 0.95) {\n  signal = 'SLIGHTLY_UNDER';\n  severity = 'warning';\n  suggestedPrice = parseFloat((average * 0.97).toFixed(2));\n  action = 'Consider raising to $' + suggestedPrice;\n} else if (myPrice > average * 1.15) {\n  signal = 'OVERPRICED';\n  severity = 'critical';\n  suggestedPrice = parseFloat((average * 1.05).toFixed(2));\n  if (myCost > 0 && suggestedPrice < myCost * 1.15) suggestedPrice = parseFloat((myCost * 1.15).toFixed(2));\n  action = 'LOWER to $' + suggestedPrice + ' — you are ' + gapPct + '% above market';\n} else if (myPrice > average * 1.05) {\n  signal = 'SLIGHTLY_OVER';\n  severity = 'warning';\n  suggestedPrice = parseFloat((average * 1.03).toFixed(2));\n  action = 'Consider lowering to $' + suggestedPrice;\n} else {\n  signal = 'COMPETITIVE';\n  severity = 'ok';\n  suggestedPrice = myPrice;\n  action = 'Price is competitive — no change needed';\n}\n\nconst marginNow = myCost > 0 ? parseFloat(((myPrice - myCost) / myPrice * 100).toFixed(1)) : null;\nconst marginSuggested = myCost > 0 ? parseFloat(((suggestedPrice - myCost) / suggestedPrice * 100).toFixed(1)) : null;\n\nreturn [{\n  json: {\n    product_name: product.product_name,\n    sku: product.sku || '',\n    my_price: myPrice,\n    my_cost: myCost,\n    margin_now: marginNow,\n    competitor_lowest: lowest,\n    competitor_average: average,\n    competitor_highest: highest,\n    competitor_count: prices.length,\n    gap_pct: gapPct,\n    signal: signal,\n    severity: severity,\n    suggested_price: suggestedPrice,\n    margin_suggested: marginSuggested,\n    action: action,\n    date: new Date().toISOString().split('T')[0]\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c8b1a0b1-1df0-4119-9be1-4e9cb6216db2",
+        "name": "Save Result to Memory",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2496,
+          320
+        ],
+        "parameters": {
+          "jsCode": "// Save analyzed result to memory for daily summary\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.allResults) staticData.allResults = [];\nstaticData.allResults.push($input.first().json);\nreturn $input.all();"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "06766599-5dff-4982-9075-f7f156874786",
+        "name": "Log to Price History Sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2720,
+          512
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "sku": "={{ $json.sku }}",
+              "date": "={{ $json.date }}",
+              "action": "={{ $json.action }}",
+              "signal": "={{ $json.signal }}",
+              "gap_pct": "={{ $json.gap_pct }}",
+              "my_cost": "={{ $json.my_cost }}",
+              "my_price": "={{ $json.my_price }}",
+              "margin_now": "={{ $json.margin_now }}",
+              "product_name": "={{ $json.product_name }}",
+              "suggested_price": "={{ $json.suggested_price }}",
+              "competitor_count": "={{ $json.competitor_count }}",
+              "competitor_lowest": "={{ $json.competitor_lowest }}",
+              "competitor_average": "={{ $json.competitor_average }}",
+              "competitor_highest": "={{ $json.competitor_highest }}"
+            },
+            "schema": [
+              {
+                "id": "date",
+                "type": "string",
+                "required": false,
+                "displayName": "date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "product_name",
+                "type": "string",
+                "required": false,
+                "displayName": "product_name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sku",
+                "type": "string",
+                "required": false,
+                "displayName": "sku",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "my_price",
+                "type": "string",
+                "required": false,
+                "displayName": "my_price",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "my_cost",
+                "type": "string",
+                "required": false,
+                "displayName": "my_cost",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "margin_now",
+                "type": "string",
+                "required": false,
+                "displayName": "margin_now",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "competitor_lowest",
+                "type": "string",
+                "required": false,
+                "displayName": "competitor_lowest",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "competitor_average",
+                "type": "string",
+                "required": false,
+                "displayName": "competitor_average",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "competitor_highest",
+                "type": "string",
+                "required": false,
+                "displayName": "competitor_highest",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "competitor_count",
+                "type": "string",
+                "required": false,
+                "displayName": "competitor_count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "gap_pct",
+                "type": "string",
+                "required": false,
+                "displayName": "gap_pct",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "signal",
+                "type": "string",
+                "required": false,
+                "displayName": "signal",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "suggested_price",
+                "type": "string",
+                "required": false,
+                "displayName": "suggested_price",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "action",
+                "type": "string",
+                "required": false,
+                "displayName": "action",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": true
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "price_log"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "YOUR_GOOGLE_SHEET_ID",
+            "cachedResultUrl": "YOUR_GOOGLE_SHEET_URL",
+            "cachedResultName": "Your Products Sheet"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "88e0edd7-d292-44b0-b12a-1da798f8586f",
+        "name": "Filter Critical or Warning Alerts",
+        "type": "n8n-nodes-base.filter",
+        "position": [
+          2720,
+          128
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "critical-check",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.severity }}",
+                "rightValue": "critical"
+              },
+              {
+                "id": "warning-check",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json.severity }}",
+                "rightValue": "warning"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "04641da4-3cd7-4f39-94a2-7840021a34a2",
+        "name": "Send Slack Pricing Alert",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          2944,
+          128
+        ],
+        "webhookId": "b546f4cd-433d-48a0-8f46-9e7776fabae5",
+        "parameters": {
+          "text": "={{ $json.severity === 'critical' ? '🚨' : '⚠️' }} *{{ $json.signal }}* — {{ $json.product_name }}\n\n💲 Your Price: *${{ $json.my_price }}*\n📊 Market Avg: *${{ $json.competitor_average }}* ({{ $json.competitor_count }} competitors)\n📉 Lowest: ${{ $json.competitor_lowest }} | Highest: ${{ $json.competitor_highest }}\n📐 Gap: *{{ $json.gap_pct }}%*\n\n✅ *Action:* {{ $json.action }}\n{{ $json.margin_now ? '💰 Current Margin: ' + $json.margin_now + '% → Suggested Margin: ' + $json.margin_suggested + '%' : '' }}",
+          "otherOptions": {}
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "62106fa8-8ea8-4364-89bf-2ffc95f00255",
+        "name": "Continue to Next Product",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2944,
+          784
+        ],
+        "parameters": {
+          "jsCode": "// Pass through to loop back to next product\nreturn $input.all();"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "27ac6923-5c0e-4c9a-820e-2595d1f182a7",
+        "name": "Build Daily Summary Report",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1824,
+          608
+        ],
+        "parameters": {
+          "jsCode": "// Build daily summary from ALL collected results in memory\nconst staticData = $getWorkflowStaticData('global');\nconst allResults = staticData.allResults || [];\n\n// Clear for next run\nstaticData.allResults = [];\n\nif (allResults.length === 0) {\n  return [{\n    json: {\n      summary: 'DAILY PRICING REPORT — ' + new Date().toISOString().split('T')[0] + '\\n\\nNo products were analyzed today.',\n      summary_html: '<h2>Daily Pricing Report</h2><p>No products analyzed today.</p>',\n      has_alerts: false,\n      date: new Date().toISOString().split('T')[0],\n      total_products: 0,\n      critical_count: 0,\n      warning_count: 0\n    }\n  }];\n}\n\nconst critical = allResults.filter(r => r.severity === 'critical');\nconst warnings = allResults.filter(r => r.severity === 'warning');\nconst ok = allResults.filter(r => r.severity === 'ok');\nconst noData = allResults.filter(r => r.signal === 'NO_DATA');\nconst underpriced = allResults.filter(r => r.signal === 'UNDERPRICED' || r.signal === 'SLIGHTLY_UNDER');\nconst overpriced = allResults.filter(r => r.signal === 'OVERPRICED' || r.signal === 'SLIGHTLY_OVER');\n\nconst today = new Date().toISOString().split('T')[0];\n\nlet summary = 'DAILY PRICING REPORT — ' + today + '\\n';\nsummary += 'Products checked: ' + allResults.length + '\\n\\n';\nsummary += 'Critical: ' + critical.length + '\\n';\nsummary += 'Warnings: ' + warnings.length + '\\n';\nsummary += 'Competitive: ' + ok.length + '\\n';\nsummary += 'No data: ' + noData.length + '\\n\\n';\n\nif (underpriced.length > 0) {\n  summary += 'Underpriced (raise for margin):\\n';\n  for (const p of underpriced) {\n    summary += '• ' + p.product_name + ': $' + p.my_price + ' → $' + p.suggested_price + ' (' + Math.abs(p.gap_pct) + '% below avg)\\n';\n  }\n  summary += '\\n';\n}\n\nif (overpriced.length > 0) {\n  summary += 'Overpriced (lower to compete):\\n';\n  for (const p of overpriced) {\n    summary += '• ' + p.product_name + ': $' + p.my_price + ' → $' + p.suggested_price + ' (' + p.gap_pct + '% above avg)\\n';\n  }\n}\n\nlet html = '<h2>Daily Pricing Report — ' + today + '</h2>';\nhtml += '<p>Products checked: <strong>' + allResults.length + '</strong></p>';\nhtml += '<table style=\"border-collapse:collapse;width:100%;\">';\nhtml += '<tr style=\"background:#f0f0f0;\"><th style=\"padding:8px;border:1px solid #ddd;\">Status</th><th style=\"padding:8px;border:1px solid #ddd;\">Count</th></tr>';\nhtml += '<tr><td style=\"padding:8px;border:1px solid #ddd;\">Critical</td><td style=\"padding:8px;border:1px solid #ddd;\">' + critical.length + '</td></tr>';\nhtml += '<tr><td style=\"padding:8px;border:1px solid #ddd;\">Warnings</td><td style=\"padding:8px;border:1px solid #ddd;\">' + warnings.length + '</td></tr>';\nhtml += '<tr><td style=\"padding:8px;border:1px solid #ddd;\">Competitive</td><td style=\"padding:8px;border:1px solid #ddd;\">' + ok.length + '</td></tr>';\nhtml += '<tr><td style=\"padding:8px;border:1px solid #ddd;\">No Data</td><td style=\"padding:8px;border:1px solid #ddd;\">' + noData.length + '</td></tr>';\nhtml += '</table>';\n\nif (underpriced.length > 0) {\n  html += '<h3>Underpriced</h3><table style=\"border-collapse:collapse;width:100%;\">';\n  html += '<tr style=\"background:#d4edda;\"><th style=\"padding:6px;border:1px solid #ddd;\">Product</th><th style=\"padding:6px;border:1px solid #ddd;\">Your Price</th><th style=\"padding:6px;border:1px solid #ddd;\">Suggested</th><th style=\"padding:6px;border:1px solid #ddd;\">Gap</th></tr>';\n  for (const p of underpriced) {\n    html += '<tr><td style=\"padding:6px;border:1px solid #ddd;\">' + p.product_name + '</td><td style=\"padding:6px;border:1px solid #ddd;\">$' + p.my_price + '</td><td style=\"padding:6px;border:1px solid #ddd;\"><strong>$' + p.suggested_price + '</strong></td><td style=\"padding:6px;border:1px solid #ddd;\">' + Math.abs(p.gap_pct) + '% below</td></tr>';\n  }\n  html += '</table>';\n}\n\nif (overpriced.length > 0) {\n  html += '<h3>Overpriced</h3><table style=\"border-collapse:collapse;width:100%;\">';\n  html += '<tr style=\"background:#f8d7da;\"><th style=\"padding:6px;border:1px solid #ddd;\">Product</th><th style=\"padding:6px;border:1px solid #ddd;\">Your Price</th><th style=\"padding:6px;border:1px solid #ddd;\">Suggested</th><th style=\"padding:6px;border:1px solid #ddd;\">Gap</th></tr>';\n  for (const p of overpriced) {\n    html += '<tr><td style=\"padding:6px;border:1px solid #ddd;\">' + p.product_name + '</td><td style=\"padding:6px;border:1px solid #ddd;\">$' + p.my_price + '</td><td style=\"padding:6px;border:1px solid #ddd;\"><strong>$' + p.suggested_price + '</strong></td><td style=\"padding:6px;border:1px solid #ddd;\">' + p.gap_pct + '% above</td></tr>';\n  }\n  html += '</table>';\n}\n\nreturn [{\n  json: {\n    summary: summary,\n    summary_html: html,\n    has_alerts: critical.length + warnings.length > 0,\n    date: today,\n    total_products: allResults.length,\n    critical_count: critical.length,\n    warning_count: warnings.length\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "357a57b2-56bd-40ca-aa6d-fbd4bbaa2921",
+        "name": "Post Daily Summary to Slack",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          2048,
+          512
+        ],
+        "webhookId": "2cb1586e-ae5e-410f-9d50-5d64abe73b0b",
+        "parameters": {
+          "text": "={{ $json.summary }}",
+          "otherOptions": {}
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "52a3aa2a-ef6e-4e64-98ef-6b4e126a073f",
+        "name": "Email Daily Report",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          2048,
+          704
+        ],
+        "webhookId": "c43dfa6a-d2a6-475a-8201-bd461b2728f4",
+        "parameters": {
+          "sendTo": "user@example.com",
+          "message": "={{ $json.summary_html }}",
+          "options": {},
+          "subject": "=Pricing Report — {{ $json.date }} | {{ $json.critical_count }} critical, {{ $json.warning_count }} warnings"
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "6d52984d-1aa6-490a-b6d9-e22f5290da96",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          112,
+          -368
+        ],
+        "parameters": {
+          "color": "#8E8F42",
+          "width": 660,
+          "height": 880,
+          "content": "## Monitor competitor prices and alert via Slack and email\n\nThis workflow automatically monitors your product prices against competitors on Google Shopping, identifies pricing gaps, and sends alerts when action is needed.\n\n## How it works\n1. **Runs daily** on a schedule (default: every 24 hours)\n2. **Reads your product catalog** from a Google Sheet (flexible column name matching)\n3. **Searches Google Shopping** for each product via SearchAPI\n4. **Analyzes pricing gaps** — classifies each product as UNDERPRICED, OVERPRICED, COMPETITIVE, or NO_DATA\n5. **Calculates suggested prices** based on market averages while protecting your margins\n6. **Sends instant Slack alerts** for critical/warning pricing issues\n7. **Logs all results** to a `price_log` sheet for historical tracking\n8. **Sends a daily summary** via Slack and email with full breakdown\n\n## Setup steps\n1. **Create a Google Sheet** with a `products` tab containing columns: `product_name`, `my_price`, and optionally `sku` and `my_cost`\n2. Add a second tab called `price_log` with these column headers: `date`, `product_name`, `sku`, `my_price`, `my_cost`, `margin_now`, `competitor_lowest`, `competitor_average`, `competitor_highest`, `competitor_count`, `gap_pct`, `signal`, `suggested_price`, `action`\n3. **Get a SearchAPI key** from [searchapi.io](https://www.searchapi.io) and set it as an n8n environment variable called `SEARCHAPI_KEY`\n4. **Connect Google Sheets OAuth2** credentials\n5. **Connect Slack OAuth2** credentials and configure the channel\n6. **Connect Gmail OAuth2** credentials and update `YOUR_EMAIL@EXAMPLE.COM`\n7. Update the Google Sheet ID in the \"Get Products from Sheet\" and \"Log to Price History Sheet\" nodes\n\n## Customization\n- Adjust pricing thresholds in the \"Analyze Pricing Gap\" node (default: ±5% warning, ±15% critical)\n- Change the schedule frequency in the trigger node\n- Add more notification channels (Telegram, Discord, etc.)\n- Modify the minimum margin protection (default: 15% above cost)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a82235af-fdef-4f3f-b8a8-4919a7fbe3f1",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1072,
+          368
+        ],
+        "parameters": {
+          "color": "#4D4242",
+          "width": 264,
+          "height": 164,
+          "content": "## 1. Load Products\nSchedule trigger fires daily. Products are read from Google Sheets. Column names are auto-detected (supports many naming conventions)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "86733f0c-7e5d-4f49-a7a8-bbd3befd1e73",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1680,
+          96
+        ],
+        "parameters": {
+          "color": "#4D4242",
+          "width": 312,
+          "height": 164,
+          "content": "## 2. Search and Analyze\nEach product is searched on Google Shopping via SearchAPI. Prices are compared to calculate gap %, signal severity, and a suggested price."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f5818320-0511-4e94-bdd3-88d279767591",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2704,
+          -96
+        ],
+        "parameters": {
+          "color": "#4D4242",
+          "width": 224,
+          "height": 164,
+          "content": "## 3. Log and Alert\nResults are saved to memory and logged to the `price_log` sheet. Critical and warning signals trigger instant Slack alerts."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5d87a00f-455e-4e30-954c-893985d18bcd",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2272,
+          528
+        ],
+        "parameters": {
+          "color": "#4D4242",
+          "width": 252,
+          "height": 196,
+          "content": "## 4. Daily Summary\nAfter all products are processed, a summary report is compiled from memory and sent via Slack message and HTML email."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8792930c-81a3-4c25-9a75-b1c33ed96e9f",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2016,
+          -80
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 440,
+          "height": 100,
+          "content": "⚠️ **Set your SearchAPI key** as an n8n environment variable: `SEARCHAPI_KEY`. Do NOT hardcode it here. See [n8n docs on environment variables](https://docs.n8n.io/hosting/configuration/environment-variables/)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f9acefa6-b811-499d-ac08-de02d7d229d3",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2192,
+          816
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 320,
+          "height": 80,
+          "content": "⚠️ **Update the email address** in this node to your own email before activating."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "9b837a78-b593-4e2b-8ae4-23e7f0279b80",
+    "connections": {
+      "Analyze Pricing Gap": {
+        "main": [
+          [
+            {
+              "node": "Save Result to Memory",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Search Query": {
+        "main": [
+          [
+            {
+              "node": "Search Google Shopping Prices",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Result to Memory": {
+        "main": [
+          [
+            {
+              "node": "Log to Price History Sheet",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Filter Critical or Warning Alerts",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Daily Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Get Products from Sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Products from Sheet": {
+        "main": [
+          [
+            {
+              "node": "Clear Memory and Normalize Columns",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Continue to Next Product": {
+        "main": [
+          [
+            {
+              "node": "Loop Through Each Product",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Through Each Product": {
+        "main": [
+          [
+            {
+              "node": "Prepare Search Query",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Build Daily Summary Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Daily Summary Report": {
+        "main": [
+          [
+            {
+              "node": "Post Daily Summary to Slack",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Email Daily Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log to Price History Sheet": {
+        "main": [
+          [
+            {
+              "node": "Continue to Next Product",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search Google Shopping Prices": {
+        "main": [
+          [
+            {
+              "node": "Analyze Pricing Gap",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter Critical or Warning Alerts": {
+        "main": [
+          [
+            {
+              "node": "Send Slack Pricing Alert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clear Memory and Normalize Columns": {
+        "main": [
+          [
+            {
+              "node": "Loop Through Each Product",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 22,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 6
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 2
+      },
+      "n8n-nodes-base.filter": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Veena Pandian",
+    "username": "veenapandian",
+    "bio": "Veena is a GTM Engineer with 6 years of experience in Revenue Operations, specializing in building scalable outbound systems that turn data into pipeline. As a Clay expert, she designs signal-based prospecting workflows, enrichment automations, and AI-led personalization sequences that drive consistent, qualified meetings for B2B companies. She now brings that same systems-thinking approach to building powerful automations in n8n.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/veenareddyhere/"
+    ],
+    "avatar": "https://gravatar.com/avatar/74ae38b621079dfbdd0ab6bf5da66389ac331caf189c2384195f681daebcb8f6?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 844,
+      "icon": "fa:filter",
+      "name": "n8n-nodes-base.filter",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The Filter node can be used to filter items based on a condition. If the condition is met, the item will be passed on to the next node. If the condition is not met, the item will be omitted. Conditions can be combined together by AND(meet all conditions), or OR(meet at least one condition).",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.filter/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Filter",
+        "color": "#229eff"
+      },
+      "iconData": {
+        "icon": "filter",
+        "type": "icon"
+      },
+      "displayName": "Filter",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

@@ -1,0 +1,1509 @@
+{
+  "id": 13534,
+  "name": "Detect and move duplicate Google Drive files with Supabase and Slack",
+  "views": 117,
+  "recentViews": 1,
+  "totalViews": 117,
+  "createdAt": "2026-02-20T08:42:02.273Z",
+  "description": "This workflow automatically detects duplicate files uploaded to a specific Google Drive folder by generating an MD5 hash of each file and comparing it against a Supabase database. If a duplicate is found, the file is moved to a dedicated Duplicates folder and a Slack notification is sent. All events, including unique uploads, duplicates, race conditions, and errors, are logged for audit purposes.\n\nIt is designed for teams that handle high file volumes and need reliable, content based deduplication instead of simple filename checks.\n\n## How it works\n\n- Monitors a specific Google Drive folder for new files.\n\n- Normalizes file metadata and downloads the binary content. \n- Generates an MD5 hash from the file binary.\n\n- Checks Supabase to see if the hash already exists.\n\n- If duplicate, moves the file to a Duplicates folder and sends a Slack alert.\n\n- If unique, stores the hash in Supabase.\n\n- Logs every outcome, including errors and race conditions, in an audit table.\n\n## Setup steps\n\n- Connect your Google Drive account and select the folder to monitor.\n\n- Connect your Supabase account and create the required tables:\n\n```\nfile_hashes\n```\n\n```\ndedup_audit_log\n```\n\n\n- Connect your Slack account and select a channel for duplicate alerts.\n\n- Update the Duplicates folder ID in the Google Drive Move node.\n\nSetup typically takes 10 to 15 minutes if your Supabase project is ready.",
+  "workflow": {
+    "meta": {
+      "instanceId": "fe849132d8c0d46a6070ebd60698d892cd65ebc032ada4e7af186e0f756c61a0",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "trigger-1",
+        "name": "Google Drive Trigger",
+        "type": "n8n-nodes-base.googleDriveTrigger",
+        "position": [
+          0,
+          -160
+        ],
+        "parameters": {
+          "event": "fileCreated",
+          "options": {},
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          },
+          "triggerOn": "specificFolder",
+          "folderToWatch": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1vleObg6ZBzUflpAVT2Joc5D7oBNYWNUw",
+            "cachedResultUrl": "https://drive.google.com/drive/folders/1vleObg6ZBzUflpAVT2Joc5D7oBNYWNUw",
+            "cachedResultName": "Lendium Files"
+          }
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "WqyjgjJiDddUC5gA",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "code-prepare",
+        "name": "Prepare File Info",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          224,
+          -160
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Extract and normalize file metadata from Google Drive Trigger\nconst triggerData = $input.item.json;\n\nconst fileId = triggerData.id || triggerData.fileId || '';\nconst fileName = triggerData.name || triggerData.title || 'unknown';\nconst mimeType = triggerData.mimeType || triggerData.mime_type || '';\nconst fileSize = triggerData.size || triggerData.fileSize || 0;\nconst createdTime = triggerData.createdTime || triggerData.createdDate || new Date().toISOString();\n\nreturn {\n  json: {\n    fileId,\n    fileName,\n    mimeType,\n    fileSize: parseInt(fileSize, 10) || 0,\n    createdTime,\n    originalData: triggerData\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "gdrive-download",
+        "name": "Download File",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          448,
+          -160
+        ],
+        "parameters": {
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.fileId }}"
+          },
+          "options": {},
+          "operation": "download"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "WqyjgjJiDddUC5gA",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "if-validate-binary",
+        "name": "Validate Binary",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          672,
+          -160
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "binary-check",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ !!$binary && !!$binary.data }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "crypto-hash",
+        "name": "Crypto",
+        "type": "n8n-nodes-base.crypto",
+        "position": [
+          896,
+          -256
+        ],
+        "parameters": {
+          "binaryData": true,
+          "dataPropertyName": "hash"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "supa-check-hash",
+        "name": "Check Hash Exists",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          1120,
+          -256
+        ],
+        "parameters": {
+          "limit": 1,
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "hash",
+                "keyValue": "={{ $json.hash }}",
+                "condition": "eq"
+              }
+            ]
+          },
+          "tableId": "file_hashes",
+          "matchType": "allFilters",
+          "operation": "getAll"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "8qqASnoyICftntUD",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "gdrive-move-dup",
+        "name": "Move to Duplicates",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          1792,
+          -256
+        ],
+        "parameters": {
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Prepare File Info').item.json.fileId }}"
+          },
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive",
+            "cachedResultUrl": "https://drive.google.com/drive/my-drive",
+            "cachedResultName": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "17_l9LfnpyJas6iZy3sIMNNdfi4W7ia6o",
+            "cachedResultUrl": "https://drive.google.com/drive/folders/17_l9LfnpyJas6iZy3sIMNNdfi4W7ia6o",
+            "cachedResultName": "Duplicates"
+          },
+          "operation": "move"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "WqyjgjJiDddUC5gA",
+            "name": "Google Drive account"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "slack-notify",
+        "name": "Notify Duplicate",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          2016,
+          -256
+        ],
+        "webhookId": "47e866e2-6451-494d-bc42-358f3272b190",
+        "parameters": {
+          "text": "=🔴 *Duplicate File Detected*\n\n📄 *File:* {{ $('Prepare File Info').item.json.fileName }}\n🆔 *File ID:* {{ $('Prepare File Info').item.json.fileId }}\n🔑 *MD5 Hash:* {{ $('Crypto').item.json.hash }}\n📦 *Size:* {{ $('Prepare File Info').item.json.fileSize }} bytes\n📂 *Action:* Moved to Duplicates folder\n⏰ *Time:* {{ $now.toISO() }}",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "C0ABU5WAKLH",
+            "cachedResultName": "estateline-ai"
+          },
+          "otherOptions": {
+            "includeLinkToWorkflow": false
+          }
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "iJyCiG0nJB2Pwuz7",
+            "name": "Slack account"
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "code-prep-dup-log",
+        "name": "Prepare Dup Log Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2464,
+          -256
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Prepare data for Supabase insert into dedup_audit_log\nreturn {\n  json: {\n    file_id: $('Prepare File Info').item.json.fileId,\n    file_name: $('Prepare File Info').item.json.fileName,\n    hash: $('Crypto').item.json.hash,\n    status: 'duplicate',\n    action_taken: 'moved_to_duplicates'\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "supa-log-dup",
+        "name": "Log Duplicate Event",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          2688,
+          -256
+        ],
+        "parameters": {
+          "tableId": "dedup_audit_log",
+          "dataToSend": "autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "8qqASnoyICftntUD",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "code-prep-insert-hash",
+        "name": "Prepare Hash Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1792,
+          96
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Prepare data for Supabase insert into file_hashes\nreturn {\n  json: {\n    file_id: $('Prepare File Info').item.json.fileId,\n    file_name: $('Prepare File Info').item.json.fileName,\n    hash: $('Crypto').item.json.hash,\n    file_size: $('Prepare File Info').item.json.fileSize,\n    mime_type: $('Prepare File Info').item.json.mimeType\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "supa-insert-hash",
+        "name": "Insert New Hash",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          2016,
+          96
+        ],
+        "parameters": {
+          "tableId": "file_hashes",
+          "dataToSend": "autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "8qqASnoyICftntUD",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "code-handle-db-error",
+        "name": "Handle DB Error",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2240,
+          96
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Check if the insert was successful or if a conflict/error occurred\nconst item = $input.item.json;\n\nif (item.error) {\n  return {\n    json: {\n      status: 'duplicate_race_condition',\n      message: 'Concurrent upload detected - hash already exists',\n      error: item.error\n    }\n  };\n}\n\n// If the response doesn't contain an id, it may be a conflict\nif (!item.id && item.id !== 0) {\n  return {\n    json: {\n      status: 'duplicate_race_condition',\n      message: 'Hash already existed (conflict detected)',\n      fileId: $('Prepare File Info').item.json.fileId,\n      fileName: $('Prepare File Info').item.json.fileName\n    }\n  };\n}\n\nreturn {\n  json: {\n    status: 'unique_inserted',\n    insertedId: item.id,\n    fileId: $('Prepare File Info').item.json.fileId,\n    fileName: $('Prepare File Info').item.json.fileName\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "code-prep-unique-log",
+        "name": "Prepare Unique Log Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2464,
+          96
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Prepare data for Supabase insert into dedup_audit_log\nconst status = $json.status;\nreturn {\n  json: {\n    file_id: $('Prepare File Info').item.json.fileId,\n    file_name: $('Prepare File Info').item.json.fileName,\n    hash: $('Crypto').item.json.hash,\n    status: status,\n    action_taken: status === 'unique_inserted' ? 'stored_hash' : 'race_condition_caught'\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "supa-log-unique",
+        "name": "Log Unique Event",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          2688,
+          96
+        ],
+        "parameters": {
+          "tableId": "dedup_audit_log",
+          "dataToSend": "autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "8qqASnoyICftntUD",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "code-missing-binary",
+        "name": "Handle Missing Binary",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          880,
+          -16
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "const fileInfo = $('Prepare File Info').item.json;\n\nreturn {\n  json: {\n    status: 'error',\n    errorType: 'missing_binary',\n    message: `Binary data missing for file: ${fileInfo.fileName} (${fileInfo.fileId})`,\n    fileId: fileInfo.fileId,\n    fileName: fileInfo.fileName,\n    mimeType: fileInfo.mimeType,\n    timestamp: new Date().toISOString()\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "code-prep-error-log",
+        "name": "Prepare Error Log Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1088,
+          -16
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// Prepare data for Supabase insert into dedup_audit_log\nreturn {\n  json: {\n    file_id: $json.fileId,\n    file_name: $json.fileName,\n    hash: null,\n    status: 'error',\n    action_taken: 'none',\n    error_message: $json.message\n  }\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "supa-log-error",
+        "name": "Log Error Event",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          1312,
+          -16
+        ],
+        "parameters": {
+          "tableId": "dedup_audit_log",
+          "dataToSend": "autoMapInputData"
+        },
+        "credentials": {
+          "supabaseApi": {
+            "id": "8qqASnoyICftntUD",
+            "name": "Supabase account"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "83d46f79-7eb1-4915-b817-695fb32e4e73",
+        "name": "No Operation, do nothing",
+        "type": "n8n-nodes-base.noOp",
+        "position": [
+          1568,
+          -352
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "9728263e-e319-41bb-b6a7-fef61060399b",
+        "name": "Same File Re-triggered?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1344,
+          -256
+        ],
+        "parameters": {
+          "options": {
+            "ignoreCase": false
+          },
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "dup-check",
+                "operator": {
+                  "type": "string",
+                  "operation": "exists",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.hash }}",
+                "rightValue": 0
+              },
+              {
+                "id": "b2521d34-e9bd-4b07-9333-fac03c8a64b0",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $('Check Hash Exists').item.json.file_id }}",
+                "rightValue": "={{ $('Prepare File Info').item.json.fileId }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "if-duplicate",
+        "name": "Hash Matched Different File?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1568,
+          -144
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "dup-check",
+                "operator": {
+                  "type": "string",
+                  "operation": "exists",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.file_id }}",
+                "rightValue": 0
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "5b469c4c-c982-4768-b5ed-25024cba109f",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -48,
+          -880
+        ],
+        "parameters": {
+          "width": 656,
+          "height": 544,
+          "content": "This workflow detects and handles duplicate files uploaded to a specific Google Drive folder using content based hashing. Instead of relying on file names, it generates an MD5 hash from the actual file binary and compares it against a Supabase database.\n\nIf the same hash already exists for a different file, the new file is automatically moved to a Duplicates folder and a Slack alert is sent. If the file is unique, its hash is stored in Supabase. All outcomes, including duplicates, successful inserts, race conditions, and binary errors, are logged in an audit table.\n\n## How it works\n\n1. Watches a Google Drive folder for new files.\n2. Downloads the file and generates an MD5 hash.\n3. Checks Supabase for an existing hash match.\n4. Moves duplicate files and sends Slack alerts.\n5. Stores unique hashes and logs all events.\n\n## Setup steps\n\n1. Connect Google Drive and select the folder to monitor.\n2. Connect Supabase and create `file_hashes` and `dedup_audit_log` tables.\n3. Connect Slack and choose a notification channel.\n4. Set your Duplicates folder ID in the Move node."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b692e01c-32b3-40fe-9087-7a241f052d05",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -48,
+          -272
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 880,
+          "height": 352,
+          "content": "Watches a specific Google Drive folder for new uploads, extracts metadata, downloads the file, and validates that binary data exists before hashing."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fd0d975f-a6f4-496d-842b-1f04693c3540",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          848,
+          -448
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 416,
+          "height": 352,
+          "content": "Generates an MD5 hash from the file binary and checks Supabase to determine whether the hash already exists."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a8d32a63-100b-4768-8e25-65076003e777",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1280,
+          -448
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 864,
+          "height": 352,
+          "content": "If the hash exists for a different file, the workflow moves the file to a Duplicates folder and sends a Slack notification."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "728ec4a7-cac6-4d9b-836b-6f89f3b0bd66",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1760,
+          16
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 640,
+          "height": 272,
+          "content": "If the hash does not exist, the workflow inserts the new hash into Supabase and confirms successful storage, including race condition handling."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7341d2ae-00fa-4aaa-ade2-2626851c31b4",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2416,
+          -432
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 720,
+          "content": "Logs duplicates, unique inserts, race conditions, and binary errors into a Supabase audit table for traceability."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Crypto": {
+        "main": [
+          [
+            {
+              "node": "Check Hash Exists",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download File": {
+        "main": [
+          [
+            {
+              "node": "Validate Binary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Handle DB Error": {
+        "main": [
+          [
+            {
+              "node": "Prepare Unique Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Insert New Hash": {
+        "main": [
+          [
+            {
+              "node": "Handle DB Error",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Binary": {
+        "main": [
+          [
+            {
+              "node": "Crypto",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Handle Missing Binary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Notify Duplicate": {
+        "main": [
+          [
+            {
+              "node": "Prepare Dup Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Hash Exists": {
+        "main": [
+          [
+            {
+              "node": "Same File Re-triggered?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare File Info": {
+        "main": [
+          [
+            {
+              "node": "Download File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Hash Data": {
+        "main": [
+          [
+            {
+              "node": "Insert New Hash",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Move to Duplicates": {
+        "main": [
+          [
+            {
+              "node": "Notify Duplicate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Drive Trigger": {
+        "main": [
+          [
+            {
+              "node": "Prepare File Info",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Dup Log Data": {
+        "main": [
+          [
+            {
+              "node": "Log Duplicate Event",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Handle Missing Binary": {
+        "main": [
+          [
+            {
+              "node": "Prepare Error Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Error Log Data": {
+        "main": [
+          [
+            {
+              "node": "Log Error Event",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Unique Log Data": {
+        "main": [
+          [
+            {
+              "node": "Log Unique Event",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Same File Re-triggered?": {
+        "main": [
+          [
+            {
+              "node": "No Operation, do nothing",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Hash Matched Different File?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Hash Matched Different File?": {
+        "main": [
+          [
+            {
+              "node": "Move to Duplicates",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Prepare Hash Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 27,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 3
+      },
+      "n8n-nodes-base.code": {
+        "count": 7
+      },
+      "n8n-nodes-base.noOp": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.crypto": {
+        "count": 1
+      },
+      "n8n-nodes-base.supabase": {
+        "count": 5
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.googleDrive": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleDriveTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Shashwat Singh",
+    "username": "shashwatsingh",
+    "bio": "Automation Engineer focused on building practical, client-facing workflow systems for SMB automation agencies.\nExperienced in translating business processes into scoped, maintainable n8n workflows with API integrations, webhook\nhandling, CRM synchronization, and AI-assisted task automation. Comfortable working directly from discovery to\ndeployment, with clean documentation and handoff-ready systems.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/shashwat-singh-aiautomation/"
+    ],
+    "avatar": "https://gravatar.com/avatar/47af931bf45fa73d95dc3dda5c33555cc27834031a371383778a8b78bc9e90f6?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "icon": "fa:arrow-right",
+      "name": "n8n-nodes-base.noOp",
+      "codex": {
+        "data": {
+          "alias": [
+            "nothing"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.noop/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "No Operation, do nothing",
+        "color": "#b0b0b0"
+      },
+      "iconData": {
+        "icon": "arrow-right",
+        "type": "icon"
+      },
+      "displayName": "No Operation, do nothing",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googledrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Drive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 264,
+      "icon": "fa:key",
+      "name": "n8n-nodes-base.crypto",
+      "codex": {
+        "data": {
+          "alias": [
+            "Encrypt",
+            "SHA",
+            "Hash"
+          ],
+          "details": "The Crypto node allows you to hash and Hmac string in a specified format and sign a string using a private key. Use this node when you want to encrypt your data.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.crypto/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Crypto",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "key",
+        "type": "icon"
+      },
+      "displayName": "Crypto",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 531,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDriveTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.googledrivetrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Google Drive Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 545,
+      "icon": "file:supabase.svg",
+      "name": "n8n-nodes-base.supabase",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.supabase/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/supabase/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Supabase"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDkiIGhlaWdodD0iMTEzIiBmaWxsPSJub25lIj48cGF0aCBmaWxsPSJ1cmwoI2EpIiBkPSJNNjMuNzA4IDExMC4yODRjLTIuODYgMy42MDEtOC42NTggMS42MjgtOC43MjctMi45N2wtMS4wMDctNjcuMjUxaDQ1LjIyYzguMTkgMCAxMi43NTggOS40NiA3LjY2NSAxNS44NzR6Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZmlsbC1vcGFjaXR5PSIuMiIgZD0iTTYzLjcwOCAxMTAuMjg0Yy0yLjg2IDMuNjAxLTguNjU4IDEuNjI4LTguNzI3LTIuOTdsLTEuMDA3LTY3LjI1MWg0NS4yMmM4LjE5IDAgMTIuNzU4IDkuNDYgNy42NjUgMTUuODc0eiIvPjxwYXRoIGZpbGw9IiMzRUNGOEUiIGQ9Ik00NS4zMTcgMi4wNzFjMi44Ni0zLjYwMSA4LjY1Ny0xLjYyOCA4LjcyNiAyLjk3bC40NDIgNjcuMjUxSDkuODNjLTguMTkgMC0xMi43NTktOS40Ni03LjY2NS0xNS44NzV6Ii8+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJhIiB4MT0iNTMuOTc0IiB4Mj0iOTQuMTYzIiB5MT0iNTQuOTc0IiB5Mj0iNzEuODI5IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agc3RvcC1jb2xvcj0iIzI0OTM2MSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzNFQ0Y4RSIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iMzYuMTU2IiB4Mj0iNTQuNDg0IiB5MT0iMzAuNTc4IiB5Mj0iNjUuMDgxIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3AvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1vcGFjaXR5PSIwIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Supabase",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 36,
+      "name": "File Management"
+    }
+  ],
+  "image": []
+}

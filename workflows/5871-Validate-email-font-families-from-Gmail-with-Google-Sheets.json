@@ -1,0 +1,810 @@
+{
+  "id": 13566,
+  "name": "Validate email font families from Gmail with Google Sheets",
+  "views": 1,
+  "recentViews": 0,
+  "totalViews": 1,
+  "createdAt": "2026-02-21T02:04:14.887Z",
+  "description": "## How it works\n\n- Load Expected Content + Expected Font Family from Google Sheets.\n- Parse the email HTML to locate the matching content block.\n- Use a JavaScript/HTML extraction node to read the actual font-family applied to that content.\n- Merge expected and actual values.\nCompare Expected Font vs Actual Font to produce a Result (Match / Mismatch).\n- Log Actual Font + Result back into Google Sheets as part of the QA output.\n\n## Setup steps\n- **Google Sheets**\nCreate a sheet with columns:SectionId, Content, ExpectedFontFamily, ActualFontFamily, Result. Populate SectionId + ExpectedContent for each content block you want to verify.\n- **Email HTML Source**\nUse a Gmail node to pull message HTML or use HTTP Request/Read Binary File + HTML/JS to supply the HTML.\n- **Extraction Logic (JS/HTML)**\nUse HTML parsing or a JS Function node to locate the HTML element containing the content string. From the matched element, extract the computed font-family. Clean, normalize, and standardize font names for accurate comparison. Return the extracted value as ActualFontFamily.\n- **Merge & Compare**\nMerge the Google Sheets expected records with the extracted actual font data using SectionId as the key. In the Code (JS) node, compare ExpectedFontFamily vs ActualFontFamily and set Result to Match if equal (or meets your rule), otherwise Mismatch.\n- **Write back**\nUse Google Sheets to update ActualFontFamily and Result for each row.\n### Requirements\n- n8n with access to: Google Sheets, Code/HTML, and (optionally) Gmail nodes.\n- A Google Sheets document with at least these columns:\n\nSectionId (or Key)\nContent\nExpectedFontFamily\nActualFontFamily (output)\nResult (output: Match / Mismatch)\n\n\n\n\n\n\n",
+  "workflow": {
+    "id": "VO0V8MuXMu0wPsMp",
+    "meta": {
+      "instanceId": "d278c1135c16efc1242850e6acb015fc5850927aaa119a1dad78514064cd5ea4"
+    },
+    "name": "My workflow",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "950eaf09-ac30-4530-99f0-c37384e2339f",
+        "name": "When clicking ‘Execute workflow’",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          -464,
+          144
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "67fbbead-8ebd-48f6-9925-a907d7cd638f",
+        "name": "Get many messages",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          -224,
+          144
+        ],
+        "webhookId": "3cd05fbd-84ba-4afd-b8ca-0c75dcf69afe",
+        "parameters": {
+          "simple": false,
+          "filters": {
+            "sender": "user@example.com",
+            "readStatus": "unread",
+            "includeSpamTrash": true
+          },
+          "options": {},
+          "operation": "getAll"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "Gmail account"
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "51141783-e4e7-4420-8813-d134818a0867",
+        "name": "Extract Content Font Family from HTML",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          304,
+          240
+        ],
+        "parameters": {
+          "jsCode": "/**\n * n8n Function node (ES5-friendly)\n * Extracts font-family for each requested content string from Gmail HTML.\n *\n * Input:\n *   - $json.html : full Gmail HTML body (string) — escaped or real\n *\n * Output (array of items):\n *   [{ json: { \n *        Content, \n *        \"Actual font family\", \n *        \"Tag name\", \n *        \"Tag snippet (escaped)\", \n *        \"Anchor href\" \n *     } \n *   }, ...]\n */\n\n// -------------------- Utilities --------------------\nfunction unescapeHtmlEntities(s) {\n  if (!s) return \"\";\n  return s\n    .replace(/&amp;lt;/g, \"&lt;\")\n    .replace(/&amp;gt;/g, \"&gt;\")\n    .replace(/&amp;amp;/g, \"&amp;\")\n    .replace(/&amp;quot;/g, \"\\\"\")\n    .replace(/&amp;#39;/g, \"'\")\n    .replace(/&lt;/g, \"<\")\n    .replace(/&gt;/g, \">\")\n    .replace(/&amp;/g, \"&\")\n    .replace(/&quot;/g, \"\\\"\")\n    .replace(/&#39;/g, \"'\");\n}\n\nfunction escapeHtml(s) {\n  if (!s) return \"\";\n  return s.replace(/&/g, \"&amp;\")\n          .replace(/</g, \"&lt;\")\n          .replace(/>/g, \"&gt;\")\n          .replace(/\"/g, \"&quot;\")\n          .replace(/'/g, \"&#39;\");\n}\n\nfunction innerText(htmlFrag) {\n  if (!htmlFrag) return \"\";\n  var noTags = htmlFrag.replace(/<[^>]*>/g, \" \");\n  return unescapeHtmlEntities(noTags)\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction parseAttributes(openingTag) {\n  var attrs = {};\n  var attrRegex = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\\s*=\\s*(\"([^\"]*)\"|'([^']*)')/g;\n  var m;\n  while ((m = attrRegex.exec(openingTag)) !== null) {\n    attrs[m[1]] = (m[3] || m[4] || \"\").trim();\n  }\n  return attrs;\n}\n\nfunction normalizeFontFamily(ff) {\n  if (!ff) return null;\n  return ff.toLowerCase()\n           .replace(/[\"']/g, \"\")\n           .replace(/\\s*,\\s*/g, \",\")\n           .replace(/\\s+/g, \" \")\n           .trim();\n}\n\nfunction extractFontFamilyFromStyle(style) {\n  if (!style || typeof style !== \"string\") return null;\n  var low = style.toLowerCase();\n  var idx = low.indexOf(\"font-family\");\n  if (idx === -1) return null;\n  var s = style.slice(idx);\n  var colonIdx = s.indexOf(\":\");\n  if (colonIdx === -1) return null;\n  s = s.slice(colonIdx + 1);\n  var semiIdx = s.indexOf(\";\");\n  if (semiIdx !== -1) s = s.slice(0, semiIdx);\n  return normalizeFontFamily(s);\n}\n\n// -------------------- Core logic (unchanged) --------------------\n// ... [functions: escRe, makeFlexibleRegex, findTextIndex, findEnclosingTag, \n// findAncestorWithFont, scanTagsForText, getTagAndFont, getFontForMultiline] ...\n\n// -------------------- Read inputs --------------------\nvar htmlRaw = ($json && typeof $json.html === \"string\") ? $json.html : \"\";\nvar htmlReal = unescapeHtmlEntities(htmlRaw);\n\n// -------------------- Build content list --------------------\nvar contentList = [];\n\nif ($json && Array.isArray($json.searchItems) && $json.searchItems.length) {\n  for (var si = 0; si < $json.searchItems.length; si++) {\n    var v = $json.searchItems[si];\n    if (typeof v === \"string\" && v.trim().length) contentList.push(v.trim());\n  }\n} else if ($json && typeof $json.Content === \"string\" && $json.Content.trim().length) {\n  var parts = $json.Content.split(/\\r?\\n/);\n  for (var p = 0; p < parts.length; p++) {\n    var s = parts[p].trim();\n    if (s) contentList.push(s);\n  }\n} else {\n  // Default: generic placeholders for validation\n  contentList = [\n    \"Sample Heading Text\",\n    \"Sample body copy paragraph with multiple lines.\\n\\nWhy attend?\\n\\nLearn how to validate fonts in email content\\nUnderstand how font-family impacts branding\\nDiscover effective QA strategies\\nExplore accessibility considerations\\nGet answers in a live Q&A\",\n    \"For immediate support, please contact us\",\n    \"Let's Connect\",\n    \"Privacy Policy\",\n    \"You received this email because you are subscribed to updates.\",\n    \"Company Name | Address Line | City, State ZIP\",\n    \"Unsubscribe\"\n  ];\n}\n\n// -------------------- Produce outputs --------------------\nvar items = [];\n\nfor (var ci = 0; ci < contentList.length; ci++) {\n  var content = String(contentList[ci]);\n\n  var result;\n  if (/\\\\n|\\r?\\n/.test(content)) {\n    result = getFontForMultiline(htmlReal, content);\n  } else {\n    var variants = [content];\n    if (/\\s\\|\\s/.test(content)) variants.push(content.replace(/\\s*\\|\\s*/g, \" \"));\n    result = null;\n    for (var vi = 0; vi < variants.length; vi++) {\n      var res = getTagAndFont(htmlReal, variants[vi]);\n      if (res && (res.fontFamily || res.tagStructureReal)) { result = res; break; }\n    }\n    if (!result) result = { tagName: null, fontFamily: \"\", attrs: {}, tagStructureReal: null, anchorHref: null };\n  }\n\n  var tagStructureEsc = result.tagStructureReal ? escapeHtml(result.tagStructureReal) : \"Not Found\";\n\n  items.push({\n    json: {\n      Content: content,\n      \"Actual font family\": result.fontFamily || \"\",\n      \"Tag name\": result.tagName || null,\n      \"Tag snippet (escaped)\": tagStructureEsc,\n      \"Anchor href\": result.anchorHref || null\n    }\n  });\n}\n\nreturn items;"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "38c84d7c-a939-4723-aebd-c2d77a1d1c53",
+        "name": "Combine Font Inputs",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          560,
+          160
+        ],
+        "parameters": {},
+        "typeVersion": 3.2
+      },
+      {
+        "id": "ff78c01e-fea3-4033-92fd-cd2af602e652",
+        "name": "Extract Actual Font Family and Results",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          832,
+          160
+        ],
+        "parameters": {
+          "jsCode": "/**\n * n8n Function node (ES5-friendly)\n * Validates Excel \"Expected font family\" against Actual font family parsed from Gmail HTML.\n * Falls back to parser-derived \"Actual font family\" when HTML parsing doesn't find a styled tag.\n *\n * Input: merged items (Excel rows + parser rows + Gmail HTML item)\n * Output: array of items in Excel template shape:\n *   [{ json: { Content, \"Expected font family\", \"Actual font family\", Result } }, ...]\n */\n\n// -------------------- Collect items --------------------\nvar allItems = $items();\n\n// -------------------- Partition items; capture HTML --------------------\nvar excelRows = [];\nvar parserRows = [];\nvar htmlRaw = \"\";\n\nfor (var i = 0; i < allItems.length; i++) {\n  var j = allItems[i].json || {};\n  var keys = Object.keys(j);\n\n  if (keys.indexOf(\"Content\") !== -1 && keys.indexOf(\"Expected font family\") !== -1) {\n    excelRows.push(j);\n  }\n\n  if (keys.indexOf(\"Content\") !== -1 && keys.indexOf(\"Actual font family\") !== -1) {\n    parserRows.push(j);\n  }\n\n  if (!htmlRaw && typeof j.html === \"string\" && j.html.indexOf(\"<html\") !== -1) {\n    htmlRaw = j.html;\n  }\n}\n\nif (!htmlRaw) {\n  var mergedString = JSON.stringify(allItems.map(function (it) { return it.json || {}; }));\n  var s = mergedString.indexOf(\"<html\");\n  var e = mergedString.lastIndexOf(\"</html>\");\n  if (s !== -1 && e !== -1) {\n    htmlRaw = mergedString.slice(s, e + \"</html>\".length);\n  }\n}\n\n// -------------------- Utilities --------------------\nfunction unescapeHtmlEntities(s) {\n  if (!s) return \"\";\n  return s\n    .replace(/&amp;lt;/g, \"&lt;\")\n    .replace(/&amp;gt;/g, \"&gt;\")\n    .replace(/&amp;amp;/g, \"&amp;\")\n    .replace(/&amp;quot;/g, \"\\\"\")\n    .replace(/&amp;#39;/g, \"'\")\n    .replace(/&lt;/g, \"<\")\n    .replace(/&gt;/g, \">\")\n    .replace(/&amp;/g, \"&\")\n    .replace(/&quot;/g, \"\\\"\")\n    .replace(/&#39;/g, \"'\");\n}\nvar html = unescapeHtmlEntities(htmlRaw || \"\");\n\nfunction normalizeFontFamily(ff) {\n  if (!ff) return null;\n  return ff.toLowerCase()\n           .replace(/[\"']/g, \"\")\n           .replace(/\\s*,\\s*/g, \",\")\n           .replace(/\\s+/g, \" \")\n           .trim();\n}\n\nfunction compareFamilies(expectedRaw, actualRaw) {\n  var expected = normalizeFontFamily(expectedRaw);\n  var actual = normalizeFontFamily(actualRaw);\n  if (!expected || !actual) return false;\n  return actual.indexOf(expected) !== -1 || expected.indexOf(actual) !== -1;\n}\n\nfunction parseAttributes(openingTag) {\n  var attrs = {};\n  var attrRegex = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\\s*=\\s*(\"([^\"]*)\"|'([^']*)')/g;\n  var m;\n  while ((m = attrRegex.exec(openingTag)) !== null) {\n    attrs[m[1]] = (m[3] || m[4] || \"\").trim();\n  }\n  return attrs;\n}\n\nfunction extractFontFamilyFromStyle(style) {\n  if (!style || typeof style !== \"string\") return null;\n  var low = style.toLowerCase();\n  var idx = low.indexOf(\"font-family\");\n  if (idx === -1) return null;\n  var s = style.slice(idx);\n  var colonIdx = s.indexOf(\":\");\n  if (colonIdx === -1) return null;\n  s = s.slice(colonIdx + 1);\n  var semiIdx = s.indexOf(\";\");\n  if (semiIdx !== -1) s = s.slice(0, semiIdx);\n  return normalizeFontFamily(s);\n}\n\nfunction innerText(htmlFrag) {\n  if (!htmlFrag) return \"\";\n  var noTags = htmlFrag.replace(/<[^>]*>/g, \" \");\n  return unescapeHtmlEntities(noTags).replace(/\\s+/g, \" \").trim();\n}\n\nfunction escRe(s) { return s.replace(/[-/\\\\^$*+?.()|[\\]{}]/g, \"\\\\$&\"); }\n\nfunction makeFlexibleRegex(text) {\n  var t = String(text).replace(/&amp;/g, \"&\").replace(/\\s+/g, \" \").trim();\n  t = escRe(t);\n  t = t.replace(/\\s+/g, \"\\\\s+\");\n  t = t.replace(/\\\\\\|/g, \"(?:\\\\s*\\\\|\\\\s*|\\\\s+)\");\n  return t;\n}\n\nfunction findTextIndex(htmlStr, text) {\n  var pattern = makeFlexibleRegex(text);\n  var re = new RegExp(pattern, \"i\");\n  var m = re.exec(htmlStr);\n  return m ? m.index : -1;\n}\n\nfunction findEnclosingTag(htmlStr, idx) {\n  var openAngleIdx = htmlStr.lastIndexOf(\"<\", idx);\n  if (openAngleIdx === -1) return null;\n  var closeAngleIdx = htmlStr.indexOf(\">\", openAngleIdx);\n  if (closeAngleIdx === -1) return null;\n\n  var openingTag = htmlStr.slice(openAngleIdx, closeAngleIdx + 1);\n  var tagMatch = openingTag.match(/^<\\s*([a-zA-Z0-9]+)\\b/);\n  var tagName = tagMatch ? tagMatch[1].toLowerCase() : null;\n  var attrs = parseAttributes(openingTag);\n\n  var closingTag = tagName ? (\"</\" + tagName + \">\") : null;\n  var endIdx = closingTag ? htmlStr.indexOf(closingTag, idx) : -1;\n  var snippet = (endIdx !== -1) ? htmlStr.slice(openAngleIdx, endIdx + closingTag.length) : openingTag;\n\n  return { tagName: tagName, attrs: attrs, tagStructureReal: snippet };\n}\n\nfunction findAncestorWithFont(htmlStr, idx) {\n  var preferred = [\"h1\",\"h2\",\"h3\",\"p\",\"li\",\"td\",\"div\"];\n  for (var k = 0; k < preferred.length; k++) {\n    var t = preferred[k];\n    var openIdx = htmlStr.lastIndexOf(\"<\" + t, idx);\n    if (openIdx === -1) continue;\n    var closeOpen = htmlStr.indexOf(\">\", openIdx);\n    if (closeOpen === -1) continue;\n\n    var closingTag = \"</\" + t + \">\";\n    var endIdx = htmlStr.indexOf(closingTag, idx);\n    if (endIdx === -1) continue;\n\n    if (closeOpen < idx && idx < endIdx) {\n      var openingTag = htmlStr.slice(openIdx, closeOpen + 1);\n      var attrs = parseAttributes(openingTag);\n      var ff = extractFontFamilyFromStyle(attrs.style || \"\");\n      if (ff) return ff;\n    }\n  }\n  return null;\n}\n\nfunction scanTagsForText(htmlStr, targetText, tagNames) {\n  for (var ti = 0; ti < tagNames.length; ti++) {\n    var t = tagNames[ti];\n    var re = new RegExp(\"<\" + t + \"[^>]*>([\\\\s\\\\S]*?)</\" + t + \">\", \"gi\");\n    var m;\n    while ((m = re.exec(htmlStr)) !== null) {\n      var snippet = m[0];\n      var open = snippet.match(new RegExp(\"^<\" + t + \"[^>]*>\", \"i\"));\n      var openingTag = open ? open[0] : \"\";\n      var attrs = parseAttributes(openingTag);\n      var ff = extractFontFamilyFromStyle(attrs.style || \"\");\n      var inner = innerText(snippet);\n\n      var pattern = new RegExp(makeFlexibleRegex(targetText), \"i\");\n      if (pattern.test(inner)) {\n        return ff || \"\";\n      }\n    }\n  }\n  return \"\";\n}\n\nfunction getActualFontFromHtml(htmlStr, content) {\n  var isMultiLine = /\\\\n|\\r?\\n/.test(content);\n  if (isMultiLine) {\n    var raw = String(content).replace(/\\\\n/g, \"\\n\");\n    var lines = raw.split(/\\r?\\n/).map(function(s){return s.trim();}).filter(function(s){return !!s;});\n    for (var j = 0; j < lines.length; j++) {\n      var ff1 = getActualFontFromHtml(htmlStr, lines[j]);\n      if (ff1) return ff1;\n    }\n    return \"\";\n  }\n\n  var variants = [content];\n  if (/\\s\\|\\s/.test(content)) variants.push(content.replace(/\\s*\\|\\s*/g, \" \"));\n\n  for (var vi = 0; vi < variants.length; vi++) {\n    var t = variants[vi];\n    var idx = findTextIndex(htmlStr"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "ac67d32f-489d-49e9-ab9f-e0e1fd877d32",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1392,
+          -64
+        ],
+        "parameters": {
+          "width": 832,
+          "height": 624,
+          "content": "##  Main Overview – Font Family Check Workflow\n\nThis workflow automates the font‑family validation process for email QA by comparing the expected font values provided in Google Sheets with the actual font extracted from the email HTML. It replaces manual inspection of email content and style attributes, ensuring consistency with brand guidelines and reducing QA time. The workflow evaluates multiple content sections—such as headings, subheadings, CTA labels, paragraphs, disclaimers, and footer text—and verifies that each one uses the correct font family as specified by the design or branding document.\n\n**How it works**\n1. Load Expected Content + Expected Font Family from Google Sheets.\n2. Parse the email HTML to locate the matching content block.\n3. Use a JavaScript/HTML extraction node to read the actual font-family applied to that content.\n4. Merge expected and actual values.\n5. Compare Expected Font vs Actual Font to produce a Result (Match / Mismatch).\n6. Log Actual Font + Result back into Google Sheets as part of the QA output.\n\n**Setup steps**\n* Prepare a Google Sheet with columns: Label, Content, Expected Font Family.\n* Ensure the HTML parsing logic correctly targets selectors related to your email structure.\n* Map HTML elements to the correct content labels for accurate comparisons.\n* Connect Google Sheets + Gmail/HTML Source nodes."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "84bec468-7928-4334-b460-7471bdb34762",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          0,
+          0
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1344,
+          "height": 400,
+          "content": "## Font Family Validation\nReads expected content + font family from Google Sheets, extracts actual font family from HTML using JS, merges inputs, compares expected vs actual, and logs results back into Google Sheets."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "605c61d4-dff4-4e9e-a667-857cabbd6da7",
+        "name": "Load Expected Content and Font Family",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          176,
+          112
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "id",
+            "value": "=// Parameters provided by user in node config\nconst sheetId = this.getNodeParameter(\"sheetId\", 0) || \"YOUR_SPREADSHEET_ID\";\nconst sheetName = this.getNodeParameter(\"sheetName\", 0) || \"Sheet1\";\n\nconst { google } = require(\"googleapis\");\nconst sheets = google.sheets({ version: \"v4\", auth });\n\nconst response = await sheets.spreadsheets.values.get({\n  spreadsheetId: sheetId,\n  range: sheetName,\n});\n\nreturn response.data.values.map(row => ({ json: { row } }));"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "url",
+            "value": "=https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "Google Sheets account"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "771fae7e-0349-4bc3-91fe-c3b3cc84b460",
+        "name": "Log Font Checks to Excel",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1088,
+          160
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Result": "={{ $json.Result }}",
+              "Content": "={{ $json.Content }}",
+              "Actual font family": "={{ $json['Actual font family'] }}",
+              "Expected font family": "={{ $json['Expected font family'] }}"
+            },
+            "schema": [
+              {
+                "id": "Content",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Content",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Expected font family",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "Expected font family",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Actual font family",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Actual font family",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Result",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Result",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "Expected font family"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "id",
+            "value": "=// Parameters provided by user in node config\nconst sheetId = this.getNodeParameter(\"sheetId\", 0) || \"YOUR_SPREADSHEET_ID\";\nconst sheetName = this.getNodeParameter(\"sheetName\", 0) || \"Sheet1\";\n\nconst { google } = require(\"googleapis\");\nconst sheets = google.sheets({ version: \"v4\", auth });\n\nconst response = await sheets.spreadsheets.values.get({\n  spreadsheetId: sheetId,\n  range: sheetName,\n});\n\nreturn response.data.values.map(row => ({ json: { row } }));"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "url",
+            "value": "=https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "Google Sheets account"
+          }
+        },
+        "typeVersion": 4.7
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "410a53b2-21c1-4105-bd80-213d300fed14",
+    "connections": {
+      "Get many messages": {
+        "main": [
+          [
+            {
+              "node": "Extract Content Font Family from HTML",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Load Expected Content and Font Family",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Combine Font Inputs": {
+        "main": [
+          [
+            {
+              "node": "Extract Actual Font Family and Results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When clicking ‘Execute workflow’": {
+        "main": [
+          [
+            {
+              "node": "Get many messages",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Content Font Family from HTML": {
+        "main": [
+          [
+            {
+              "node": "Combine Font Inputs",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Load Expected Content and Font Family": {
+        "main": [
+          [
+            {
+              "node": "Combine Font Inputs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Actual Font Family and Results": {
+        "main": [
+          [
+            {
+              "node": "Log Font Checks to Excel",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 9,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 2
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 2
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Sasikala Jayamani",
+    "username": "sasikalajayamani",
+    "bio": "",
+    "verified": true,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/e64e46d066aeb70922f92115e530ec12d015d04e225e7688c151edd58c98be5e?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 35,
+      "name": "Document Extraction"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

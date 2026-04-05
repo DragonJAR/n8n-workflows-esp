@@ -1,0 +1,1202 @@
+{
+  "id": 6973,
+  "name": "Sync website visitors from RB2B to Attio CRM via Slack with deal creation",
+  "views": 319,
+  "recentViews": 0,
+  "totalViews": 319,
+  "createdAt": "2025-08-04T16:11:08.062Z",
+  "description": "This n8n template automatically syncs website visitors identified by RB2B into your Attio CRM, creating comprehensive contact records and associated sales deals for immediate follow-up.\n\nPerfect for sales teams who want to capture every website visitor as a potential lead without manual data entry!\n\n## Good to know\n\n* RB2B identifies anonymous website visitors and sends structured data via Slack notifications\n* The workflow prevents duplicate contacts by checking email addresses before creating new records\n* All RB2B leads are automatically tagged with source tracking for easy identification\n\n## How it works\n\n* RB2B sends website visitor notifications to your designated Slack channel with visitor details\n* The workflow extracts structured data from Slack messages including name, email, company, LinkedIn, and location\n* It searches Attio CRM to check if the person already exists based on email address\n* For new visitors, it creates a complete contact record with all available information\n* For existing contacts, it updates their record and manages deal creation intelligently\n* Automatically creates sales deals tagged as \"RB2B Website Visitor\" for proper lead tracking\n\n## How to use\n\n* Configure RB2B to send visitor notifications to a dedicated Slack channel\n* The Slack trigger can be replaced with other triggers like webhooks if you prefer different notification methods\n* Customize the deal naming conventions and stages to match your sales pipeline\n\n## Requirements\n\n* RB2B account with Slack integration enabled\n* Attio CRM account with API access\n* Slack workspace with bot permissions for the designated RB2B channel\n\n## Customising this workflow\n\n* Modify deal stages and values based on your sales process\n* Add lead scoring based on company domain or visitor behavior patterns\n* Integrate additional enrichment APIs to enhance contact data\n* Set up automated email sequences or Slack notifications for high-value leads",
+  "workflow": {
+    "meta": {
+      "instanceId": "8d70623c0c9f4448eda9626cd8185192c28447e191325b0c0d94d3f40d23be3a"
+    },
+    "nodes": [
+      {
+        "id": "8c33bf1c-c341-445c-b7cc-3537a59bae1c",
+        "name": "RB2B New Message",
+        "type": "n8n-nodes-base.slackTrigger",
+        "position": [
+          -120,
+          180
+        ],
+        "webhookId": "387fbf83-8a7d-4b68-a1b1-1196fd130c1c",
+        "parameters": {
+          "options": {},
+          "trigger": [
+            "message"
+          ],
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "C0712SMCKRN",
+            "cachedResultName": "website-visitors"
+          }
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "credential-id",
+            "name": "slackApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a725c2de-1074-4b6b-8ff5-ba76b5a5dcbb",
+        "name": "Cleanup Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          240,
+          180
+        ],
+        "parameters": {
+          "jsCode": "function splitName(fullName) {\n  if (!fullName || typeof fullName !== 'string') {\n    return { firstName: '', lastName: '' };\n  }\n  const parts = fullName.trim().split(/\\s+/);\n  if (parts.length === 0) {\n    return { firstName: '', lastName: '' };\n  }\n  const firstName = parts[0];\n  const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';\n  return { firstName, lastName, fullName };\n}\n\nfunction extractDataFromSlackMessage(messageData) {\n  // Get the message text\n  const messageText = messageData.text || '';\n  \n  // Initialize extracted data\n  let fullName = '';\n  let linkedin = '';\n  let title = '';\n  let company = '';\n  let email = '';\n  let location = '';\n  let urls = [];\n  \n  // Extract LinkedIn URL from rich text blocks if available\n  if (messageData.blocks && messageData.blocks.length > 0) {\n    for (const block of messageData.blocks) {\n      if (block.type === 'rich_text' && block.elements) {\n        for (const element of block.elements) {\n          if (element.type === 'rich_text_section' && element.elements) {\n            for (const richElement of element.elements) {\n              if (richElement.type === 'link' && richElement.url && richElement.url.includes('linkedin.com')) {\n                linkedin = richElement.url;\n                break;\n              }\n            }\n          }\n        }\n      }\n    }\n  }\n  \n  // Helper function to clean up Slack link format and extract display text\n  function cleanSlackLinks(text) {\n    // Replace <URL|Display_Text> with just Display_Text\n    return text.replace(/<[^|>]+\\|([^>]+)>/g, '$1')\n               .replace(/&amp;/g, '&')\n               .trim();\n  }\n  \n  // Function to extract URLs from text\n  function extractUrlsFromText(text) {\n    const urls = [];\n    // Match URLs in Slack format <URL|Display_Text> or <URL>\n    const urlMatches = text.match(/<(https?:\\/\\/[^|>]+)/g);\n    if (urlMatches) {\n      urlMatches.forEach(match => {\n        try {\n          const url = match.replace('<', '');\n          if (!urls.includes(url)) {\n            urls.push(url);\n          }\n        } catch (e) {\n          // Invalid URL, skip\n        }\n      });\n    }\n    return urls;\n  }\n  \n  // Function to extract all URLs from rich text blocks\n  function extractUrlsFromBlocks(blocks) {\n    const allUrls = [];\n    \n    if (!blocks || !Array.isArray(blocks)) return allUrls;\n    \n    for (const block of blocks) {\n      if (block.type === 'rich_text' && block.elements) {\n        for (const element of block.elements) {\n          if (element.type === 'rich_text_section' && element.elements) {\n            for (const richElement of element.elements) {\n              if (richElement.type === 'link' && richElement.url) {\n                const url = richElement.url;\n                if (!allUrls.includes(url)) {\n                  allUrls.push(url);\n                }\n              }\n            }\n          }\n        }\n      }\n    }\n    return allUrls;\n  }\n  \n  // Parse the text content using regex patterns\n  const nameMatch = messageText.match(/\\*Name\\*:\\s*([^\\n]+)/);\n  if (nameMatch) {\n    fullName = nameMatch[1].trim();\n  }\n  \n  const titleMatch = messageText.match(/\\*Title\\*:\\s*([^\\n]+)/);\n  if (titleMatch) {\n    title = cleanSlackLinks(titleMatch[1]);\n  }\n  \n  const companyMatch = messageText.match(/\\*Company\\*:\\s*([^\\n]+)/);\n  if (companyMatch) {\n    const rawCompany = companyMatch[1];\n    company = cleanSlackLinks(rawCompany);\n    // Extract URLs from company field\n    const textUrls = extractUrlsFromText(rawCompany);\n    urls = textUrls;\n  }\n  \n  // Extract location\n  const locationMatch = messageText.match(/\\*Location\\*:\\s*([^\\n]+)/);\n  if (locationMatch) {\n    location = cleanSlackLinks(locationMatch[1]);\n  }\n  \n  // Extract email address\n  const emailMatch = messageText.match(/\\*Email\\*:\\s*([^\\n\\s]+)/);\n  if (emailMatch) {\n    email = emailMatch[1].trim();\n  }\n  \n  // Alternative email extraction patterns\n  if (!email) {\n    // Try to find email in the general text\n    const generalEmailMatch = messageText.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);\n    if (generalEmailMatch) {\n      email = generalEmailMatch[1];\n    }\n  }\n  \n  // Extract all URLs from rich text blocks\n  const blockUrls = extractUrlsFromBlocks(messageData.blocks);\n  \n  // Combine all URLs\n  const allUrls = [...new Set([...urls, ...blockUrls])];\n  \n  // If LinkedIn not found in blocks, try to extract from text\n  if (!linkedin) {\n    const linkedinMatch = messageText.match(/\\*LinkedIn\\*:\\s*<([^>]+)>/);\n    if (linkedinMatch) {\n      linkedin = linkedinMatch[1];\n    }\n  }\n  \n  return {\n    fullName,\n    linkedin,\n    title,\n    company,\n    email,\n    location,\n    urls: allUrls\n  };\n}\n\nfunction extractDomainsFromUrls(urls) {\n  console.log('URLs received:', urls);\n  \n  if (!urls || !Array.isArray(urls)) {\n    console.log('No URLs or not an array');\n    return [];\n  }\n  \n  const domains = [];\n  \n  urls.forEach(url => {\n    console.log('Processing URL:', url);\n    \n    // Skip LinkedIn URLs\n    if (url.includes('linkedin.com')) {\n      console.log('Skipping LinkedIn URL:', url);\n      return;\n    }\n    \n    try {\n      // Simple regex approach as backup\n      const domainMatch = url.match(/https?:\\/\\/(www\\.)?([^\\/]+)/);\n      if (domainMatch && domainMatch[2]) {\n        let domain = domainMatch[2];\n        console.log('Domain extracted via regex:', domain);\n        \n        if (domain && !domains.includes(domain)) {\n          domains.push(domain);\n          console.log('Added domain:', domain);\n        }\n      } else {\n        console.log('No domain match found for:', url);\n      }\n    } catch (e) {\n      console.log(`Error processing URL: ${url}`, e.message);\n    }\n  });\n  \n  console.log('Final domains:', domains);\n  return domains;\n}\n\n// Main execution\nconst inputData = $input.first().json;\nconst extractedData = extractDataFromSlackMessage(inputData);\nconst names = splitName(extractedData.fullName);\n\n// Extract domains from URLs for Attio\nconst domains = extractDomainsFromUrls(extractedData.urls);\n\nreturn [\n  {\n    json: {\n      full_name: names.fullName,\n      first_name: names.firstName,\n      last_name: names.lastName,\n      linkedin: extractedData.linkedin,\n      title: extractedData.title,\n      company: extractedData.company,\n      email: extractedData.email,\n      location: extractedData.location,\n      urls: extractedData.urls,\n      domains: domains,\n      primary_domain: domains.length > 0 ? domains[0] : null\n    }\n  }\n];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d69f2ede-b405-42ed-8075-805e14a0d1a3",
+        "name": "Get Person",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          620,
+          180
+        ],
+        "parameters": {
+          "url": "https://api.attio.com/v2/objects/people/records/query",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"filter\": {\n    \"email_addresses\": {\n      \"$contains\": \"{{ $('Cleanup Data').first().json.email }}\"\n    }\n  },\n  \"page\": {\n    \"size\": 1\n  }\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType"
+        },
+        "credentials": {
+          "httpCustomAuth": {
+            "id": "credential-id",
+            "name": "httpCustomAuth Credential"
+          },
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "5adc0ad5-b286-40ff-8dec-e52b3b3d71b4",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -900,
+          -120
+        ],
+        "parameters": {
+          "width": 640,
+          "height": 900,
+          "content": "## 🎯 Sync RB2B Website Visitors to Attio CRM with Deal Creation\n\n### This n8n template automatically captures website visitors identified by RB2B and syncs them to your Attio CRM with intelligent deal management.\n\nPerfect for sales teams who want to turn anonymous website traffic into qualified leads without manual data entry!\n\n### How it works\n* RB2B sends website visitor notifications to your designated Slack channel\n* The workflow extracts visitor details (name, email, company, LinkedIn, location) from Slack messages\n* It checks if the person already exists in Attio CRM to prevent duplicates\n* Creates new contacts with complete visitor information or updates existing records\n* Automatically creates sales deals for new leads or updates existing deal stages\n* Tags all leads with \"RB2B Website Visitor\" source for easy identification\n\n### How to use\n* Configure RB2B to send visitor notifications to a dedicated Slack channel\n* Set up your Slack bot credentials and select the RB2B channel\n* Add your Attio API credentials with proper permissions\n* Customize deal stages, naming conventions, and field mappings as needed\n* The workflow handles both new and existing contacts intelligently\n\n### Requirements\n* RB2B account with Slack integration enabled\n* Attio CRM account with API access\n* Slack workspace with bot permissions\n\n### Good to know\n* The workflow prevents duplicate contacts by checking email addresses\n* Deal creation logic differs for new vs existing contacts\n* All RB2B leads are tagged with source tracking for follow-up\n\nHappy Lead Converting!"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f58703c3-833d-4c70-b4ed-1b4d74700bbe",
+        "name": "Create Person",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1300,
+          380
+        ],
+        "parameters": {
+          "url": "https://api.attio.com/v2/objects/people/records",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"data\": {\n    \"values\": {\n      \"name\": [\n        {\n          \"first_name\": \"{{ $('Cleanup Data').item.json.first_name }}\",\n          \"last_name\": \"{{ $('Cleanup Data').item.json.last_name }}\",\n          \"full_name\": \"{{ $('Cleanup Data').item.json.full_name }}\"\n        }\n      ],\n      \"email_addresses\": [\"{{ $('Cleanup Data').item.json.email }}\"]\n    }\n  }\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType"
+        },
+        "credentials": {
+          "httpCustomAuth": {
+            "id": "credential-id",
+            "name": "httpCustomAuth Credential"
+          },
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "d4822bab-4756-4663-90af-2f8cbb6a5aef",
+        "name": "Create Deal",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1520,
+          380
+        ],
+        "parameters": {
+          "url": "https://api.attio.com/v2/objects/deals/records",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"data\": {\n    \"values\": {\n      \"name\": \"Deal with {{ $json.data.values.name[0].full_name }}\",\n      \"stage\": \"RB2B Website Visitor\",\n      \"value\": 0,\n      \"owner\": \"yourname@emaildomain.com\",\n      \"associated_people\": [\n        {\n          \"target_object\": \"people\",\n          \"target_record_id\": \"{{ $json.data.id.record_id }}\"\n        }\n      ]\n    }\n  }\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "0c325d8d-5258-4d0e-8f78-74b9581e8ab2",
+        "name": "Create Associated Deal",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1620,
+          200
+        ],
+        "parameters": {
+          "url": "https://api.attio.com/v2/objects/deals/records",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"data\": {\n    \"values\": {\n      \"name\": \"Deal with {{ $('Get Person').item.json.data[0].values.name[0].full_name }}\",\n      \"stage\": \"RB2B Website Visitor\",\n      \"value\": 0,\n      \"owner\": \"yourname@emaildomain.com\",\n      \"associated_people\": [\n        {\n          \"target_object\": \"people\",\n          \"target_record_id\": \"{{ $('Get Person').item.json.data[0].id.record_id }}\"\n        }\n      ]\n    }\n  }\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "c4f2d0b7-f32c-4f0d-9b55-7ca011b2e828",
+        "name": "Update Deal Stage",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1480,
+          0
+        ],
+        "parameters": {
+          "url": "=https://api.attio.com/v2/objects/deals/records/{{ $('Get Person').item.json.data[0].values.associated_deals[0].target_record_id }}",
+          "method": "PATCH",
+          "options": {},
+          "jsonBody": "{\n  \"data\": {\n    \"values\": {\n      \"stage\": \"RB2B Website Visitor\"\n    }\n  }\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType"
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "cf2fd591-a51b-4334-ade2-6dc5b10c8b6e",
+        "name": "Person Exists?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          940,
+          180
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "d838154e-4857-4180-b2d4-30e021e95e39",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.data && $json.data.length > 0 }}",
+                "rightValue": "0"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "4db29d8f-f712-4f9a-95b9-6396d05a4819",
+        "name": "Switch",
+        "type": "n8n-nodes-base.switch",
+        "position": [
+          1260,
+          100
+        ],
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "outputKey": "Already has associated deal",
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "loose"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "d99a0062-cfe0-45bf-9475-7d250786ac00",
+                      "operator": {
+                        "type": "boolean",
+                        "operation": "true",
+                        "singleValue": true
+                      },
+                      "leftValue": "={{ $json.data[0].values.associated_deals.length > 0 }}",
+                      "rightValue": ""
+                    }
+                  ]
+                },
+                "renameOutput": true
+              },
+              {
+                "outputKey": "No associated deal",
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "loose"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "07564302-add4-4389-9c8b-0a1d8e3b90a1",
+                      "operator": {
+                        "type": "boolean",
+                        "operation": "true",
+                        "singleValue": true
+                      },
+                      "leftValue": "={{ $json.data[0].values.associated_deals.length === 0 }}",
+                      "rightValue": ""
+                    }
+                  ]
+                },
+                "renameOutput": true
+              }
+            ]
+          },
+          "options": {},
+          "looseTypeValidation": true
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "7b9b7d43-ac35-40bd-b2e7-1db00250ce60",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -180,
+          -100
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 240,
+          "content": "## 1. RB2B Slack Trigger\n[Read more about the Slack Trigger node](https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.slacktrigger)\n\nMonitors your designated Slack channel for new website visitor notifications from RB2B. Each notification contains structured visitor data including contact details and website activity."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "da56bb42-8627-48a2-9067-6c798f728b1e",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          180,
+          -100
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 240,
+          "content": "## 2. Parse RB2B Visitor Data\n[Read more about the Code node](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code)\n\nExtracts and structures visitor information from RB2B Slack messages. Handles name splitting, URL extraction, domain parsing, and data cleaning to prepare for CRM import."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "5a5d5ea1-4d5c-42c5-a5d9-1090e2769c93",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          540,
+          -100
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 240,
+          "content": "## 3. Check if Person Exists in Attio\n[Read more about the HTTP Request node](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest)\n\nSearches Attio CRM using the visitor's email address to prevent duplicate contact creation. This ensures data integrity and proper lead management."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "66b73760-9085-49e1-b4f6-11397177ba2d",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          840,
+          360
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 300,
+          "content": "## 4. Intelligent Deal Management\n[Read more about the Switch node](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch)\n\nSmart logic that handles deal creation differently based on contact status:\n- New contacts: Creates person record first, then associated deal\n- Existing contacts: Checks for existing deals and either updates or creates new ones"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6eda464a-2a2f-49e5-91bd-a2abe92c537c",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1840,
+          60
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 440,
+          "height": 180,
+          "content": "## 5. Create/Update Attio Records\n[Read more about Attio API](https://developers.attio.com/)\n\nFinal step that creates new contact records and deals in Attio CRM. All RB2B leads are tagged with source information and assigned appropriate deal stages for sales follow-up."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3192726d-1b78-4ab5-9193-06fb1a28e20f",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -140,
+          440
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 460,
+          "height": 260,
+          "content": "### Setup Required!\nBefore activating this workflow:\n1. Configure RB2B → Slack integration\n2. Add Slack bot credentials to trigger node\n3. Add Attio API credentials to all HTTP nodes\n4. Select correct Slack channel in trigger\n5. Test with sample RB2B notification\n\nMissing credentials will cause workflow failures!"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {
+      "Cleanup Data": [
+        {
+          "urls": [
+            "https://www.linkedin.com/in/john-smith-dev",
+            "https://www.techcorp.com/"
+          ],
+          "email": "john.smith@example.com",
+          "title": "Senior Developer",
+          "company": "TechCorp Industries",
+          "domains": [
+            "techcorp.com"
+          ],
+          "linkedin": "https://www.linkedin.com/in/john-smith-dev",
+          "location": "San Francisco, CA",
+          "full_name": "John Smith",
+          "last_name": "Smith",
+          "first_name": "John",
+          "primary_domain": "techcorp.com"
+        }
+      ],
+      "RB2B New Message": [
+        {
+          "ts": "1748900000.123456",
+          "team": "T02EXAMPLE789",
+          "text": "*Name*: John Smith\n*Title*: Senior Developer\n*Company*: TechCorp Industries\n*Email*: john.smith@example.com\n*LinkedIn*: <https://www.linkedin.com/in/john-smith-dev>\n*Location*: San Francisco, CA\n\nFirst identified visiting *<https://www.techcorp.com/>* on *August 5, 2025 at 10:30AM PST*",
+          "type": "message",
+          "user": "U02DUMMY456",
+          "blocks": [
+            {
+              "type": "rich_text",
+              "block_id": "Xy9Zw",
+              "elements": [
+                {
+                  "type": "rich_text_section",
+                  "elements": [
+                    {
+                      "text": "Name",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": ": John Smith\n",
+                      "type": "text"
+                    },
+                    {
+                      "text": "Title",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": ": Senior Developer\n",
+                      "type": "text"
+                    },
+                    {
+                      "text": "Company",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": ": TechCorp Industries\n",
+                      "type": "text"
+                    },
+                    {
+                      "text": "Email",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": ": john.smith@example.com\n",
+                      "type": "text"
+                    },
+                    {
+                      "text": "LinkedIn",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": ": ",
+                      "type": "text"
+                    },
+                    {
+                      "url": "https://www.linkedin.com/in/john-smith-dev",
+                      "type": "link"
+                    },
+                    {
+                      "text": "\n",
+                      "type": "text"
+                    },
+                    {
+                      "text": "Location",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": ": San Francisco, CA\n\nFirst identified visiting ",
+                      "type": "text"
+                    },
+                    {
+                      "url": "https://www.techcorp.com/",
+                      "text": "https://www.techcorp.com/",
+                      "type": "link",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "text": " on ",
+                      "type": "text"
+                    },
+                    {
+                      "text": "August 5, 2025 at 10:30AM PST",
+                      "type": "text",
+                      "style": {
+                        "bold": true
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "channel": "C09DUMMY123",
+          "event_ts": "1748900000.123456",
+          "channel_type": "channel",
+          "client_msg_id": "f9e8d7c6-b5a4-3210-9876-54321fedcba0"
+        }
+      ]
+    },
+    "connections": {
+      "Switch": {
+        "main": [
+          [
+            {
+              "node": "Update Deal Stage",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Create Associated Deal",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Person": {
+        "main": [
+          [
+            {
+              "node": "Person Exists?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Cleanup Data": {
+        "main": [
+          [
+            {
+              "node": "Get Person",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create Person": {
+        "main": [
+          [
+            {
+              "node": "Create Deal",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Person Exists?": {
+        "main": [
+          [
+            {
+              "node": "Switch",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Create Person",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "RB2B New Message": {
+        "main": [
+          [
+            {
+              "node": "Cleanup Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 16,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 1
+      },
+      "n8n-nodes-base.switch": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 5
+      },
+      "n8n-nodes-base.slackTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Anna Bui",
+    "username": "annabuiplayground",
+    "bio": "",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/ce391a334a6db8534bc4923e2f895e2ec309f921fe42f6c06429251436cc0efa?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.switch",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "If",
+            "Path",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Branch",
+            "Case"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Switch",
+        "color": "#506000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "Switch",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1264,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slackTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.slacktrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Slack Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 37,
+      "name": "Lead Generation"
+    }
+  ],
+  "image": []
+}

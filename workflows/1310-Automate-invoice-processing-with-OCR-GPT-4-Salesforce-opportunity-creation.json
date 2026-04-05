@@ -1,0 +1,1214 @@
+{
+  "id": 10029,
+  "name": "Automate invoice processing with OCR, GPT-4 & Salesforce opportunity creation",
+  "views": 1405,
+  "recentViews": 1,
+  "totalViews": 1405,
+  "createdAt": "2025-10-22T08:03:30.124Z",
+  "description": "# PDF Invoice Extractor (AI)\n\nEnd-to-end pipeline: Watch Drive ➜ Download PDF ➜ OCR text ➜ AI normalize to JSON ➜ Upsert Buyer (Account) ➜ Create Opportunity ➜ Map Products ➜ Create OLI via Composite API ➜ Archive to OneDrive.\n\n---\n\n## Node by node (what it does & key setup)\n\n### 1) Google Drive Trigger\n- **Purpose**: Fire when a new file appears in a specific Google Drive folder.\n- **Key settings**:\n  - Event: `fileCreated`\n  - Folder ID: `google drive folder id`\n  - Polling: `everyMinute`\n  - Creds: `googleDriveOAuth2Api`\n- **Output**: Metadata `{ id, name, ... }` for the new file.\n\n---\n\n### 2) Download File From Google\n- **Purpose**: Get the file binary for processing and archiving.\n- **Key settings**:\n  - Operation: `download`\n  - File ID: `={{ $json.id }}`\n  - Creds: `googleDriveOAuth2Api`\n- **Output**: Binary (default key: `data`) and original metadata.\n\n---\n\n### 3) Extract from File\n- **Purpose**: Extract text from PDF (OCR as needed) for AI parsing.\n- **Key settings**:\n  - Operation: `pdf`\n  - OCR: enable for scanned PDFs (in **options**)\n- **Output**: JSON with OCR text at `{{ $json.text }}`.\n\n---\n\n### 4) Message a model (AI JSON Extractor)\n- **Purpose**: Convert OCR text into **strict normalized JSON array** (invoice schema).\n- **Key settings**:\n  - Node: `@n8n/n8n-nodes-langchain.openAi`\n  - Model: `gpt-4.1` (or `gpt-4.1-mini`)\n  - Message role: **system** (the strict prompt; references `{{ $json.text }}`)\n  - `jsonOutput`: `true`\n  - Creds: `openAiApi`\n- **Output (per item)**: `$.message.content` → the parsed **JSON** (ensure it’s an array).\n\n---\n\n### 5) Create or update an account (Salesforce)\n- **Purpose**: Upsert **Buyer** as Account using an external ID.\n- **Key settings**:\n  - Resource: `account`\n  - Operation: `upsert`\n  - External Id Field: `tax_id__c`\n  - External Id Value: `={{ $json.message.content.buyer.tax_id }}`\n  - Name: `={{ $json.message.content.buyer.name }}`\n  - Creds: `salesforceOAuth2Api`\n- **Output**: Account record (captures `Id`) for downstream **Opportunity**.\n\n---\n\n### 6) Create an opportunity (Salesforce)\n- **Purpose**: Create Opportunity linked to the Buyer (Account).\n- **Key settings**:\n  - Resource: `opportunity`\n  - Name: `={{ $('Message a model').item.json.message.content.invoice.code }}`\n  - Close Date: `={{ $('Message a model').item.json.message.content.invoice.issue_date }}`\n  - Stage: `Closed Won`\n  - Amount: `={{ $('Message a model').item.json.message.content.summary.grand_total }}`\n  - AccountId: `={{ $json.id }}` (from **Upsert Account** output)\n  - Creds: `salesforceOAuth2Api`\n- **Output**: Opportunity `Id` for OLI creation.\n\n---\n\n### 7) Build SOQL (Code / JS)\n- **Purpose**: Collect unique product **codes** from AI JSON and build a SOQL query for **PricebookEntry** by `Pricebook2Id`.\n- **Key settings**:\n  - `pricebook2Id` (hardcoded in script): e.g., `01sxxxxxxxxxxxxxxx`\n  - Source lines: `$('Message a model').first().json.message.content.products`\n- **Output**: `{ soql, codes }`\n\n---\n\n### 8) Query PricebookEntries (Salesforce)\n- **Purpose**: Fetch `PricebookEntry.Id` for each `Product2.ProductCode`.\n- **Key settings**:\n  - Resource: `search`\n  - Query: `={{ $json.soql }}`\n  - Creds: `salesforceOAuth2Api`\n- **Output**: Items with `Id`, `Product2.ProductCode` (used for mapping).\n\n---\n\n### 9) Code in JavaScript (Build OLI payloads)\n- **Purpose**: Join lines with PBE results and Opportunity `Id` ➜ build **OpportunityLineItem** payloads.\n- **Inputs**:\n  - OpportunityId: `={{ $('Create an opportunity').first().json.id }}`\n  - Lines: `={{ $('Message a model').first().json.message.content.products }}`\n  - PBE rows: from previous node items\n- **Output**: `{ body: { allOrNone:false, records:[{ OpportunityLineItem... }] } }`\n- **Notes**:\n  - Converts discount_total ➜ per-unit if needed (currently commented for standard pricing).\n  - Throws on missing PBE mapping or empty lines.\n\n---\n\n### 10) Create Opportunity Line Items (HTTP Request)\n- **Purpose**: Bulk create OLIs via Salesforce Composite API.\n- **Key settings**:\n  - Method: `POST`\n  - URL: `https://&lt;your-instance&gt;.my.salesforce.com/services/data/v65.0/composite/sobjects`\n  - Auth: `salesforceOAuth2Api` (predefined credential)\n  - Body (JSON): `={{ $json.body }}`\n- **Output**: Composite API results (per-record statuses).\n\n---\n\n### 11) Update File to One Drive\n- **Purpose**: Archive the **original** PDF in OneDrive.\n- **Key settings**:\n  - Operation: `upload`\n  - File Name: `={{ $json.name }}`\n  - Parent Folder ID: `onedrive folder id`\n  - Binary Data: `true` (from the Download node)\n  - Creds: `microsoftOneDriveOAuth2Api`\n- **Output**: Uploaded file metadata.\n\n---\n\n## Data flow (wiring)\n\n1. **Google Drive Trigger** → **Download File From Google**\n2. **Download File From Google**\n   - → **Extract from File**\n   - → **Update File to One Drive**\n3. **Extract from File** → **Message a model**\n4. **Message a model**\n   - → **Create or update an account**\n5. **Create or update an account** → **Create an opportunity**\n6. **Create an opportunity** → **Build SOQL**\n7. **Build SOQL** → **Query PricebookEntries**\n8. **Query PricebookEntries** → **Code in JavaScript**\n9. **Code in JavaScript** → **Create Opportunity Line Items**\n\n---\n\n## Quick setup checklist\n\n- 🔐 **Credentials**: Connect Google Drive, OneDrive, Salesforce, OpenAI.\n- 📂 **IDs**:\n  - Drive Folder ID (watch)\n  - OneDrive Parent Folder ID (archive)\n  - Salesforce **Pricebook2Id** (in the JS SOQL builder)\n- 🧠 **AI Prompt**: Use the strict system prompt; **jsonOutput = true**.\n- 🧾 **Field mappings**:\n  - Buyer tax id/name → Account upsert fields\n  - Invoice code/date/amount → Opportunity fields\n  - Product `name` must equal your **Product2.ProductCode** in SF.\n- ✅ **Test**: Drop a sample PDF → verify:\n  - AI returns **array JSON** only\n  - Account/Opportunity created\n  - OLI records created\n  - PDF archived to OneDrive\n\n---\n\n## Notes & best practices\n\n- If PDFs are scans, enable OCR in **Extract from File**.\n- If AI returns non-JSON, keep “**Return only a JSON array**” as the last line of the prompt and keep `jsonOutput` enabled.\n- Consider adding validation on `parsing.warnings` to gate Salesforce writes.\n- For discounts/taxes in OLI:\n  - Standard OLI fields don’t support per-line discount amounts directly; model them in **UnitPrice** or custom fields.\n- Replace the Composite API **URL** with your org’s domain or use the Salesforce node’s **Bulk Upsert** for simplicity.\n",
+  "workflow": {
+    "meta": {
+      "instanceId": "9a562c06a632241f66aadd52a495ad98e76b760ef5cfce9c319a4759c47cd94e",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "c87ed7b7-b77d-4236-999e-afefe9064033",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2640,
+          -656
+        ],
+        "parameters": {
+          "width": 464,
+          "height": 912,
+          "content": "# PDF Invoice Extractor (AI) to Salesforce Opportunity\n\nWhat it does:\nWatch a Drive folder → OCR PDF → extract invoices (JSON) via LLM → mirror file to OneDrive → upsert Buyer to Salesforce → create Opportunity → add Opportunity Line Items from Pricebook.\n\n\n## Flow\n 1)Drive Trigger → 2) Download → 3) Extract → 4) → 5) Upsert Account → 6) Create Opportunity → 7) Build SOQL → 8) Query PBE → 9) Build OLI → 10) Create OLIs -> 11) OneDrive  \n\n\n## Outputs\n- LLM: normalized JSON array of invoices\n- Salesforce: Account (buyer), Opportunity, Line Items\n- OneDrive: original PDF archived\n\n## Quick Troubleshooting\n- Empty OCR → enable OCR in step 3\n- Non-JSON → enforce jsonOutput:true + strict prompt\n- Missing PBE → verify ProductCode matches Salesforce & Pricebook2Id\n- Auth errors → re-connect Google/OneDrive/Salesforce/OpenAI\n\n## Notes\n- Keep numbers as JSON numbers; dates YYYY-MM-DD\n- If fields missing, return null; log warnings in parsing.warnings\n- Replace hardcoded IDs (Pricebook2Id, OneDrive Folder, SF domain) with your values\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e7665458-f2f8-4ad1-b318-1fbe4e3ff464",
+        "name": "Extract from File",
+        "type": "n8n-nodes-base.extractFromFile",
+        "position": [
+          -1456,
+          -144
+        ],
+        "parameters": {
+          "options": {},
+          "operation": "pdf"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1a593bd5-922f-4f0d-9ddb-0220ed3be3cb",
+        "name": "Google Drive Trigger",
+        "type": "n8n-nodes-base.googleDriveTrigger",
+        "position": [
+          -1952,
+          -144
+        ],
+        "parameters": {
+          "event": "fileCreated",
+          "options": {},
+          "pollTimes": {
+            "item": [
+              {
+                "mode": "everyMinute"
+              }
+            ]
+          },
+          "triggerOn": "specificFolder",
+          "folderToWatch": {
+            "__rl": true,
+            "mode": "list",
+            "value": "125tDoA_XgewTZetNg4UhYoYuoomIKLuP",
+            "cachedResultUrl": "https://drive.google.com/drive/folders/125tDoA_XgewTZetNg4UhYoYuoomIKLuP",
+            "cachedResultName": "Sample"
+          }
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ce439fd0-ffcf-4891-a861-61fa62e57a38",
+        "name": "Message a model",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          -1264,
+          -144
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1",
+            "cachedResultName": "GPT-4.1"
+          },
+          "options": {},
+          "messages": {
+            "values": [
+              {
+                "role": "system",
+                "content": "=Role: You are a meticulous extractor. Given raw OCR text that may contain one or many tax invoices, return a normalized JSON array. Do not invent data. If a field is missing, use null (or []).\n\nInput\n- batch_text: {{ $json.text }}\n\nOutput\n- Return only a JSON array. Each element is one invoice with the schema:\n\n[\n  {\n    \"seller\": {\n      \"name\": \"string|null\",\n      \"tax_id\": \"string|null\",\n      \"address\": \"string|null\",\n      \"phone\": \"string|null\",\n      \"email\": \"string|null\",\n      \"bank_account\": \"string|null\",\n      \"bank_name\": \"string|null\",\n      \"bank_branch\": \"string|null\"\n    },\n    \"buyer\": {\n      \"name\": \"string|null\",\n      \"tax_id\": \"string|null\",\n      \"address\": \"string|null\",\n      \"phone\": \"string|null\",\n      \"buyer_representative\": \"string|null\"\n    },\n    \"invoice\": {\n      \"type\": \"string|null\",\n      \"issue_date\": \"YYYY-MM-DD|null\",\n      \"code\": \"string|null\",\n      \"symbol\": \"string|null\",\n      \"number\": \"string|null\",\n      \"payment_method\": \"string|null\",\n      \"currency\": \"string\",\n      \"lookup_url\": \"string|null\",\n      \"lookup_code\": \"string|null\"\n    },\n    \"products\": [\n      {\n        \"name\": \"string\",\n        \"description\": \"string|null\",\n        \"unit\": \"string|null\",\n        \"quantity\": \"number\",\n        \"unit_price\": \"number\",\n        \"discount_percent\": \"number|null\",\n        \"discount_amount\": \"number|null\",\n        \"subtotal_excl_vat\": \"number\",\n        \"tax_rate\": \"number|null\",\n        \"tax_amount\": \"number|null\",\n        \"line_total\": \"number|null\"\n      }\n    ],\n    \"summary\": {\n      \"total_discount\": \"number|null\",\n      \"subtotal_excl_vat\": \"number|null\",\n      \"vat_rate\": \"number|null\",\n      \"vat_amount\": \"number|null\",\n      \"grand_total\": \"number|null\",\n      \"amount_in_words\": \"string|null\"\n    },\n    \"software\": {\n      \"issuer\": \"string|null\",\n      \"issuer_tax_id\": \"string|null\",\n      \"notes\": \"string|null\"\n    },\n    \"parsing\": {\n      \"warnings\": [\"string\"],\n      \"assumptions\": [\"string\"]\n    }\n  }\n]\n\nLocale & normalization rules\n1) Currency & numbers:\n   - Detect currency (e.g., USD, EUR, GBP, VND, ₫, $, €).\n   - Remove thousands separators (., , or space).\n   - Interpret decimals by locale (e.g., “1,234.56” vs “1.234,56”).\n   - Use integers for zero-decimal currencies; otherwise decimals. If uncertain, keep decimal and add a warning.\n\n2) Dates:\n   - Normalize to YYYY-MM-DD from formats like dd/mm/yyyy, mm-dd-yyyy, yyyy.mm.dd, or “dd Month yyyy”.\n   - If ambiguous (e.g., 03/04/2024), infer from locale cues (currency/language). If still uncertain, set null and add a warning.\n\n3) Line wrapping:\n   - Merge wrapped product description lines until quantity/unit/price/tax columns or totals appear.\n\n4) Discounts:\n   - If only percent or amount present, compute the other when possible (round to nearest minor unit).\n   - If discount appears as a negative line, treat as discount_amount.\n\n5) Per-line taxes:\n   - Capture per-line Tax/VAT rate/amount if shown; otherwise set products[*].tax_rate and tax_amount = null and rely on summary vat_rate.\n\n6) Totals cross-check:\n   - sum(products.subtotal_excl_vat) ≈ summary.subtotal_excl_vat (±1 minor unit)\n   - summary.vat_amount ≈ round(subtotal_excl_vat * vat_rate/100)\n   - grand_total = subtotal_excl_vat + vat_amount\n   - If mismatch, keep parsed figures and append a parsing.warnings note.\n\nMulti-invoice splitting (critical)\n- Split batch_text into invoice blocks using anchors; each block = one invoice.\n\nPrimary anchors:\n- “TAX INVOICE”, “INVOICE”, “VAT INVOICE”, or similar header; OR\n- A cluster containing both “Serial/Symbol:” (or “Series:”) and “No./Number:” within ~10 lines.\n\nSecondary boundaries (helpful, not required):\n- “Tax Authority Code / QR / Validation Code” near header\n- “Amount in words:” or “Total amount payable:” near the end\n- Software footers (e.g., “Issued by … software”)\n\nHeuristic:\n- Start a new block when a header reappears or when “Series/Symbol:” and “No./Number:” occur after a prior “Total amount payable”.\n\nExtraction steps (per invoice block)\n1) Seller/Buyer:\n   - Anchors: Company/Organization, Tax ID/VAT No., Address, Phone, Email, Bank Account/IBAN, Bank Name, Branch.\n   - Buyer: Customer/Buyer Name, Tax ID (if any), Address, Phone, Buyer Representative/Contact.\n\n2) Invoice header:\n   - Type, Issue date, Tax authority code (if any), Code (internal), Symbol/Series, Number, Payment method, Currency, Lookup URL/Code (QR/portal).\n\n3) Items table:\n   - Detect headers like: No., Item/Service, Unit, Quantity, Unit Price, Amount, Discount %, Discount Amount, Net before VAT, Tax/VAT, Line Total.\n   - Rebuild wrapped descriptions; keep units as-is if unsure.\n\n4) Summary:\n   - Total discount, Subtotal excl. VAT, VAT rate, VAT amount, Grand total/Total payable, Amount in words, Lookup URL/code (if present).\n\n5) Software/Notes:\n   - E-invoicing platform or software issuer (name & tax ID if shown) and any footer notes.\n\n6) Validate & warn:\n   - Run cross-checks; record anomalies and assumptions (e.g., inferred decimal separator, currency, ambiguous date).\n\nStrict formatting\n- Output only the JSON array (no extra text).\n- All numeric fields must be JSON numbers.\n- Use UTF-8.\n- Do not guess missing data.\n\nAnti-hallucination\n- If a field is not explicitly present or reliably derivable, return null.\n- If per-line VAT isn’t printed, set products[*].tax_rate and tax_amount to null and compute only at summary level.\n- If headers are partially missing due to OCR, infer columns from value patterns (units, prices \\d[\\d.,]*, discounts %, etc.). If uncertain, add a warning.\n"
+              },
+              {}
+            ]
+          },
+          "jsonOutput": true
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "053cdfcf-65f6-4ec6-90fa-090a08da31c8",
+        "name": "Download File From Google",
+        "type": "n8n-nodes-base.googleDrive",
+        "position": [
+          -1712,
+          -144
+        ],
+        "parameters": {
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.id }}"
+          },
+          "options": {},
+          "operation": "download"
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "157f5cdc-de47-4f90-96ea-202636ac5016",
+        "name": "Update File to One Drive",
+        "type": "n8n-nodes-base.microsoftOneDrive",
+        "position": [
+          -1424,
+          32
+        ],
+        "parameters": {
+          "fileName": "={{ $json.name }}",
+          "parentId": "folder_id_onedrive",
+          "binaryData": true
+        },
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "microsoftOneDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "80f186d6-499e-4da2-a49e-a503de546be4",
+        "name": "Create an opportunity",
+        "type": "n8n-nodes-base.salesforce",
+        "position": [
+          -656,
+          -144
+        ],
+        "parameters": {
+          "name": "={{ $('Message a model').item.json.message.content.invoice.code }}",
+          "resource": "opportunity",
+          "closeDate": "={{ $('Message a model').item.json.message.content.invoice.issue_date }}",
+          "stageName": "Closed Won",
+          "additionalFields": {
+            "amount": "={{ $('Message a model').item.json.message.content.summary.grand_total }}",
+            "accountId": "={{ $json.id }}"
+          }
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "credential-id",
+            "name": "salesforceOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9f06013f-ff72-4f08-b72e-4b42931f393f",
+        "name": "Create or update an account",
+        "type": "n8n-nodes-base.salesforce",
+        "position": [
+          -928,
+          -144
+        ],
+        "parameters": {
+          "name": "={{ $json.message.content.buyer.name }}",
+          "resource": "account",
+          "operation": "upsert",
+          "externalId": "tax_id__c",
+          "externalIdValue": "={{ $json.message.content.buyer.tax_id }}",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "credential-id",
+            "name": "salesforceOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "70336cbd-460f-4396-964c-196baf054d8f",
+        "name": "Build SOQL",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -352,
+          -144
+        ],
+        "parameters": {
+          "jsCode": "//const { pricebook2Id, lines } = $json;\n\nconst pricebook2Id = '01sxxxxxxxxxxxxxxx'; // replace your pricebookID\nconst lines = $('Message a model').first().json.message.content.products; \n\nconst codes = [\n  ...new Set(\n    (lines || [])\n      .map((l) => String(l.name || \"\").trim())\n      .filter(Boolean)\n  ),\n];\n\nif (codes.length === 0) {\n  throw new Error(\"No product codes found in lines[].name\");\n}\n\n// Escape single quotes for SOQL\nconst soqlList = codes\n  .map((c) => `'${c.replace(/'/g, \"\\\\'\")}'`)\n  .join(\",\");\n\nconst soql = `\n  SELECT Id, Product2Id, Product2.ProductCode\n  FROM PricebookEntry\n  WHERE Pricebook2Id = '${pricebook2Id}'\n    AND Product2.ProductCode IN (${soqlList})\n`.trim();\n\nreturn [{ soql, codes }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "021cd4c3-82b4-4589-a523-bea9bd18ae11",
+        "name": "Query PricebookEntries",
+        "type": "n8n-nodes-base.salesforce",
+        "position": [
+          -64,
+          -144
+        ],
+        "parameters": {
+          "query": "={{ $json.soql }}",
+          "resource": "search"
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "credential-id",
+            "name": "salesforceOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cafe3e46-af7a-44eb-87b2-9fb34f7cb96b",
+        "name": "Code in JavaScript",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          240,
+          -144
+        ],
+        "parameters": {
+          "jsCode": "// Input assumptions (no Set node):\n// - This Function runs after your SOQL HTTP node.\n// - The current item ($json) contains:\n//   • records: array of PricebookEntry rows (from SOQL)\n//   • opportunityId: the target Opportunity Id\n//   • lines: your source line array (with name, quantity, unit_price, discount_amount, ...)\n\nconst oppId = $('Create an opportunity').first().json.id;\nif (!oppId) {\n  throw new Error(\"Missing opportunityId in input.\");\n}\n\nconst lines = Array.isArray($('Message a model').first().json.message.content.products) ? $('Message a model').first().json.message.content.products : [];\nif (lines.length === 0) {\n  throw new Error(\"Missing or empty lines array in input.\");\n}\n\nconst pbeRecords = Array.isArray($input.all()) ? $input.all() : [];\n\nif (pbeRecords.length === 0) {\n  throw new Error(\"Missing SOQL result records in input (records[]).\");\n}\n\n\n\n// Build ProductCode → PricebookEntryId map\nconst pbeByCode = new Map();\nfor (const r of pbeRecords) {\n  const code = r?.json.Product2?.ProductCode;\n  const id = r?.json.Id;\n  if (code && id) pbeByCode.set(String(code).trim(), id);\n}\nconsole.log(pbeByCode)\n// Build OpportunityLineItem payloads\nconst records = [];\nfor (const line of lines) {\n  const productCode = String(line.name || \"\").trim();\n  const pbeId = pbeByCode.get(productCode);\n\n  if (!pbeId) {\n    throw new Error(`No PricebookEntry found for ProductCode '${productCode}'.`);\n  }\n\n  const qty = Number(line.quantity ?? 0) || 0;\n  const unitPrice = Number(line.unit_price ?? 0) || 0;\n\n  // Convert total discount to per-unit Discount field\n  const totalDiscount = Number(line.discount_amount ?? 0) || 0;\n  const perUnitDiscount = qty > 0 ? totalDiscount / qty : 0;\n\n  records.push({\n    attributes: { type: \"OpportunityLineItem\" },\n    OpportunityId: oppId,\n    PricebookEntryId: pbeId,\n    Quantity: qty,\n    UnitPrice: unitPrice,\n  });\n}\n\nreturn [{ body: { allOrNone: false, records } }];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "22eb1f99-b562-4160-bf89-6b0dd890a308",
+        "name": "Create Opportunity Line Items",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          576,
+          -144
+        ],
+        "parameters": {
+          "url": "=https://mydomain.salesforce.com/services/data/v65.0/composite/sobjects",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={{ $json.body }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "salesforceOAuth2Api"
+        },
+        "credentials": {
+          "salesforceOAuth2Api": {
+            "id": "credential-id",
+            "name": "salesforceOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "39ef7a5e-6825-4583-b9d2-dbc534bb7c5c",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2048,
+          -448
+        ],
+        "parameters": {
+          "width": 256,
+          "height": 272,
+          "content": "## 1) Google Drive Trigger\n- Op: fileCreated in folder (ID)\n- Poll: every minute\n- Creds: Google Drive OAuth2\n- Note: Ensure access/Shared Drive rights"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "99e69d7e-2ad1-40ef-b476-5ae869e5f927",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1776,
+          -448
+        ],
+        "parameters": {
+          "height": 272,
+          "content": "## 2) Download from Drive\n- Op: download by {{$json.id}}\n- Binary key: data (default)\n- Creds: Google Drive OAuth2"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0830b83e-19f5-489e-a9bd-1eb3e1f7e50b",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1520,
+          -448
+        ],
+        "parameters": {
+          "width": 224,
+          "height": 272,
+          "content": "## 3) Extract from File\n- Op: pdf (enable OCR for scans)\n- Output: {{$json.text}}"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "edb057fe-1446-4aec-929b-7022c9704ee1",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1280,
+          -512
+        ],
+        "parameters": {
+          "width": 256,
+          "height": 352,
+          "content": "## 4) Message a Model (JSON)\n- Node: @n8n/n8n-nodes-langchain.openAi\n- Model: gpt-4.1 (or gpt-4.1-mini)\n- Prompt: strict schema; **return only JSON array**\n- jsonOutput: true\n- Output path (first item): $('Message a model').first().json.message.content"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4f193f7a-2f69-4eb3-9ee6-e15bd50236d3",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1008,
+          -512
+        ],
+        "parameters": {
+          "height": 352,
+          "content": "## 5) Salesforce: Upsert Account (Buyer)\n- Node: salesforce (account upsert)\n- External Id: tax_id__c\n- externalIdValue: ={{ $json.message.content.buyer.tax_id }}\n- name: ={{ $json.message.content.buyer.name }}"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "12811762-358e-4cb7-aec6-92f9f93d47ae",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -752,
+          -576
+        ],
+        "parameters": {
+          "width": 304,
+          "height": 416,
+          "content": "## 6) Salesforce: Create Opportunity\n- Node: salesforce (resource: opportunity)\n- name: ={{ $('Message a model').item.json.message.content.invoice.code }}\n- closeDate: ={{ $('Message a model').item.json.message.content.invoice.issue_date }}\n- stageName: Closed Won\n- amount: ={{ $('Message a model').item.json.message.content.summary.grand_total }}\n- accountId: ={{ $json.id }}  // from Upsert Account"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0c2e625e-0062-480f-b394-45ea687db779",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -432,
+          -384
+        ],
+        "parameters": {
+          "width": 288,
+          "height": 224,
+          "content": "## 7) Code: Build SOQL (PricebookEntry)\n- Node: Code (JS)\n- Purpose: collect ProductCodes from LLM products → build SOQL for PricebookEntry by Pricebook2Id\n- Output: { soql, codes }"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9b390d82-6233-4d6f-b606-64efadddd654",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -128,
+          -352
+        ],
+        "parameters": {
+          "height": 192,
+          "content": "## 8) Salesforce: Query PricebookEntries\n- Node: salesforce (search)\n- query: ={{ $json.soql }}"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b4ca0bf1-925c-40c6-ba35-208e70a63be1",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          128,
+          -528
+        ],
+        "parameters": {
+          "width": 320,
+          "height": 368,
+          "content": "## 9) Code: Build OLI Payloads\n- Node: Code (JS)\n- Inputs: \n  - OpportunityId: ={{ $('Create an opportunity').first().json.id }}\n  - Lines: ={{ $('Message a model').first().json.message.content.products }}\n  - PBE rows: from previous node items\n- Output: { body: { allOrNone:false, records:[{ OpportunityLineItem... }] } }"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0d8dcf4b-77d7-439f-b345-f0fcec555b01",
+        "name": "Sticky Note10",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          480,
+          -464
+        ],
+        "parameters": {
+          "width": 272,
+          "height": 272,
+          "content": "## 10) HTTP Request: Create Opportunity Line Items\n- Method: POST\n- URL: https://<your-instance>.my.salesforce.com/services/data/v65.0/composite/sobjects\n- Auth: salesforceOAuth2Api\n- Body (JSON): ={{ $json.body }}"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "73d319ea-e10d-4f10-8132-63976a3cfacf",
+        "name": "Sticky Note11",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1488,
+          176
+        ],
+        "parameters": {
+          "height": 272,
+          "content": "## 11) Upload to OneDrive\n- Op: upload\n- Name: ={{ $json.name }}\n- Parent Folder ID: (set)\n- Binary: from step 2\n- Creds: OneDrive OAuth2"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Build SOQL": {
+        "main": [
+          [
+            {
+              "node": "Query PricebookEntries",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Message a model": {
+        "main": [
+          [
+            {
+              "node": "Create or update an account",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract from File": {
+        "main": [
+          [
+            {
+              "node": "Message a model",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Code in JavaScript": {
+        "main": [
+          [
+            {
+              "node": "Create Opportunity Line Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Drive Trigger": {
+        "main": [
+          [
+            {
+              "node": "Download File From Google",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create an opportunity": {
+        "main": [
+          [
+            {
+              "node": "Build SOQL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Query PricebookEntries": {
+        "main": [
+          [
+            {
+              "node": "Code in JavaScript",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download File From Google": {
+        "main": [
+          [
+            {
+              "node": "Extract from File",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Update File to One Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create or update an account": {
+        "main": [
+          [
+            {
+              "node": "Create an opportunity",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create Opportunity Line Items": {
+        "main": [
+          []
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 23,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.salesforce": {
+        "count": 3
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 12
+      },
+      "n8n-nodes-base.googleDrive": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.extractFromFile": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 1
+      },
+      "n8n-nodes-base.microsoftOneDrive": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleDriveTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Le Nguyen",
+    "username": "leeseifer",
+    "bio": "Salesforce Architect with 10+ years of experience in CRM, integrations, and automation. Skilled in Apex, LWC, REST APIs, and full-stack dev (JavaScript, .NET). I build secure, scalable workflows in n8n—connecting Salesforce, Stripe, and more. Passionate about lead scoring, data sync, and secure field masking. Certified Application Architect with deep expertise in platform, integration, and data architecture.",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/leeseifer/"
+    ],
+    "avatar": "https://gravatar.com/avatar/133cbffa84b137ed452bc7f219e37a1fb63c76c05d3d9f6e6f5895be36ff6450?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googledrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Google Drive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 323,
+      "icon": "file:oneDrive.svg",
+      "name": "n8n-nodes-base.microsoftOneDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.microsoftonedrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/microsoft/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Microsoft OneDrive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBzdHJva2U9Im5vbmUiPjxwYXRoIGZpbGw9IiMwOTRhYjIiIGQ9Ik02LjY2NyAwUTAgMCAwIDYuNjY3djY2LjY2N1EwIDgwIDYuNjY3IDgwaDY2LjY2N1E4MCA4MCA4MCA3My4zMzNWNi42NjdRODAgMCA3My4zMzMgMHoiLz48cGF0aCBkPSJNNjAuMjU2IDQyLjAyM2MyLjg3LjQwNSA0Ljk2NSAyLjk3NSA0LjgzMiA1LjkyOSAwIDIuNTk0LTEuNDIxIDUuNjU1LTQuODMyIDUuNjU1SDMyLjU3NGMtNS4zMDYgMC03LjIzMi0zLjcwNi03LjIzMi03LjUyNCAwLTYuNDQ0IDYuOTc5LTYuNjIxIDYuOTc5LTYuNjIxcy41NjktNi45OTIgNi42NjQtOC40MWMzLjgwNi0xLjExMyA3Ljg3NS40NzcgOS45OCAzLjg5OWE4LjIgOC4yIDAgMCAxIDcuMDU4LS4yNThjMi44MTIgMS4yNTcgNC41MTggNC4yMTIgNC4yMzIgNy4zM3oiLz48cGF0aCBmaWxsPSIjZjlmOWY5IiBkPSJNMjMuNTgzIDQ1LjYwNWMwLTcuMDgyIDcuNDEyLTguMTM5IDcuNDEyLTguMTM5LjcwNy00LjEwOCAzLjY5OS03LjQzNSA3LjY4Mi04LjU0IDQuMDIxLTEuMjg2IDguNDA0LjE4OSAxMC44NTYgMy42NTNhNi4zIDYuMyAwIDAgMSAzLjYzNS0uNzM3Yy0uNTEzLTQuMTc3LTMuMjQ3LTcuNzM2LTcuMTI2LTkuMjc3LTUuMTQxLTIuMTUzLTExLjA1OC4wMjYtMTMuNjE4IDUuMDE1YTguNCA4LjQgMCAwIDAtOC4xMjYtLjE2Yy0zLjE4MSAxLjc2My01LjAwMiA1LjI4Mi00LjYxOSA4LjkyNC0zLjY3NS4zMjMtNi40MzggMy41MjMtNi4yNTQgNy4yNDIuMTE0IDMuODE3IDMuMTM5IDYuODkyIDYuOTIgNy4wMzRoNC42NWE5LjEgOS4xIDAgMCAxLTEuNDEzLTUuMDE1eiIvPjxwYXRoIGZpbGwtb3BhY2l0eT0iLjE5IiBkPSJtLjg0IDIuNjkgNzcuNzUzIDc1LjgxNkE0LjQgNC40IDAgMCAwIDgwIDc1LjI3OVY0LjM5OEE0LjM5IDQuMzkgMCAwIDAgNzUuNjEyIDBINC44ODVBNC4zOSA0LjM5IDAgMCAwIC44NCAyLjY5Ii8+PC9nPjwvc3ltYm9sPjwvc3ZnPg=="
+      },
+      "displayName": "Microsoft OneDrive",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 324,
+      "icon": "file:salesforce.svg",
+      "name": "n8n-nodes-base.salesforce",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.salesforce/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/salesforce/"
+              }
+            ]
+          },
+          "categories": [
+            "Sales",
+            "Communication"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Salesforce"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzUgNTMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwYTFlMCIgZD0iTTMwLjc3NyA1LjY1M2MyLjQtMi40NzYgNS43Mi00LjA0IDkuMzkyLTQuMDQgNC44OTUgMCA5LjEzNiAyLjczMiAxMS40MTIgNi43NzNhMTUuNyAxNS43IDAgMCAxIDYuNDYtMS4zNjZjOC44MjMgMCAxNS45MzcgNy4yIDE1LjkzNyAxNi4wOHMtNy4xNDMgMTYuMDg4LTE1LjkzNyAxNi4wODhjLTEuMDggMC0yLjEzNC0uMTE0LTMuMTMtLjMxM2ExMS42OCAxMS42OCAwIDAgMS0xMC4yIDUuOTc3IDExLjc1IDExLjc1IDAgMCAxLTUuMDk0LTEuMTY3Yy0yLjAyIDQuNzUzLTYuNzQ1IDguMS0xMi4yMzggOC4xLTUuNzIgMC0xMC42MTUtMy42MTQtMTIuNDk0LTguNy0uODMzLjE3MS0xLjY4Mi4yNTctMi41MzMuMjU2QzUuNTIyIDQzLjM0MSAwIDM3Ljc2MyAwIDMwLjg0N2ExMi41MiAxMi41MiAwIDAgMSA2LjE3Ni0xMC44MTUgMTQuMSAxNC4xIDAgMCAxLTEuMTk1LTUuNzJDNC45NTUgNi40MzIgMTEuNDE1IDAgMTkuMzI1IDBhMTQuMzQgMTQuMzQgMCAwIDEgMTEuNDQxIDUuNjYzIi8+PHBhdGggZD0ibTEwLjcxMiAyNi44NTYuMzEzLS44MjVjLjA1Ny0uMTQyLjE0Mi0uMDg1LjItLjA1N2wuMjU2LjE3YTMuNTMgMy41MyAwIDAgMCAxLjk2NC41N2MuNjU1IDAgMS4wOC0uMzQyIDEuMDgtLjgyNXYtLjAyOGMwLS41MTItLjYyNi0uNy0xLjM2Ni0uOTRsLS4xNy0uMDU3Yy0uOTk2LS4yODUtMi4wNzgtLjctMi4wNzgtMS45NjR2LS4wMjhjMC0xLjE5NS45NjgtMi4wNSAyLjM2Mi0yLjA1aC4xNDJjLjgyNSAwIDEuNTk0LjIyOCAyLjE2My41OTguMDU3LjAyOC4xMTQuMDg1LjA4NS4xN2wtLjMxMy44MjVjLS4wNTcuMTQyLS4yLjA1Ny0uMi4wNTdhNC4zIDQuMyAwIDAgMC0xLjkzNS0uNDg0Yy0uNTk4IDAtLjk2OC4zMTMtLjk2OC43NHYuMDI4YzAgLjQ4NC42NTUuNyAxLjM5NS45NGwuMTQyLjAyOGMuOTk2LjMxMyAyLjA1Ljc0IDIuMDUgMS45NjR2LjAyOGMwIDEuMy0uOTQgMi4xMDYtMi40NDggMi4xMDYtLjc0IDAtMS40NS0uMTE0LTIuMjItLjUxMi0uMTQyLS4wODUtLjI4NS0uMTQyLS40MjctLjI1Ni0uMDI4LS4wNTctLjA4NS0uMDg1LS4wMjgtLjJ6bTIyLjIgMCAuMzEzLS44MjVjLjA1Ny0uMTQyLjE3LS4wODUuMi0uMDU3bC4yNTYuMTdhMy41MyAzLjUzIDAgMCAwIDEuOTY0LjU3Yy42NTUgMCAxLjA4LS4zNDIgMS4wOC0uODI1di0uMDI4YzAtLjUxMi0uNjI2LS43LTEuMzY2LS45NGwtLjE3LS4wNTdjLS45OTYtLjI4NS0yLjA3OC0uNy0yLjA3OC0xLjk2NHYtLjAyOGMwLTEuMTk1Ljk2OC0yLjA1IDIuMzYyLTIuMDVoLjE0MmMuODI1IDAgMS41OTQuMjI4IDIuMTYzLjU5OC4wNTcuMDI4LjExNC4wODUuMDg1LjE3bC0uMzEzLjgyNWMtLjA1Ny4xNDItLjIuMDU3LS4yLjA1N2E0LjMgNC4zIDAgMCAwLTEuOTM1LS40ODRjLS41OTggMC0uOTY4LjMxMy0uOTY4Ljc0di4wMjhjMCAuNDg0LjY1NS43IDEuMzk1Ljk0bC4xNDIuMDI4Yy45OTYuMzEzIDIuMDUuNzQgMi4wNSAxLjk2NHYuMDI4YzAgMS4zLS45NCAyLjEwNi0yLjQ0OCAyLjEwNi0uNzQgMC0xLjQ1LS4xMTQtMi4yMi0uNTEyLS4xNDItLjA4NS0uMjg1LS4xNDItLjQyNy0uMjU2IDAtLjA1Ny0uMDU3LS4wODUtLjAyOC0uMnptMTYuNDUtMy45Yy4xMTQuNDI3LjIuODgyLjIgMS4zNjZzLS4wNTcuOTQtLjIgMS4zNjZhMi44IDIuOCAwIDAgMS0uNTcgMS4xIDIuNzUgMi43NSAwIDAgMS0uOTY4Ljc0cS0uNTk3LjI1NS0xLjM2Ni4yNTZjLS43NjkuMDAxLS45NjgtLjA4NS0xLjM2Ni0uMjU2cy0uNy0uNDI3LS45NjgtLjc0YTMgMyAwIDAgMS0uNTctMS4xYy0uMTE1LS40MTctLjItLjg4Mi0uMi0xLjM2NnMuMDU3LS45NC4yLTEuMzY2Yy4xMTQtLjQyNy4zMTMtLjc5Ny41Ny0xLjFhMi43NSAyLjc1IDAgMCAxIC45NjgtLjc0IDMuNCAzLjQgMCAwIDEgMS4zNjYtLjI4NWMuNTEyIDAgLjk2OC4wODUgMS4zNjYuMjg1LjM5OC4xNy43LjQyNy45NjguNzRhMyAzIDAgMCAxIC41NyAxLjFtLTEuMjggMS4zMzhjMC0uNzQtLjE0Mi0xLjMtLjM5OC0xLjcwOHMtLjY4My0uNTk4LTEuMjI0LS41OThjLS41NyAwLS45NjguMi0xLjIyNC41OThzLS4zOTguOTY4LS4zOTggMS43MDguMTQyIDEuMy4zOTggMS43MzZjLjI1Ni4zOTguNjU1LjU5OCAxLjIyNC41OThzLjk2OC0uMiAxLjIyNC0uNTk4Yy4yODUtLjM5OC4zOTgtLjk5Ni4zOTgtMS43MzZtMTEuNjk3IDIuMTM0LjMxMy44NTRjLjAyOC4xMTQtLjA1Ny4xNDItLjA1Ny4xNDItLjQ4NC4yLTEuMTM4LjMxMy0xLjc5My4zMTNxLTEuNjUgMC0yLjUwNC0uOTRjLS44NTQtLjk0LS44NTQtMS40OC0uODU0LTIuNTMzIDAtLjQ4NC4wNTctLjk0LjItMS4zNjZzLjM0Mi0uNzk3LjYyNi0xLjFhMyAzIDAgMCAxIDEuMDI1LS43NCAzLjYgMy42IDAgMCAxIDEuNDIzLS4yODUgOCA4IDAgMCAxIC45MzkuMDU3Yy4yODUuMDU3LjY4My4xNDIuODU0LjIyOC4wMjggMCAuMTE0LjA1Ny4wODUuMTQybC0uMzEzLjg1NGMtLjA1Ny4xNDItLjE0Mi4wODUtLjE0Mi4wODVhNCA0IDAgMCAwLTEuMzM4LS4yYy0uNjI2IDAtMS4xLjItMS4zOTUuNjI2LS4zMTMuMzk4LS40ODQuOTQtLjQ4NCAxLjY4IDAgLjc5Ny4yIDEuMzY2LjU0IDEuNzM2cy44MjUuNTQgMS40NS41NGMuMjU2IDAgLjQ4NC0uMDI4LjY4My0uMDU3cy4zOTgtLjA4NS41OTgtLjE3Yy0uMDI4LjA1Ny4wODUuMDI4LjE0Mi4xNDJ6bTYuNDYtMy43MjhjLjI4NS45NjguMTQyIDEuNzkzLjExNCAxLjg1IDAgLjExNC0uMTE0LjExNC0uMTE0LjExNGgtNC4yOTdjLjAyOC42NTUuMTcgMS4xLjUxMiAxLjQyMy4zMTMuMzEzLjc5Ny41MTIgMS40OC41MTIgMS4wMjUgMCAxLjQ1LS4yIDEuNzY1LS4zMTMgMCAwIC4xMTQtLjAyOC4xNy4wODVsLjI4NS43OTdjLjA1Ny4xNDIgMCAuMTctLjAyOC4yLS4yNTYuMTQyLS45LjQyNy0yLjE2My40MjctLjU5OCAwLTEuMTM4LS4wODUtMS41NjUtLjI1NnMtLjc5Ny0uMzk4LTEuMDgtLjctLjQ4NC0uNjgzLS42MjYtMS4wOGMtLjE0Mi0uNDI3LS4yLS44ODItLjItMS4zNjZzLjA1Ny0uOTQuMi0xLjM2NmMuMTE0LS40MjcuMzEzLS43OTcuNTctMS4xcy41OTgtLjU3Ljk5Ni0uNzRjLjM5OC0uMi44ODItLjI4NSAxLjQyMy0uMjg1LjQ1NSAwIC44ODIuMDg1IDEuMjI0LjI1Ni4yNTYuMTE0LjU0LjMxMy44MjUuNjI2LjE0Mi4xMTQuMzk4LjU0LjUxMi45NHptLTQuMjcuOWgzLjA0NWMtLjAyOC0uMzk4LS4xMTQtLjc0LS4yODUtMS4wMjUtLjI1Ni0uMzk4LS42MjYtLjYyNi0xLjE5NS0uNjI2cy0uOTY4LjIyOC0xLjIyNC42MjZjLS4xNy4yNTYtLjI1Ni41OTgtLjM0MiAxLjAyNXptLTMwLjA4Mi0uOWMuMjg1Ljk2OC4xNDIgMS43OTMuMTQyIDEuODUgMCAuMTE0LS4xMTQuMTE0LS4xMTQuMTE0aC00LjI5N2MuMDI4LjY1NS4xNyAxLjEuNTEyIDEuNDIzLjMxMy4zMTMuNzk3LjUxMiAxLjQ4LjUxMiAxLjAyNSAwIDEuNDUtLjIgMS43NjUtLjMxMyAwIDAgLjExNC0uMDI4LjE3LjA4NWwuMjg1Ljc5N2MuMDU3LjE0MiAwIC4xNy0uMDI4LjItLjI1Ni4xNDItLjkuNDI3LTIuMTYzLjQyNy0uNTk4IDAtMS4xMzgtLjA4NS0xLjU2NS0uMjU2cy0uNzk3LS4zOTgtMS4wOC0uNy0uNDg0LS42ODMtLjYyNi0xLjA4Yy0uMTQyLS40MjctLjItLjg4Mi0uMi0xLjM2NnMuMDU3LS45NC4yLTEuMzY2Yy4xMTQtLjQyNy4zMTMtLjc5Ny41Ny0xLjFzLjU5OC0uNTcuOTk2LS43NGMuMzk4LS4yLjg4Mi0uMjg1IDEuNDIzLS4yODUuNDU1IDAgLjg4Mi4wODUgMS4yMjQuMjU2LjI1Ni4xMTQuNTQuMzEzLjgyNS42MjYuMTE0LjExNC4zOTguNTQuNDg0Ljk0em0tNC4yNy45aDMuMDc0Yy0uMDI4LS4zOTgtLjExNC0uNzQtLjI4NS0xLjAyNS0uMjU2LS4zOTgtLjYyNi0uNjI2LTEuMTk1LS42MjZzLS45NjguMjI4LTEuMjI0LjYyNmMtLjIuMjU2LS4yODUuNTk4LS4zNyAxLjAyNW0tNy41NDItLjIyOC43LjA4NXYtLjE3YzAtLjU3LS4xMTQtLjg1NC0uMzQyLTEuMDI1cy0uNTk4LS4yODUtMS4wNTMtLjI4NWMwIDAtMS4wNTMgMC0xLjg3OC40MjctLjAyOC4wMjgtLjA1Ny4wMjgtLjA1Ny4wMjhzLS4xMTQuMDI4LS4xNDItLjA1N2wtLjMxMy0uODI1Yy0uMDU3LS4xMTQuMDI4LS4xNy4wMjgtLjE3LjM5OC0uMzEzIDEuMy0uNDg0IDEuMy0uNDg0YTggOCAwIDAgMSAxLjEzOC0uMTE0cTEuMjggMCAxLjk2NC41OThjLjY4NC41OTguNjgzIDEuMDI1LjY4MyAxLjkwN3YzLjkyN3MwIC4xMTQtLjA4NS4xNDJjMCAwLS4xNy4wNTctLjMxMy4wODVsLTEuMDguMmE2LjYgNi42IDAgMCAxLTEuMy4xMTRjLS40MjcgMC0uNzk3LS4wMjgtMS4xMzgtLjExNGEyLjggMi44IDAgMCAxLS44ODItLjM3IDEuOSAxLjkgMCAwIDEtLjU3LS42ODNjLS4xNDItLjI1Ni0uMi0uNTk4LS4yLS45NjhhMi4yNiAyLjI2IDAgMCAxIC4yMjgtLjk5NmMuMTQzLS4yOTYuMzctLjUxMi42MjYtLjdzLjU3LS4zMTMuODgyLS40MjdhNC4zIDQuMyAwIDAgMSAxLjA1My0uMTQybC43NC4wMjh6bS0xLjcwOCAzLjAxN3MuMzk4LjMxMyAxLjI1Mi4yNTZjLjYyNi0uMDI4IDEuMTY3LS4xNDIgMS4xNjctLjE0MnYtMS45NTVzLS41NC0uMDg1LTEuMTY3LS4wODVjLS44ODIgMC0xLjI1Mi4zMTMtMS4yNTIuMzEzLS4yNTYuMTctLjM3LjQ1NS0uMzcuODI1YTEuMSAxLjEgMCAwIDAgLjE0Mi41NjljLjAyOC4wNTcuMDU3LjExNC4yMjguMjI4em0zNi4yODYtNS4yMDhjLS4wMjguMTE0LS4yNTYuNy0uMzEzLjktLjAyOC4wODUtLjA4NS4xMTQtLjE3LjExNCAwIDAtLjI1Ni0uMDU3LS40ODQtLjA1N2EyLjMgMi4zIDAgMCAwLS41NjkuMDg1Yy0uMi4wNTctLjM3LjE3LS41NC4zMTNzLS4yODUuMzctLjM3LjYyNi0uMTQyLjY4My0uMTQyIDEuMTM4djMuMTg3YzAgLjA4NS0uMDU3LjE0Mi0uMTQyLjE0MmgtMS4xMjhjLS4wODUgMC0uMTQyLS4wNTctLjE0Mi0uMTQydi02LjRjMC0uMDg1LjA1Ny0uMTQyLjExNC0uMTQyaDEuMWMuMDg1IDAgLjExNC4wNTcuMTE0LjE0MnYuNTEyYTEuOSAxLjkgMCAwIDEgLjctLjU0Yy4yNDUtLjExMy41Ny0uMiAxLjEtLjE3LjI4NS4wMjguNjU1LjA4NS43LjExNC4xMTQuMDI4LjE3LjA1Ny4xNDIuMTd6bS0xMC41Ni0yLjk2Yy4wMjggMCAuMTE0LjA1Ny4wODUuMTQybC0uMzQyLjljLS4wMjguMDU3LS4wNTcuMTE0LS4yLjA1Ny0uMDI4IDAtLjA4NS0uMDI4LS4yMjgtLjA1Ny0uMDg1LS4wMjgtLjIyOC0uMDI4LS4zNDItLjAyOC0uMTcgMC0uMzEzLjAyOC0uNDU1LjA1N3MtLjI1Ni4xMTQtLjM3LjIyOC0uMjI4LjI1Ni0uMzEzLjQ1NWE0LjMgNC4zIDAgMCAwLS4yMjguOTY4aDEuMzY2Yy4xMTQgMCAuMTQyLjA1Ny4xNDIuMTQybC0uMTcuODgyYy0uMDI4LjE0Mi0uMTQyLjExNC0uMTQyLjExNGgtMS40MjNsLS45IDUuNDkzYy0uMTE0LjU3LS4yMjggMS4wNTMtLjM3IDEuNDVzLS4zMTMuNjgzLS41Ny45NjhjLS4yMjguMjU2LS40ODQuNDU1LS43OTcuNTQtLjI4NS4xMTQtLjY1NS4xNy0xLjA1My4xNy0uMiAwLS4zOTggMC0uNjI2LS4wNTdhMS42IDEuNiAwIDAgMS0uMzk4LS4xMTRjLS4wNTctLjAyOC0uMDg1LS4wODUtLjA1Ny0uMTdsLjI5My0uODYzYy4wNTctLjExNC4xNDItLjA1Ny4xNDItLjA1N2wuMjI4LjA4NWMuMTE0LjAyOC4yMjguMDI4LjM0Mi4wMjhxLjMgMCAuNTEyLS4wODVjLjE3LS4wNTcuMjg1LS4xNy4zOTgtLjMxM3MuMi0uMzQyLjMxMy0uNTk4cS4xNTgtLjUxOS4yNTYtMS4wNTNsLjk2OC01LjM4aC0uOTRjLS4xMTQgMC0uMTQyLS4wNTctLjE0Mi0uMTQybC4xNy0uODgyYy4wMjgtLjE0Mi4xNDItLjExNC4xNDItLjExNGguOTY4bC4wNTctLjI4NWMuMTQyLS44NTQuNDI3LTEuNTA4Ljg1NC0xLjkzNXMxLjA1My0uNjU1IDEuODItLjY1NXEuMzAyLjAwMy41OTguMDU3Yy4xMTQtLjAyOC4yNTYgMCAuMzk4LjA1N3ptLTE5LjE4MiA5LjI1YzAgLjA4NS0uMDU3LjE0Mi0uMTE0LjE0MmgtMS4xMzhjLS4wODUgMC0uMTE0LS4wNTctLjExNC0uMTQydi05LjEzNmMwLS4wNTcuMDU3LS4xNDIuMTE0LS4xNDJoMS4xMzhjLjA4NSAwIC4xMTQuMDU3LjExNC4xNDJ6Ii8+PC9nPjwvc3ltYm9sPjwvc3ZnPg=="
+      },
+      "displayName": "Salesforce",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 2,
+          "name": "Sales"
+        },
+        {
+          "id": 6,
+          "name": "Communication"
+        }
+      ]
+    },
+    {
+      "id": 531,
+      "icon": "file:googleDrive.svg",
+      "name": "n8n-nodes-base.googleDriveTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.googledrivetrigger/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Google Drive Trigger"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgNzMiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwNjZkYSIgZD0ibTYuMDQ4IDYxLjI2IDMuNTI4IDYuMDk0Yy43MzMgMS4yODMgMS43ODcgMi4yOTEgMy4wMjQgMy4wMjRsMTIuNi0yMS44MUgwYTguMyA4LjMgMCAwIDAgMS4xIDQuMTI0eiIvPjxwYXRoIGZpbGw9IiMwMGFjNDciIGQ9Ik00MCAyMi45MSAyNy40IDEuMWMtMS4yMzcuNzMzLTIuMjkxIDEuNzQxLTMuMDI0IDMuMDI0TDEuMSA0NC40NDVBOC4zIDguMyAwIDAgMCAwIDQ4LjU2OGgyNS4yeiIvPjxwYXRoIGZpbGw9IiNlYTQzMzUiIGQ9Ik02Ny40IDcwLjM3OGMxLjIzNy0uNzMzIDIuMjkxLTEuNzQxIDMuMDI0LTMuMDI0bDEuNDY2LTIuNTIgNy4wMS0xMi4xNDJhOC4zIDguMyAwIDAgMCAxLjEtNC4xMjRINTQuNzk4bDUuMzYzIDEwLjUzOHoiLz48cGF0aCBmaWxsPSIjMDA4MzJkIiBkPSJNNDAgMjIuOTEgNTIuNiAxLjFDNTEuMzYzLjM2NyA0OS45NDMgMCA0OC40NzcgMEgzMS41MjRjLTEuNDY2IDAtMi44ODcuNDEyLTQuMTI0IDEuMXoiLz48cGF0aCBmaWxsPSIjMjY4NGZjIiBkPSJNNTQuNzk5IDQ4LjU2OEgyNS4ybC0xMi42IDIxLjgxYzEuMjM3LjczMyAyLjY1NyAxLjEgNC4xMjQgMS4xaDQ2LjU1MmMxLjQ2NiAwIDIuODg3LS40MTIgNC4xMjQtMS4xeiIvPjxwYXRoIGZpbGw9IiNmZmJhMDAiIGQ9Ik02Ny4yNjIgMjQuMjg0IDU1LjYyNCA0LjEyNEM1NC44OTEgMi44NDEgNTMuODM3IDEuODMzIDUyLjYgMS4xTDQwIDIyLjkxbDE0LjggMjUuNjU5aDI1LjE1NWE4LjMgOC4zIDAgMCAwLTEuMS00LjEyNHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Google Drive Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1235,
+      "icon": "file:extractFromFile.svg",
+      "name": "n8n-nodes-base.extractFromFile",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Spreadsheet",
+            "Excel",
+            "xls",
+            "xlsx",
+            "ods",
+            "tabular",
+            "decode",
+            "decoding",
+            "Move Binary Data",
+            "Binary",
+            "File",
+            "PDF",
+            "JSON",
+            "HTML",
+            "ICS",
+            "iCal",
+            "txt",
+            "Text",
+            "RTF",
+            "XML",
+            "64",
+            "Base64",
+            "Convert"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.extractfromfile/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Files",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Extract from File"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTAuOTM3NSAyQzAuNDE5NzMzIDIgMCAyLjQxOTczIDAgMi45Mzc1VjM3LjMyMjFDMCAzNy44Mzk5IDAuNDE5NzMzIDM4LjI1OTYgMC45Mzc1IDM4LjI1OTZIMjYuMjE1NEMyNi43MzMyIDM4LjI1OTYgMjcuMTUyOSAzNy44Mzk5IDI3LjE1MjkgMzcuMzIyMUwyNy4xNTI5IDMwLjY3MTlMMTYuNzk2OSAzMC42NzE5QzE0Ljg5ODQgMzAuNjcxOSAxMy4zNTk0IDI5LjEzMjkgMTMuMzU5NCAyNy4yMzQ0VjI1LjM1OTRDMTMuMzU5NCAyMy40NjA5IDE0Ljg5ODQgMjEuOTIxOSAxNi43OTY5IDIxLjkyMTlIMjcuMTUyOUwyNy4xNTI5IDE1Ljc4MjFIMTQuMzA4M0MxMy43OTA2IDE1Ljc4MjEgMTMuMzcwOCAxNS4zNjI0IDEzLjM3MDggMTQuODQ0NlYySDAuOTM3NVoiIGZpbGw9IiMzNTNGNkUiLz4KPHBhdGggZD0iTTE2LjAyNzEgMkMxNS45NDA4IDIgMTUuODcwOCAyLjA2OTk2IDE1Ljg3MDggMi4xNTYyNVYxMi44MTM0QzE1Ljg3MDggMTMuMDcyMyAxNi4wODA3IDEzLjI4MjEgMTYuMzM5NiAxMy4yODIxSDI2Ljk5NjdDMjcuMDgzIDEzLjI4MjEgMjcuMTUyOSAxMy4yMTIyIDI3LjE1MjkgMTMuMTI1OUwyNy4xNTI5IDEyLjYxNzFDMjcuMTUyOSAxMi4zNjg4IDI3LjA1NDUgMTIuMTMwNyAyNi44NzkxIDExLjk1NUwxNy4yMjI1IDIuMjc1MzhDMTcuMDQ2NiAyLjA5OTA4IDE2LjgwNzkgMiAxNi41NTg4IDJIMTYuMDI3MVoiIGZpbGw9IiMzNTNGNkUiLz4KPHBhdGggZD0iTTI5Ljc2NDIgMzQuNjUwM0MyOS4wMzQgMzMuOTE2IDI5LjAzNzQgMzIuNzI4OCAyOS43NzE2IDMxLjk5ODZMMzMuNjE5NyAyOC4xNzE5TDE2Ljc5NjkgMjguMTcxOUMxNi4yNzkxIDI4LjE3MTkgMTUuODU5NCAyNy43NTIxIDE1Ljg1OTQgMjcuMjM0NFYyNS4zNTk0QzE1Ljg1OTQgMjQuODQxNiAxNi4yNzkxIDI0LjQyMTkgMTYuNzk2OSAyNC40MjE5TDMzLjU0MTIgMjQuNDIxOUwyOS43NzE2IDIwLjY3MzNDMjkuMDM3NCAxOS45NDMxIDI5LjAzNCAxOC43NTU5IDI5Ljc2NDIgMTguMDIxNkMzMC40OTQ0IDE3LjI4NzQgMzEuNjgxNiAxNy4yODQgMzIuNDE1OSAxOC4wMTQyTDM5LjQ0NzEgMjUuMDA2NEMzOS44MDEgMjUuMzU4MyA0MCAyNS44MzY4IDQwIDI2LjMzNTlDNDAgMjYuODM1IDM5LjgwMSAyNy4zMTM1IDM5LjQ0NzEgMjcuNjY1NUwzMi40MTU5IDM0LjY1NzZDMzEuNjgxNiAzNS4zODc4IDMwLjQ5NDQgMzUuMzg0NSAyOS43NjQyIDM0LjY1MDNaIiBmaWxsPSIjMzUzRjZFIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Extract from File",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 34,
+      "name": "Invoice Processing"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

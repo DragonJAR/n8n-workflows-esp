@@ -1,0 +1,1372 @@
+{
+  "id": 11706,
+  "name": "Track GitHub trending repositories with ScrapeOps & Google Sheets",
+  "views": 20,
+  "recentViews": 0,
+  "totalViews": 20,
+  "createdAt": "2025-12-11T14:09:17.661Z",
+  "description": "## Overview\nThis n8n template tracks **GitHub Trending repositories** (daily/weekly/monthly), parses the trending page into structured data (rank, repo name, stars, language, etc.), and stores results in **Google Sheets** with **automatic deduping**. It’s designed for teams who want a simple “trending feed” for engineering research, developer tooling discovery, and weekly reporting.\n\n## Who is this for?\n- Developers, PMs, DevRel, and tooling teams who want a lightweight trend radar\n- Anyone building a curated list of fast-rising open source projects\n- Teams who want Sheets-based tracking without manual copy/paste\n\n## What problems it solves\n- Automatically collects GitHub Trending data on a schedule\n- Prevents duplicate rows using a stable `dedupe_key`\n- Updates existing rows when values change (rank/stars/score)\n\n## How it works\n1. A schedule triggers the workflow.\n2. Inputs define the trending window (`daily`, `weekly`, or `monthly`) and optional languages.\n3. ScrapeOps fetches the GitHub Trending HTML reliably.\n4. The workflow parses repositories and ranks from the HTML.\n5. Cleaned rows are written to Google Sheets using **Append or Update Row** matching on `dedupe_key`.\n\n## Setup steps (~5–10 minutes)\n1) **ScrapeOps**\n- Register & get an API key: [https://scrapeops.io/app/register/n8n](https://scrapeops.io/app/register/n8n)\n- Read the n8n overview: [https://scrapeops.io/docs/n8n/overview/](https://scrapeops.io/docs/n8n/overview/)\n- (Optional) Learn ScrapeOps Proxy API features: [https://scrapeops.io/docs/n8n/proxy-api/](https://scrapeops.io/docs/n8n/proxy-api/)\n\n2) **Google Sheets**\n- [Duplicate this sheet](https://docs.google.com/spreadsheets/d/1GhCbbPilZXMVDox0hQ0Ncqf5-g3AdFFy55Ld30gPD-E/edit?gid=0#gid=0)/create a Sheet and add a `trending_raw` tab.\n- Add columns used by the workflow (e.g. captured_at, since, source_url, rank_on_page, full_name, repo_url, stars_total, forks_total, stars_in_period, score, dedupe_key).\n- In the Google Sheets node, choose **Append or Update Row** and set **Column to match on = dedupe_key**.\n\n3) **Customize**\n- Change `since` to daily/weekly/monthly in the Inputs node.\n- Add languages via `languages_csv` (example: `any,python,go,rust`).\n- Adjust delay if needed.\n\n## Pre-conditions\n- ScrapeOps account + API key configured in n8n\n- Google Sheets credentials connected in n8n\n- A Sheet tab named `trending_raw` with matching columns\n\n## Disclaimer\nThis template uses **ScrapeOps as a community node**. You are responsible for complying with GitHub’s Terms of Service, robots directives, and applicable laws in your jurisdiction. Scraping targets can change at any time; you may need to update wait times and parsing logic accordingly. Use responsibly for legitimate business purposes.\n",
+  "workflow": {
+    "id": "VKCnlRbfmd3GmvXZ",
+    "meta": {
+      "instanceId": "c2ff056313a72210aa803da7c5191a260dbed0dab6ae2b8e39a8dd21701bf0ab",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "GitHub Trending Dev Tools",
+    "tags": [
+      {
+        "id": "EwNZ2taImfwXNIV6",
+        "name": "github",
+        "createdAt": "2025-12-11T12:51:23.257Z",
+        "updatedAt": "2025-12-11T12:51:23.257Z"
+      },
+      {
+        "id": "851ehcNzkj5GLim3",
+        "name": "scraping",
+        "createdAt": "2025-12-11T12:52:06.933Z",
+        "updatedAt": "2025-12-11T12:52:06.933Z"
+      },
+      {
+        "id": "lZKSh2IoxHklnOUw",
+        "name": "ScrapeOps",
+        "createdAt": "2025-10-20T20:27:13.410Z",
+        "updatedAt": "2025-10-20T20:27:13.410Z"
+      },
+      {
+        "id": "VtV62IGgHutlusaN",
+        "name": "devtools",
+        "createdAt": "2025-12-11T12:52:38.192Z",
+        "updatedAt": "2025-12-11T12:52:38.192Z"
+      },
+      {
+        "id": "yh7XX4GObvd3np2S",
+        "name": "google sheets",
+        "createdAt": "2025-11-06T11:10:29.979Z",
+        "updatedAt": "2025-11-06T11:10:29.979Z"
+      },
+      {
+        "id": "5DcXvqnjGQotjqKa",
+        "name": "trending",
+        "createdAt": "2025-12-11T12:52:53.810Z",
+        "updatedAt": "2025-12-11T12:52:53.810Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "f0f306fd-4fe7-46db-8761-7980eef55bdb",
+        "name": "Cron (daily/weekly)",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -1104,
+          -80
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {}
+            ]
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ab4b695b-de79-4729-9463-8b59c047be2c",
+        "name": "Build URLs",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -656,
+          -80
+        ],
+        "parameters": {
+          "jsCode": "// Build URLs (n8n Code node)\n\nconst input = items[0]?.json ?? {};\n\n// since: daily | weekly | monthly\nconst since = String(input.since || 'daily').toLowerCase().trim();\n\n// languages_csv example: \"any,JavaScript,TypeScript,Python,Go,Rust,C++,Java\"\nconst languagesCsv = String(input.languages_csv || 'any').trim();\n\n// Normalize \"since\"\nconst allowedSince = new Set(['daily', 'weekly', 'monthly']);\nconst sinceFinal = allowedSince.has(since) ? since : 'daily';\n\n// Parse languages\nlet langs = languagesCsv\n  .split(',')\n  .map(s => s.trim())\n  .filter(Boolean);\n\n// remove duplicates\nlangs = [...new Set(langs.map(l => l.toLowerCase()))];\n\n// map normalized language -> GitHub path slug\nconst langSlugMap = {\n  'any': null,\n  'javascript': 'javascript',\n  'typescript': 'typescript',\n  'python': 'python',\n  'go': 'go',\n  'rust': 'rust',\n  'c++': 'c%2B%2B',     // URL encoded\n  'cpp': 'c%2B%2B',     // allow cpp too\n  'java': 'java',\n};\n\nconst nowIso = new Date().toISOString();\n\n// week_id like 2025-W50\nfunction getWeekId(d = new Date()) {\n  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));\n  const dayNum = date.getUTCDay() || 7;\n  date.setUTCDate(date.getUTCDate() + 4 - dayNum);\n  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));\n  const weekNo = Math.ceil((((date - yearStart) / 86400000) + 1) / 7);\n  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;\n}\n\nconst weekId = getWeekId(new Date());\n\n// Build URLs\nconst urls = [];\nfor (const l of langs) {\n  const slug = langSlugMap[l];\n  // skip unknown languages safely\n  if (slug === undefined) continue;\n\n  const base = slug ? `https://github.com/trending/${slug}` : `https://github.com/trending`;\n  const url = `${base}?since=${encodeURIComponent(sinceFinal)}`;\n\n  urls.push({\n    url,\n    source_url: url,\n    page_index: urls.length,\n    since: sinceFinal,\n    captured_at: nowIso,\n    week_id: weekId,\n    // keep your sheet config if you want:\n    sheet_id: input.sheet_id,\n    raw_sheet_name: input.raw_sheet_name || 'trending_raw',\n    brief_sheet_name: input.brief_sheet_name || 'weekly_brief',\n  });\n}\n\nreturn urls.map(x => ({ json: x }));\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "fbb4a5fc-1222-48c0-a9dd-2efd06472d66",
+        "name": "Split URLs (loop)",
+        "type": "n8n-nodes-base.splitInBatches",
+        "position": [
+          -400,
+          -80
+        ],
+        "parameters": {
+          "options": {},
+          "batchSize": 1
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "e00a10e3-0650-467f-bda5-1ebd855d1779",
+        "name": "ScrapeOps: Fetch HTML",
+        "type": "@scrapeops/n8n-nodes-scrapeops.ScrapeOps",
+        "position": [
+          -176,
+          -80
+        ],
+        "parameters": {
+          "url": "={{$json.url}}",
+          "advancedOptions": {}
+        },
+        "credentials": {
+          "scrapeOpsApi": {
+            "id": "credential-id",
+            "name": "scrapeOpsApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2d61a915-3d69-4fff-a179-150362f26a3c",
+        "name": "Polite Delay",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          64,
+          -80
+        ],
+        "webhookId": "e98b8853-3405-43b7-871d-c291d91f9500",
+        "parameters": {
+          "unit": "seconds",
+          "amount": 2
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3d681415-dd9a-454d-a108-dc1c1ec9cdb8",
+        "name": "Extract Trending Repos",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          320,
+          -80
+        ],
+        "parameters": {
+          "jsCode": "const html = $json.data || $json.body || $json || '';\nconst upstream = $items('Split URLs (loop)')[0]?.json || {};\n\nconst articles = [...String(html).matchAll(/<article[\\s\\S]*?<\\/article>/g)];\nlet rank = 0;\n\nconst cleanText = (s) => String(s || '').replace(/<[^>]+>/g,' ').replace(/\\s+/g,' ').trim();\n\nfunction extractTightDescription(block) {\n  const preferred = block.match(/<p[^>]*class=\"[^\"]*\\bcol-9\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/p>/i);\n  if (preferred) return cleanText(preferred[1]);\n\n  const afterTitle = block.match(/<h2[\\s\\S]*?<\\/h2>[\\s\\S]*?<p[^>]*>([\\s\\S]*?)<\\/p>/i);\n  if (afterTitle) return cleanText(afterTitle[1]);\n\n  const anyP = block.match(/<p[^>]*>([\\s\\S]*?)<\\/p>/i);\n  return anyP ? cleanText(anyP[1]) : '';\n}\n\nfunction extractCountFromAnchor(block, hrefSuffix) {\n  const aMatch = block.match(new RegExp(`(<a[^>]*href=\\\"\\\\/[^\"]+\\\\/${hrefSuffix}\\\"[^>]*>[\\\\s\\\\S]*?<\\\\/a>)`, 'i'));\n  if (!aMatch) return '';\n  const text = cleanText(aMatch[1]);\n  const numMatch = text.match(/([0-9][0-9.,]*\\s*[kKmM]?)/);\n  return numMatch ? numMatch[1].replace(/\\s+/g,'') : '';\n}\n\nconst extracted = [];\nfor (const m of articles) {\n  const block = m[0];\n\n  const h2RepoMatch = block.match(/<h2[^>]*>[\\s\\S]*?<a[^>]*href=\\\"\\/([^\\/\\s]+)\\/([^\\/\"]+)\\\"/i);\n  if (!h2RepoMatch) continue;\n\n  const owner = h2RepoMatch[1].trim();\n  const repo = h2RepoMatch[2].trim();\n  if (!owner || !repo) continue;\n  if (owner.toLowerCase() === 'sponsors') continue;\n\n  rank += 1;\n\n  const full_name = `${owner}/${repo}`;\n  const repo_url = `https://github.com/${full_name}`;\n  const description = extractTightDescription(block);\n\n  const langMatch = block.match(/itemprop=\\\"programmingLanguage\\\"[^>]*>([^<]+)/i);\n  const language = langMatch ? cleanText(langMatch[1]) : '';\n\n  const stars_total_raw = extractCountFromAnchor(block, 'stargazers');\n  const forks_total_raw = extractCountFromAnchor(block, 'forks');\n\n  const starsInPeriodMatch = block.match(/([0-9.,kKmM]+)\\s+stars\\s+this\\s+week/i) || block.match(/([0-9.,kKmM]+)\\s+stars\\s+today/i) || block.match(/([0-9.,kKmM]+)\\s+stars\\s+this\\s+month/i);\n\n  extracted.push({\n    ...upstream,\n    rank_on_page: rank,\n    owner,\n    repo,\n    full_name,\n    repo_url,\n    description,\n    language,\n    stars_total_raw,\n    forks_total_raw,\n    stars_in_period_raw: starsInPeriodMatch?.[1] || ''\n  });\n}\n\nreturn extracted.map(r => ({ json: r }));"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6df21227-e87a-4db6-96a1-efe0b60e5b58",
+        "name": "Normalize + Enrich-from-page",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          576,
+          -80
+        ],
+        "parameters": {
+          "jsCode": "function parseNumber(s) {\n  if (!s) return 0;\n  const t = String(s).trim().toLowerCase();\n  if (t.endsWith('k')) return Math.round(parseFloat(t.slice(0, -1)) * 1000);\n  if (t.endsWith('m')) return Math.round(parseFloat(t.slice(0, -1)) * 1000000);\n  return parseInt(t.replace(/,/g, ''), 10) || 0;\n}\n\nreturn items.map((item) => {\n  const j = item.json || {};\n\n  const upstreamKeywords = (j.keywords || []).map(k => String(k).toLowerCase());\n  const langSet = new Set((j.languages || []).map(l => String(l).toLowerCase()));\n\n  const stars_total = parseNumber(j.stars_total_raw);\n  const forks_total = parseNumber(j.forks_total_raw);\n  const stars_in_period = parseNumber(j.stars_in_period_raw);\n\n  const text = `${j.full_name || ''} ${j.description || ''}`.toLowerCase();\n  const matches = upstreamKeywords.filter(k => k && text.includes(k));\n  const uniqueMatches = [...new Set(matches)];\n  const is_dev_tool = uniqueMatches.length > 0;\n\n  let keyword_bonus = 0;\n  if (is_dev_tool) keyword_bonus = Math.min(20, 10 + Math.max(0, (uniqueMatches.length - 1) * 2));\n  const language_bonus = (j.language && langSet.has(String(j.language).toLowerCase())) ? 3 : 0;\n  const score = (stars_in_period * 2) + keyword_bonus + language_bonus;\n\n  const dedupe_key = `${j.since}|${j.full_name}`;\n\n\n  return {\n    json: {\n      captured_at: j.captured_at,\n      week_id: j.week_id,\n      since: j.since,\n      source_url: j.source_url,\n      rank_on_page: j.rank_on_page,\n      full_name: j.full_name,\n      repo_url: j.repo_url,\n      owner: j.owner,\n      repo: j.repo,\n      description: j.description,\n      language: j.language,\n      stars_total,\n      forks_total,\n      stars_in_period,\n      keyword_matches: uniqueMatches.join(', '),\n      is_dev_tool,\n      score,\n      dedupe_key,\n      sheet_id: j.sheet_id,\n      raw_sheet_name: j.raw_sheet_name,\n      brief_sheet_name: j.brief_sheet_name\n    }\n  };\n});"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "db2a227b-66d9-4c1f-8a25-21dba32aa701",
+        "name": "Write to Google Sheets (raw tab)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          864,
+          -80
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "repo": "={{$json.repo}}",
+              "owner": "={{$json.owner}}",
+              "score": "={{$json.score}}",
+              "since": "={{$json.since}}",
+              "week_id": "={{$json.week_id}}",
+              "language": "={{$json.language}}",
+              "repo_url": "={{$json.repo_url}}",
+              "full_name": "={{$json.full_name}}",
+              "dedupe_key": "={{$json.dedupe_key}}",
+              "source_url": "={{$json.source_url}}",
+              "captured_at": "={{$json.captured_at}}",
+              "description": "={{$json.description}}",
+              "forks_total": "={{$json.forks_total}}",
+              "stars_total": "={{$json.stars_total}}",
+              "rank_on_page": "={{$json.rank_on_page}}",
+              "stars_in_period": "={{$json.stars_in_period}}"
+            },
+            "schema": [
+              {
+                "id": "captured_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "captured_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "week_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "week_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "since",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "since",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "source_url",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "source_url",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "rank_on_page",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "rank_on_page",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "full_name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "full_name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "repo_url",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "repo_url",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "owner",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "owner",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "repo",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "repo",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "description",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "description",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "language",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "language",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "stars_total",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "stars_total",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "forks_total",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "forks_total",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "stars_in_period",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "stars_in_period",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "score",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "score",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "dedupe_key",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "dedupe_key",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "dedupe_key"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "trending_raw"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "1GhCbbPilZXMVDox0hQ0Ncqf5-g3AdFFy55Ld30gPD-E"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "d3b522dc-93f3-403a-a923-8c040920710b",
+        "name": "Write to Google Sheets (weekly tab)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          400,
+          336
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "notes": "={{$json.notes}}",
+              "week_id": "={{$json.week_id}}",
+              "top_repos": "={{$json.top_repos}}",
+              "top_themes": "={{$json.top_themes}}",
+              "generated_at": "={{$json.generated_at}}"
+            },
+            "schema": [
+              {
+                "id": "week_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "week_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "generated_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "generated_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "top_repos",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "top_repos",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "top_themes",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "top_themes",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "notes",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "notes",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "message_sent_to",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "required": false,
+                "displayName": "message_sent_to",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "link_to_raw_filter",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "required": false,
+                "displayName": "link_to_raw_filter",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 723657204,
+            "cachedResultUrl": "https://docs.google.com/YOUR_AWS_SECRET_KEY_HERE-g3AdFFy55Ld30gPD-E/edit#gid=723657204",
+            "cachedResultName": "weekly_brief"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "url",
+            "value": "https://docs.google.com/YOUR_AWS_SECRET_KEY_HERE-g3AdFFy55Ld30gPD-E/edit?usp=sharing"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.5
+      },
+      {
+        "id": "c735eb78-72a1-4183-84fe-44c78746f9f3",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1808,
+          -608
+        ],
+        "parameters": {
+          "width": 656,
+          "height": 800,
+          "content": "# GitHub Trending Tracker (Daily/Weekly/Monthly) → Google Sheets\n\nThis workflow pulls **GitHub Trending repositories** for a chosen time window (**daily / weekly / monthly**) and writes results to a Google Sheet. It uses **ScrapeOps (community node)** to fetch HTML reliably, then parses the page into structured rows and **upserts** them into Sheets using a `dedupe_key` so you don’t get duplicates.\n\n## How it works\n1) **Set Inputs** defines `since` (daily/weekly/monthly) and optional languages.  \n2) **Build URLs** creates GitHub Trending URLs for the chosen window.  \n3) **ScrapeOps: Fetch HTML** downloads the Trending page HTML.  \n4) **Extract Trending Repos** parses repositories + rank + metadata from HTML.  \n5) **Normalize + Enrich** cleans numbers, calculates score, creates `dedupe_key`.  \n6) **Google Sheets (Append or Update Row)** writes rows and updates existing ones by `dedupe_key`.\n\n## Setup steps\n- Create a free ScrapeOps account & API key: https://scrapeops.io/app/register/n8n  \n- Add ScrapeOps credentials in n8n (community node). Docs: https://scrapeops.io/docs/n8n/overview/  \n- Duplicate the [Google Sheet](https://docs.google.com/spreadsheets/d/1GhCbbPilZXMVDox0hQ0Ncqf5-g3AdFFy55Ld30gPD-E/edit?usp=sharing) with matching tabs and columns for node mapping.\n- In **Write to Google Sheets**, set operation to **Append or Update Row** and match on **dedupe_key**.\n\n## Customization tips\n- Change `since` to daily/weekly/monthly in **Set Inputs**.\n- Add languages in `languages_csv` (e.g. `any,python,go,rust`).\n- Adjust delay and parsing if GitHub’s HTML changes.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a0cef4cb-1d76-4f67-bf07-cf97c3c281b0",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -928,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 304,
+          "content": "## Inputs & URL Builder\nSet `since` + languages, then generate GitHub Trending URLs.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "feae26f1-0889-4a52-b705-62a5d55fb2b8",
+        "name": "Set Inputs",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -896,
+          -80
+        ],
+        "parameters": {
+          "values": {
+            "string": [
+              {
+                "name": "since",
+                "value": "monthly"
+              },
+              {
+                "name": "languages_csv",
+                "value": "any"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7c9908e4-a0b1-4a6b-9e65-7fbc91f398e1",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -256,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 320,
+          "content": "## Scrape Trending Pages\nFetch HTML via ScrapeOps, then wait briefly to be polite.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c04937d5-93d4-4f1d-8925-5451faecd8d2",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          272,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 320,
+          "content": "## Parse & Normalize\nExtract repos + rank from HTML and normalize numbers + scoring + dedupe key.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "101bb8bd-8bad-44f8-881f-cdb22756e186",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          800,
+          -192
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 320,
+          "height": 320,
+          "content": "## Save Results\nUpsert rows into Google Sheets using `dedupe_key` to avoid duplicates.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "bb9fefc0-51ca-4006-b1e9-8321923243c9",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -112,
+          224
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 736,
+          "height": 320,
+          "content": "## Weekly Brief (Optional)\nReads raw data and writes a summary into the weekly_brief tab.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0f912457-142c-4a91-af13-686946f1aad8",
+        "name": "Read raw (for weekly)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          -64,
+          336
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "name",
+            "value": "trending_raw"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "1GhCbbPilZXMVDox0hQ0Ncqf5-g3AdFFy55Ld30gPD-E"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 3,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "20904aec-177e-4174-a859-bdce20b32e17",
+        "name": "Generate Weekly",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          176,
+          336
+        ],
+        "parameters": {
+          "jsCode": "const weekId = ($items('Build URLs')[0]?.json?.week_id) || '';\nlet rows = items.map(x => x.json || {});\nif (rows.length === 1 && Array.isArray(rows[0].data)) rows = rows[0].data;\n\nconst weekRows = rows.filter(r => String(r.week_id || '') === String(weekId));\nconst devRows = weekRows.filter(r => String(r.is_dev_tool).toLowerCase() === 'true');\n\nconst top = [...weekRows].sort((a,b)=> (Number(b.score)||0) - (Number(a.score)||0)).slice(0,10);\n\nconst top_repos = top.map(r => r.repo_url).join('\\n');\nconst top_10_list = top.map((r,i)=> `${i+1}) ${r.full_name} — stars_in_period=${r.stars_in_period||0}, lang=${r.language||''}, score=${r.score||0}`).join('\\n');\n\nconst themeCounts = {};\nfor (const r of devRows) {\n  const parts = String(r.keyword_matches || '').split(',').map(s=>s.trim()).filter(Boolean);\n  for (const p of parts) themeCounts[p] = (themeCounts[p] || 0) + 1;\n}\nconst top_themes = Object.entries(themeCounts).sort((a,b)=>b[1]-a[1]).slice(0,20).map(([k,v])=>`${k}(${v})`).join(', ');\n\nconst why = top.length\n  ? `Top repo this ${$items('Build URLs')[0]?.json?.since || 'period'}: ${top[0].full_name} (${top[0].language || 'n/a'}) with ${top[0].stars_in_period || 0} stars in period.`\n  : '';\n\nreturn [{\n  json: {\n    week_id: weekId,\n    generated_at: new Date().toISOString(),\n    total_repos_captured: weekRows.length,\n    total_devtools_flagged: devRows.length,\n    top_10_list,\n    top_repos,\n    top_themes,\n    notes: why,\n    message_sent_to: '',\n    link_to_raw_filter: ''\n  }\n}];"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "d8af9578-5963-468b-94d8-788fd478ff2d",
+    "connections": {
+      "Build URLs": {
+        "main": [
+          [
+            {
+              "node": "Split URLs (loop)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Inputs": {
+        "main": [
+          [
+            {
+              "node": "Build URLs",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Read raw (for weekly)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Polite Delay": {
+        "main": [
+          [
+            {
+              "node": "Extract Trending Repos",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Weekly": {
+        "main": [
+          [
+            {
+              "node": "Write to Google Sheets (weekly tab)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Split URLs (loop)": {
+        "main": [
+          [
+            {
+              "node": "ScrapeOps: Fetch HTML",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Cron (daily/weekly)": {
+        "main": [
+          [
+            {
+              "node": "Set Inputs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read raw (for weekly)": {
+        "main": [
+          [
+            {
+              "node": "Generate Weekly",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ScrapeOps: Fetch HTML": {
+        "main": [
+          [
+            {
+              "node": "Polite Delay",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Trending Repos": {
+        "main": [
+          [
+            {
+              "node": "Normalize + Enrich-from-page",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize + Enrich-from-page": {
+        "main": [
+          [
+            {
+              "node": "Write to Google Sheets (raw tab)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 18,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 3
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@scrapeops/n8n-nodes-scrapeops.ScrapeOps": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Ian Kerins",
+    "username": "iankerins",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "x.com/ianjkerins"
+    ],
+    "avatar": "https://gravatar.com/avatar/890cb31fc440a02555fafa9eb072fb2282af0d51f9239c04e356c5eeda68be76?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    }
+  ],
+  "image": []
+}

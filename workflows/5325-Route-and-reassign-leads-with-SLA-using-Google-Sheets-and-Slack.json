@@ -1,0 +1,2770 @@
+{
+  "id": 12702,
+  "name": "Route and reassign leads with SLA using Google Sheets and Slack",
+  "views": 14,
+  "recentViews": 0,
+  "totalViews": 14,
+  "createdAt": "2026-01-14T05:11:07.902Z",
+  "description": "# Lead-Routing-Engine-with-SLA-Auto-Reassignment\n\nThis repository contains an SLA-based lead routing workflow built in n8n, designed to ensure fast lead response, fair sales distribution, and controlled escalation without relying on a full CRM system.\n\nThe workflow focuses on routing discipline and operational safety, not feature completeness.\n\n## What This Workflow Does\n\nAt a high level, the system:\n1) Accepts new leads from a generic intake form\n2) Assigns leads to sales reps using round-robin\n3) Enforces a response SLA\n4) Automatically re-routes uncontacted leads\n5) Allows sales to mark leads as CONTACTED via Slack\n6) Escalates to a manager once if SLA is repeatedly violated\n\n## Architecture Overview\n\n**Core Components**\n\n1) n8n \n2) Google Sheets \n3) Slack\n\n**Primary Data Stores**\n\n1) sales_sheet (list of active sales reps)\n2) lead_sheet (lead state and routing history)\n3) routing_state_sheet (global routing + escalation flags)\n\n## End-to-End Flow\n\nA) Lead Intake & Normalization\n\n1) New leads enter via Form Trigger\n2) Phone numbers are normalized to 62xxxxxxxx (Indonesia International Direct Dialing code)\n3) A unique lead_id is generated\n4) Lead is initialized with:\n   - stage = NEW\n   - route_count = 0\n\nB) Initial Assignment (Round Robin)\n\n1) Active sales reps are loaded from sales_sheet\n2) Global last_index is read from routing_state_sheet\n3) Lead is assigned to the next sales rep in sequence\n4) Assignment metadata is stored:\n    - assigned sales\n    - timestamps\n    - route count\n5) last_index is updated centrally\n\nC) Slack Notification (New Lead)\n\n1) Assigned sales receives a Slack message\n2) Message includes a “Mark as CONTACTED” button\n3) SLA expectation is clearly communicated (1 hour by default)\n\nD) SLA Monitoring (Scheduled)\n\n1) A scheduled trigger runs every hour\n2) Workflow scans leads where:\n   - stage = NEW\n   - SLA window has elapsed since last assignment\n\nE) SLA Re-Routing\n\nFor each qualifying lead:\n1) Lead is reassigned to the next sales rep\n2) Route count is incremented\n3) Timestamps are updated\n4) Slack notification is sent to the new assignee\n\nThis process repeats until the lead is contacted or escalated.\n\nF) Controlled Escalation\n\nIf route_count &gt;= threshold (default: 10):\n1) Workflow checks escalation state (escalated_&lt;lead_id&gt;)\n2) If not escalated yet:\n   - Manager is notified via Slack\n   - Escalation flag is written\n4) If already escalated:\n   - No further action is taken\n\nEscalation is **one-time per lead.**\n\nG) Stage Update via Slack (CONTACTED)\n\n1) Sales marks a lead as CONTACTED via Slack button\n2) Incoming Slack action is validated:\n   - Only assigned sales is allowed\n   - Only if current stage is NEW\n3) Update is idempotent\n4) Unauthorized or stale actions receive Slack feedback\n\n**Once contacted:**\n1) SLA routing stops\n2) Lead remains stable\n\n## Safeguards Built In\n\n1) Ownership enforcement (Only the assigned sales rep can update a lead)\n2) Idempotent stage transitions (Prevents duplicate or stale Slack actions)\n3) One-time escalation (No notification spam)\n4) Fail-fast behavior (Missing sales data or malformed payloads halt execution early)\n\n## Google Sheets Schema\n\n### `sales_sheet`\n\n| Column   | Description     |\n|----------|-----------------|\n| name     | Sales name      |\n| email    | Optional        |\n| slack_id | Slack user ID   |\n| active   | ON / TRUE       |\n\n### `lead_sheet`\n\n| Column         | Description           |\n| -------------- | --------------------- |\n| lead_id        | Unique identifier     |\n| name           | Lead name             |\n| phone          | Normalized phone      |\n| stage          | NEW / CONTACTED / QUALIFIED / CLOSED LOST       |\n| assigned_sales | Current owner         |\n| sales_slack_id | Slack ID              |\n| route_count    | Number of re-routes   |\n| created_at     | Creation timestamp    |\n| assigned_at    | Last assignment       |\n| last_routed_at | Last SLA routing      |\n| contacted_at   | When marked contacted |\n\n### `routing_state_sheet`\n\n| key                 | value                  |\n| ------------------- | ---------------------- |\n| last_index          | Last round-robin index |\n| escalated_&lt;lead_id&gt; | Escalation timestamp   |\n\n\n## Limitations (By Design)\n\n1) Google Sheets is not transactional\n2) SLA enforcement is time-bucketed, not real-time\n3) No concurrency locking across parallel runs\n4) Slack is required for interaction\n5) This is not a CRM, only a routing engine\n\nThese constraints are explicit and intentional.\n\n## When This Design Works Well\n\n1) Small to mid-size teams\n2) Human-response SLAs (minutes/hours)\n3) Teams needing discipline, not heavy tooling\n4) CRM-lite or pre-CRM environments\n\n## When to Migrate\n\nConsider migrating if you need:\n\n1) High-volume ingestion\n2) Sub-minute SLA guarantees\n3) Strong transactional consistency\n4) Advanced analytics or forecasting\n\nThe routing logic itself is portable to SQL or CRM systems.",
+  "workflow": {
+    "id": "<REDACTED_WORKFLOW_ID>",
+    "meta": {
+      "instanceId": "<REDACTED_N8N_INSTANCE_ID>",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Lead Routing Engine with SLA Auto-Reassignment",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "081127cd-9a65-420f-bcc9-ec00edd129c0",
+        "name": "1) Form Trigger (New Lead)",
+        "type": "n8n-nodes-base.formTrigger",
+        "position": [
+          1008,
+          656
+        ],
+        "webhookId": "<REDACTED_WEBHOOK_ID_FORM_TRIGGER>",
+        "parameters": {
+          "options": {
+            "buttonLabel": "Submit"
+          },
+          "formTitle": "Lead Intake (Generic Form Trigger)",
+          "formFields": {
+            "values": [
+              {
+                "fieldName": "Name",
+                "fieldLabel": "Name",
+                "requiredField": true
+              },
+              {
+                "fieldName": "Phone",
+                "fieldLabel": "Phone",
+                "placeholder": "0812xxx / +62812xxx / 62812xxx",
+                "requiredField": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "3379ea2e-316c-407e-adee-75094f1904cd",
+        "name": "2) Prep Lead",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1232,
+          656
+        ],
+        "parameters": {
+          "jsCode": "// =============================================\n// 2) Prep Lead (Normalize + Lead ID + Funnel Stage)\n// =============================================\n// Funnel stages:\n// - NEW, CONTACTED, QUALIFIED, CLOSED_LOST\n//\n// This node:\n// - generates a safe lead_id\n// - normalizes phone into 62xxxx\n// - sets initial stage = NEW\n\nfunction normalizePhone(input) {\n  let p = String(input || '').trim();\n  p = p.replace(/\\s+/g, '');\n  p = p.replace(/[^0-9+]/g, '');\n\n  if (p.startsWith('+62')) p = '62' + p.slice(3);\n  if (p.startsWith('0')) p = '62' + p.slice(1);\n  if (p.startsWith('62')) return p;\n  if (/^\\d+$/.test(p)) return '62' + p;\n  return p;\n}\n\nfunction makeLeadId() {\n  const ts = Date.now().toString(36);\n  const rnd = Math.random().toString(36).slice(2, 8);\n  return `L-${ts}-${rnd}`.toUpperCase();\n}\n\nconst now = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead_id: makeLeadId(),\n    name: String($json.Name || '').trim(),\n    phone: normalizePhone($json.Phone),\n\n    // Funnel stage\n    stage: 'NEW',\n\n    // Routing state\n    assigned_sales: '',\n    sales_slack_id: '',\n    route_count: 0,\n\n    // Timestamps\n    created_at: now,\n    initial_assigned_at: '',\n    assigned_at: '',\n    last_routed_at: ''\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "43e46f8a-bdf3-4617-a342-fbb756f3d986",
+        "name": "3) Get Sales List (active=ON)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1456,
+          656
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "sales_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "4b206a78-d668-4750-b005-99baa882807f",
+        "name": "4) Build Sales List",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1680,
+          656
+        ],
+        "parameters": {
+          "jsCode": "// =============================================\n// 4) Build Sales List (1 object)\n// =============================================\n// Output: sales_list[] is used for initial assignment and re-routing.\n\nconst salesList = items\n  .map(i => i.json)\n  .filter(r => {\n    const a = String(r.active || '').toUpperCase();\n    return a === 'ON' || a === 'TRUE' || r.active === true;\n  })\n  .map(r => ({\n    name: String(r.name || '').trim(),\n    email: String(r.email || '').trim(),\n    slack_id: String(r.slack_id || '').trim(),\n    active: true\n  }))\n  .filter(r => r.name && r.slack_id);\n\nif (!salesList.length) {\n  throw new Error('No active sales found. Check sales sheet: name, slack_id, active=ON');\n}\n\nreturn [{ json: { sales_list: salesList, sales_count: salesList.length } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "aacd08b3-e26b-4545-b0b1-478c69785d0d",
+        "name": "5) Get routing_state (last_index)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1904,
+          656
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "last_index",
+                "lookupColumn": "key"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "routing_state_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "63feae74-e4fa-45fa-85a8-d70cf8264add",
+        "name": "6) Initial Assign (Round Robin)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2128,
+          656
+        ],
+        "parameters": {
+          "jsCode": "// 6) Initial Assign (Round Robin)\n// Read the lead directly from node 2 (to avoid being overwritten by Google Sheets nodes)\n\nconst lead = $items('2) Prep Lead')[0].json;              // ✅ original lead\nconst sales = $items('4) Build Sales List')[0].json.sales_list;\n\n// routing_state is typically from node 5 (key/value)\nconst rs = $items('5) Get routing_state (last_index)')[0]?.json || {};\nconst lastIndex = Number(rs.value ?? -1);\n\nconst nextIndex = (lastIndex + 1) % sales.length;\nconst assigned = sales[nextIndex];\n\nconst now = new Date().toISOString();\n\nreturn [{\n  json: {\n    ...lead,\n\n    assigned_sales: assigned.name,\n    sales_slack_id: assigned.slack_id,\n\n    assigned_sales_index: nextIndex,\n    routing_key: 'last_index',\n\n    route_count: Number(lead.route_count || 0) + 1,\n\n    initial_assigned_at: lead.initial_assigned_at || now,\n    assigned_at: now,\n    last_routed_at: now,\n  }\n}];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "84bd91ec-f4c6-4abb-bc2f-83ec9afffb97",
+        "name": "7) Update routing_state",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2352,
+          560
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "key": "={{ $json.routing_key }}",
+              "value": "={{ $json.assigned_sales_index }}"
+            },
+            "schema": [
+              {
+                "id": "key",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "key",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "value",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "value",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "key"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "routing_state_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "e79612be-ccc5-4a59-8da9-fdea4036ae6b",
+        "name": "8) Upsert Lead (leads sheet)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2352,
+          752
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "name": "={{ $json.name }}",
+              "phone": "={{ $json.phone }}",
+              "stage": "={{ $json.stage }}",
+              "lead_id": "={{ $json.lead_id }}",
+              "created_at": "={{ $json.created_at }}",
+              "assigned_at": "={{ $json.assigned_at }}",
+              "route_count": "={{ $json.route_count }}",
+              "assigned_sales": "={{ $json.assigned_sales }}",
+              "last_routed_at": "={{ $json.last_routed_at }}",
+              "sales_slack_id": "={{ $json.sales_slack_id }}",
+              "initial_assigned_at": "={{ $json.initial_assigned_at }}"
+            },
+            "schema": [
+              {
+                "id": "lead_id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "lead_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "phone",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "stage",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "stage",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "assigned_sales",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "assigned_sales",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sales_slack_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sales_slack_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "initial_assigned_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "initial_assigned_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "assigned_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "assigned_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "last_routed_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "last_routed_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "route_count",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "route_count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "created_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "created_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "lead_id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "lead_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "75bd650d-7e5f-46d6-b422-cff871904be9",
+        "name": "SLA Trigger (every 1 hour)",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          1008,
+          1184
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "df9abcc5-683b-4345-9a47-39b0ddeafae2",
+        "name": "SLA) Get Sales List",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1232,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "sales_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "1a849c9c-cac8-4d79-808a-747addc1650d",
+        "name": "SLA) Build Sales List",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1456,
+          1184
+        ],
+        "parameters": {
+          "jsCode": "// Reuse the same builder logic for the SLA path\nconst salesList = items\n  .map(i => i.json)\n  .filter(r => {\n    const a = String(r.active || '').toUpperCase();\n    return a === 'ON' || a === 'TRUE' || r.active === true;\n  })\n  .map(r => ({\n    name: String(r.name || '').trim(),\n    email: String(r.email || '').trim(),\n    slack_id: String(r.slack_id || '').trim(),\n    active: true\n  }))\n  .filter(r => r.name && r.slack_id);\n\nif (!salesList.length) throw new Error('No active sales found');\n\nreturn [{ json: { sales_list: salesList, sales_count: salesList.length } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5a9d1951-f3fe-457a-baf2-64d3016a9f6b",
+        "name": "SLA) Get Leads (stage=NEW)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1680,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "NEW",
+                "lookupColumn": "stage"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "lead_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "848e4f52-21dc-4a4d-b57e-04449767c114",
+        "name": "SLA) If last route >= 1 hour",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1904,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "d684dde0-8f7d-4ecf-a07b-c0557a9b1323",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ (Date.now() - new Date($json.last_routed_at || $json.initial_assigned_at || $json.assigned_at || $json.created_at).getTime()) >= 60 * 60 * 1000 }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "ef2e8f85-a46f-44af-86a3-60230e7f8d7b",
+        "name": "SLA) Re-route to next sales",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2128,
+          1184
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "// SLA) Hourly Re-route (per item) - n8n 2.1.4 compatible\n\nconst lead = $json;\nconst sales = $items('SLA) Build Sales List')[0].json.sales_list;\n\nif (!Array.isArray(sales) || sales.length === 0) {\n  throw new Error(\"Sales list is empty. Check output of node 'SLA) Build Sales List'.\");\n}\n\nconst currentSlack = String(lead.sales_slack_id || '').trim();\nconst currentIndex = sales.findIndex(s => String(s.slack_id) === currentSlack);\nconst safeIndex = currentIndex === -1 ? 0 : currentIndex;\n\nconst nextIndex = (safeIndex + 1) % sales.length;\nconst nextSales = sales[nextIndex];\n\nconst now = new Date().toISOString();\n\n// IMPORTANT: For 'Run Once for Each Item', return MUST be an object, not an array\nreturn {\n  json: {\n    ...lead,\n    assigned_sales: nextSales.name,\n    sales_slack_id: nextSales.slack_id,\n    route_count: Number(lead.route_count || 0) + 1,\n    assigned_at: now,\n    last_routed_at: now,\n  }\n};\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "0c2f96ca-edd6-4b09-9e56-a29e3d85b005",
+        "name": "SLA) Update lead (after reroute)",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2576,
+          1280
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "lead_id": "={{ $json.lead_id }}",
+              "assigned_at": "={{ $json.assigned_at }}",
+              "route_count": "={{ $json.route_count }}",
+              "assigned_sales": "={{ $json.assigned_sales }}",
+              "last_routed_at": "={{ $json.last_routed_at }}",
+              "sales_slack_id": "={{ $json.sales_slack_id }}"
+            },
+            "schema": [
+              {
+                "id": "lead_id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "lead_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "phone",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "stage",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "stage",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "assigned_sales",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "assigned_sales",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sales_slack_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sales_slack_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "initial_assigned_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "initial_assigned_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "assigned_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "assigned_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "last_routed_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "last_routed_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "route_count",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "route_count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "created_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "created_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "lead_id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "lead_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "f2b2d1f5-5c79-4c15-bccb-68576372352b",
+        "name": "STAGE) Webhook (/demo-stage-update)",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          1024,
+          1696
+        ],
+        "webhookId": "<REDACTED_WEBHOOK_ID_STAGE>",
+        "parameters": {
+          "path": "demo-stage-update",
+          "options": {},
+          "httpMethod": "POST",
+          "responseMode": "lastNode"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "bcdaf046-1550-4a7c-9203-fb3d0efd445e",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          912,
+          512
+        ],
+        "parameters": {
+          "width": 1904,
+          "height": 432,
+          "content": "## Intake & Initial Assignment (Round Robin)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "47ba8bf6-9a88-4740-b055-444a71837399",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          912,
+          992
+        ],
+        "parameters": {
+          "width": 2992,
+          "height": 512,
+          "content": "## SLA Monitor & Hourly Re-route"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2fae9d8f-876c-4402-a2ca-5fac8150ad29",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          912,
+          1552
+        ],
+        "parameters": {
+          "width": 1488,
+          "height": 432,
+          "content": "##  \"Contacted\" Stage Update API (Stop Routing)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1d86227e-35f4-4433-9be2-657ed6c8bc0f",
+        "name": "STAGE) Update lead stage to CONTACTED",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2144,
+          1600
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "stage": "={{ $json.stage }}",
+              "lead_id": "={{ $json.lead_id }}",
+              "contacted_at": "={{ $json.contacted_at }}"
+            },
+            "schema": [
+              {
+                "id": "lead_id",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "lead_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "phone",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "stage",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "stage",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "assigned_sales",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "assigned_sales",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "sales_slack_id",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "sales_slack_id",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "initial_assigned_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "initial_assigned_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "assigned_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "assigned_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "last_routed_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "last_routed_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "route_count",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "route_count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "created_at",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "created_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "contacted_at",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "contacted_at",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "row_number",
+                "type": "number",
+                "display": true,
+                "removed": true,
+                "readOnly": true,
+                "required": false,
+                "displayName": "row_number",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "lead_id"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "update",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "lead_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "ae3aa50c-f879-4687-a17e-28d8ef01fa0c",
+        "name": "SLA) Slack Notify (reroute) & Button",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          2800,
+          1280
+        ],
+        "webhookId": "<REDACTED_SLACK_NODE_WEBHOOK_ID>",
+        "parameters": {
+          "text": "=",
+          "select": "channel",
+          "blocksUi": "={\n  \"blocks\": [\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"🔁 *Lead Re-routed (SLA)*\\n\\n*Lead ID:* {{ $items(\\\"SLA) Re-route to next sales\\\")[$itemIndex].json.lead_id }}\\n*Now Assigned to:* <@{{ $items(\\\"SLA) Re-route to next sales\\\")[$itemIndex].json.sales_slack_id }}>\\n*Name:* {{ $items(\\\"SLA) Re-route to next sales\\\")[$itemIndex].json.name }}\\n*Phone:* {{ $items(\\\"SLA) Re-route to next sales\\\")[$itemIndex].json.phone }}\\n*Route count:* {{ $items(\\\"SLA) Re-route to next sales\\\")[$itemIndex].json.route_count }}\"\n      }\n    },\n    {\n      \"type\": \"actions\",\n      \"elements\": [\n        {\n          \"type\": \"button\",\n          \"style\": \"primary\",\n          \"text\": {\n            \"type\": \"plain_text\",\n            \"text\": \"Mark as CONTACTED\"\n          },\n          \"value\": \"{{ $items(\\\"SLA) Re-route to next sales\\\")[$itemIndex].json.lead_id }}\",\n          \"action_id\": \"mark_contacted\"\n        }\n      ]\n    }\n  ]\n}",
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "<REDACTED_SLACK_CHANNEL_ID_1>"
+          },
+          "messageType": "block",
+          "otherOptions": {}
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "<REDACTED_SLACK_CRED_ID>",
+            "name": "Slack account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "50fce6b6-5460-4441-9322-6bf5ef4073cf",
+        "name": "9) Slack Notify (New Lead) & Button",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          2576,
+          752
+        ],
+        "webhookId": "<REDACTED_SLACK_NODE_WEBHOOK_ID>",
+        "parameters": {
+          "text": "=",
+          "select": "channel",
+          "blocksUi": "={\n  \"blocks\": [\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \":scream: *ALERT!!! NEW LEAD ASSIGNED*\\n\\n*Lead ID:* {{ $json.lead_id }}\\n*Assigned to:* <@{{ $json.sales_slack_id }}>\\n*Name:* {{ $json.name }}\\n*Phone:* {{ $json.phone }}\\n\\n:hourglass_flowing_sand: *Please claim within 1 hour*\"\n      }\n    },\n    {\n      \"type\": \"actions\",\n      \"elements\": [\n        {\n          \"type\": \"button\",\n          \"style\": \"primary\",\n          \"text\": {\n            \"type\": \"plain_text\",\n            \"text\": \"Mark as CONTACTED\"\n          },\n          \"value\": \"{{ $json.lead_id }}\",\n          \"action_id\": \"mark_contacted\"\n        }\n      ]\n    }\n  ]\n}",
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "<REDACTED_SLACK_CHANNEL_ID_1>"
+          },
+          "messageType": "block",
+          "otherOptions": {}
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "<REDACTED_SLACK_CRED_ID>",
+            "name": "Slack account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "8b9bed18-38c6-462a-b5df-99a84718d4b7",
+        "name": "STAGE) Lookup lead by lead_id",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1472,
+          1696
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ $json.lead_id }}",
+                "lookupColumn": "lead_id"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "lead_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "ffc50ca6-b358-40f9-a9f9-e3458c1e03e4",
+        "name": "STAGE) Prep Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1248,
+          1696
+        ],
+        "parameters": {
+          "jsCode": "// =============================================\n// STAGE) Prep Payload (Slack Interactive - Block Actions)\n// =============================================\n// Slack interactive payload arrives as x-www-form-urlencoded:\n// $json.body.payload is a STRING containing JSON\n\nconst payloadStr = $json?.body?.payload;\n\nif (!payloadStr) {\n  throw new Error('Missing body.payload from Slack (expected x-www-form-urlencoded payload)');\n}\n\nlet slack;\ntry {\n  slack = JSON.parse(payloadStr);\n} catch (e) {\n  throw new Error('Invalid JSON in body.payload');\n}\n\n// Extract lead_id from button value\nconst lead_id = String(slack?.actions?.[0]?.value || '').trim();\n\n// The user who clicked\nconst actor_slack_id = String(slack?.user?.id || '').trim();\n\n// response_url for direct message feedback (optional but recommended)\nconst response_url = String(slack?.response_url || '').trim();\n\n// Target stage to set (this button is for CONTACTED)\nconst stage = 'CONTACTED';\n\nif (!lead_id) throw new Error('lead_id required (expected slack.actions[0].value)');\nif (!actor_slack_id) throw new Error('actor_slack_id missing (expected slack.user.id)');\n\nconst now = new Date().toISOString();\n\nreturn [{\n  json: {\n    lead_id,\n    stage,\n    contacted_at: now,\n    contacted_by: actor_slack_id,\n    actor_slack_id,\n    response_url,     // ✅ needed for \"Not allowed\" feedback\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "42020b30-cae9-4e49-852f-ccc5c601742b",
+        "name": "STAGE) If authorized",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          1920,
+          1696
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "1ca8acf2-bd8b-4cfd-852e-f09d3e7260c7",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.authorized }}",
+                "rightValue": false
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "486062f2-bd86-4006-aeea-8ef2a6230101",
+        "name": "STAGE) Slack Feedback - Not allowed",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2144,
+          1792
+        ],
+        "parameters": {
+          "url": "={{ $json.response_url }}",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"replace_original\": false,\n  \"text\": \"⚠️ *Access denied.* This lead is currently handled by another sales representative.\\n\\nAssigned to: <@{{ $json.assigned_sales_slack_id }}>\\nClicked by: <@{{ $json.actor_slack_id }}>\\nLead ID: {{ $json.lead_id }}\"\n}\n",
+          "sendBody": true,
+          "specifyBody": "json"
+        },
+        "typeVersion": 4.3
+      },
+      {
+        "id": "08a8fef6-9693-4791-b899-308816a89666",
+        "name": "STAGE) Authorize click (must be assigned sales)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1696,
+          1696
+        ],
+        "parameters": {
+          "jsCode": "// =============================================\n// STAGE) Authorization + Idempotency Gate\n// - Only the assigned sales can mark CONTACTED\n// - Only allowed if current stage === 'NEW'\n// =============================================\n\nconst payload = $items('STAGE) Prep Payload')[0].json;\n\n// Lookup result: item from node \"STAGE) Lookup lead by lead_id\"\nconst leadRow = items?.[0]?.json;\n\nif (!leadRow) {\n  return [{\n    json: {\n      ...payload,\n      authorized_owner: false,\n      stage_allowed: false,\n      authorized: false,\n      reason: 'LEAD_NOT_FOUND',\n      assigned_sales_slack_id: '',\n      current_stage: '',\n      lead_name: '',\n      lead_phone: '',\n    }\n  }];\n}\n\nconst assigned = String(leadRow.sales_slack_id || '').trim();\nconst actor = String(payload.actor_slack_id || payload.contacted_by || '').trim();\nconst currentStage = String(leadRow.stage || '').trim().toUpperCase();\n\n// Gate #1: owner check\nconst authorizedOwner = assigned && actor && (assigned === actor);\n\n// Gate #2: stage check (idempotent)\nconst stageAllowed = (currentStage === 'NEW');\n\n// Final allow\nconst authorized = Boolean(authorizedOwner && stageAllowed);\n\n// Reason priority\nlet reason = '';\nif (!authorizedOwner) reason = 'NOT_ASSIGNED_OWNER';\nelse if (!stageAllowed) reason = 'ALREADY_NOT_NEW';\n\nreturn [{\n  json: {\n    ...payload,\n\n    // Flags for the IF node\n    authorized_owner: authorizedOwner,\n    stage_allowed: stageAllowed,\n    authorized,\n\n    reason,\n\n    assigned_sales_slack_id: assigned,\n    current_stage: currentStage,\n\n    // Include lead data for better feedback\n    lead_name: String(leadRow.name || '').trim(),\n    lead_phone: String(leadRow.phone || '').trim(),\n  }\n}];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f14e59b3-6f63-4e8d-8186-8874d463047f",
+        "name": "🚨 SLACK ESCALATION",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          3408,
+          1088
+        ],
+        "webhookId": "<REDACTED_SLACK_NODE_WEBHOOK_ID>",
+        "parameters": {
+          "text": "=",
+          "select": "channel",
+          "blocksUi": "={\n  \"blocks\": [\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"🚨 *LEAD ESCALATION – NO RESPONSE*\\n\\nThis lead has been *re-routed {{ $('IF route_count >= 10').item.json.route_count }} times* without being contacted.\\n\\n*Lead ID:* {{ $('IF route_count >= 10').item.json.lead_id }}\\n*Name:* {{ $('IF route_count >= 10').item.json.name }} \\n*Phone:* {{ $('IF route_count >= 10').item.json.phone }}\\n*Last Assigned Sales:* <@{{ $('IF route_count >= 10').item.json.sales_slack_id }}>\\n\\n⚠️ *Action required from manager.*\"\n      }\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"👤 Escalated to: <@{{ $('Set Manager id').item.json.manager_slack_id }}>\\n🕒 Escalated at: {{ new Date().toISOString() }}\"\n        }\n      ]\n    }\n  ]\n}",
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "<REDACTED_SLACK_CHANNEL_ID_2>"
+          },
+          "messageType": "block",
+          "otherOptions": {}
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "<REDACTED_SLACK_CRED_ID>",
+            "name": "Slack account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "5cbd553a-7bad-4bfc-8adc-98ce6485806c",
+        "name": "Set Manager id",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2576,
+          1088
+        ],
+        "parameters": {
+          "mode": "raw",
+          "options": {},
+          "jsonOutput": "{\n  \"manager_slack_id\": \"<REDACTED_MANAGER_SLACK_USER_ID>\"\n}\n",
+          "includeOtherFields": true
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "328f94e0-f496-46d4-ae9b-8396788c94d8",
+        "name": "IF route_count >= 10",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          2352,
+          1184
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "d05144bb-b1f2-48da-ae0d-2cfc067d0c15",
+                "operator": {
+                  "type": "number",
+                  "operation": "gte"
+                },
+                "leftValue": "={{ $json.route_count }}",
+                "rightValue": 10
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "78fdb48e-54b1-47fa-8e75-f65820872006",
+        "name": "ESC) Get escalation flag",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          2800,
+          1088
+        ],
+        "parameters": {
+          "options": {},
+          "filtersUI": {
+            "values": [
+              {
+                "lookupValue": "={{ 'escalated_' + $json.lead_id }}",
+                "lookupColumn": "key"
+              }
+            ]
+          },
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "routing_state_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "7a5107c4-1ebd-403a-b6d8-a1d0d793d664",
+        "name": "ESC) Set escalation flag",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          3648,
+          1088
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "key": "={{ 'escalated_' + $items('SLA) Re-route to next sales')[$itemIndex].json.lead_id }}",
+              "value": "={{ new Date().toISOString() }}"
+            },
+            "schema": [
+              {
+                "id": "key",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "required": false,
+                "displayName": "key",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "value",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "value",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [
+              "key"
+            ],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "appendOrUpdate",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": 0,
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "routing_state_sheet"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<REDACTED_GOOGLE_SHEET_DOCUMENT_ID>",
+            "cachedResultUrl": "<REDACTED_GOOGLE_SHEET_URL>",
+            "cachedResultName": "DEMO_SHEET"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "<REDACTED_GSHEETS_CRED_ID>",
+            "name": "Google Sheets account (<REDACTED>)"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "12854bb3-1ab6-42a2-ba90-4bb1ee83ddca",
+        "name": "ESC) Normalize flag result",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2992,
+          1088
+        ],
+        "parameters": {
+          "jsCode": "// Read the lead from the previous node in the escalation path (must have lead_id)\nconst lead = $json;\n\n// Lookup results from ESC) Get escalation flag\nconst rows = $items(\"ESC) Get escalation flag\").map(i => i.json);\n\n// Consider it found only if there is a non-empty key/value\nconst found = rows.some(r => r && String(r.key || \"\").trim() !== \"\");\n\nreturn [{\n  json: {\n    ...lead,\n    esc_key: `escalated_${lead.lead_id}`,\n    already_escalated: found,\n    esc_row: found ? rows.find(r => String(r.key || \"\").trim() !== \"\") : null\n  }\n}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "cfd92876-0c6f-4e3a-b4dd-26a6981427e9",
+        "name": "ESC) If not escalated yet",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          3200,
+          1088
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 3,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "5c1b6c7a-acdf-4ea7-bcf4-047bd3a201a7",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                },
+                "leftValue": "={{ $json.already_escalated === false }}",
+                "rightValue": ""
+              }
+            ]
+          },
+          "looseTypeValidation": true
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "d2c74230-2458-4143-b7ba-e8a73dc3f9b1",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          112,
+          512
+        ],
+        "parameters": {
+          "width": 752,
+          "height": 736,
+          "content": "## SLA-Based Lead Routing & Auto Reassignment Workflow\n\nThis workflow implements an SLA-based lead routing system designed to ensure fast response times and prevent lead neglect through automated reassignment and escalation.\n\nWhen a new lead is submitted, the workflow immediately assigns it to a sales representative using a round-robin distribution. This ensures fair workload allocation across the sales team and avoids manual lead picking.\n\nA 1-hour SLA threshold is applied after each assignment. If the lead remains in the “NEW” stage and has not been contacted within this timeframe, the system automatically re-routes the lead to the next available sales representative in a circular order.\n\nThe SLA duration can be adjusted easily by modifying the Schedule Trigger configuration.\n\nWhile this implementation uses Google Sheets as a lightweight operational datastore and Slack as the interaction layer, the same logic can be adapted to other databases or CRM platforms (such as Salesforce, HubSpot, or PostgreSQL).\n\nA scheduled process periodically scans the lead database and identifies leads that meet the following conditions:\n\na) Lead stage is NEW\nb) No contact activity has occurred within the SLA window\n\nQualified leads are automatically re-assigned, and Slack notifications are sent to the newly assigned sales representative with an interactive “Mark as CONTACTED” action.\n\nTo maintain operational safety:\n\na) Only the currently assigned sales representative is allowed to update the lead status\nb) Stage updates are idempotent, preventing duplicate or accidental re-processing\nc) Repeated SLA breaches trigger a one-time escalation to a manager, ensuring visibility without notification spam\n\nThis workflow helps improve response speed, enforces consistent follow-up behavior, and introduces operational discipline without requiring a full CRM system."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": true,
+    "pinData": {},
+    "settings": {
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "<REDACTED_WORKFLOW_VERSION_ID>",
+    "connections": {
+      "2) Prep Lead": {
+        "main": [
+          [
+            {
+              "node": "3) Get Sales List (active=ON)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Manager id": {
+        "main": [
+          [
+            {
+              "node": "ESC) Get escalation flag",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "4) Build Sales List": {
+        "main": [
+          [
+            {
+              "node": "5) Get routing_state (last_index)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) Get Sales List": {
+        "main": [
+          [
+            {
+              "node": "SLA) Build Sales List",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "STAGE) Prep Payload": {
+        "main": [
+          [
+            {
+              "node": "STAGE) Lookup lead by lead_id",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "IF route_count >= 10": {
+        "main": [
+          [
+            {
+              "node": "Set Manager id",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "SLA) Update lead (after reroute)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "STAGE) If authorized": {
+        "main": [
+          [
+            {
+              "node": "STAGE) Update lead stage to CONTACTED",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "STAGE) Slack Feedback - Not allowed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) Build Sales List": {
+        "main": [
+          [
+            {
+              "node": "SLA) Get Leads (stage=NEW)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "🚨 SLACK ESCALATION": {
+        "main": [
+          [
+            {
+              "node": "ESC) Set escalation flag",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "7) Update routing_state": {
+        "main": [
+          []
+        ]
+      },
+      "ESC) Get escalation flag": {
+        "main": [
+          [
+            {
+              "node": "ESC) Normalize flag result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ESC) If not escalated yet": {
+        "main": [
+          [
+            {
+              "node": "🚨 SLACK ESCALATION",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      },
+      "1) Form Trigger (New Lead)": {
+        "main": [
+          [
+            {
+              "node": "2) Prep Lead",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "ESC) Normalize flag result": {
+        "main": [
+          [
+            {
+              "node": "ESC) If not escalated yet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA Trigger (every 1 hour)": {
+        "main": [
+          [
+            {
+              "node": "SLA) Get Sales List",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) Get Leads (stage=NEW)": {
+        "main": [
+          [
+            {
+              "node": "SLA) If last route >= 1 hour",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) Re-route to next sales": {
+        "main": [
+          [
+            {
+              "node": "IF route_count >= 10",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "8) Upsert Lead (leads sheet)": {
+        "main": [
+          [
+            {
+              "node": "9) Slack Notify (New Lead) & Button",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) If last route >= 1 hour": {
+        "main": [
+          [
+            {
+              "node": "SLA) Re-route to next sales",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          []
+        ]
+      },
+      "3) Get Sales List (active=ON)": {
+        "main": [
+          [
+            {
+              "node": "4) Build Sales List",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "STAGE) Lookup lead by lead_id": {
+        "main": [
+          [
+            {
+              "node": "STAGE) Authorize click (must be assigned sales)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "6) Initial Assign (Round Robin)": {
+        "main": [
+          [
+            {
+              "node": "7) Update routing_state",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "8) Upsert Lead (leads sheet)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) Update lead (after reroute)": {
+        "main": [
+          [
+            {
+              "node": "SLA) Slack Notify (reroute) & Button",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "5) Get routing_state (last_index)": {
+        "main": [
+          [
+            {
+              "node": "6) Initial Assign (Round Robin)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "STAGE) Webhook (/demo-stage-update)": {
+        "main": [
+          [
+            {
+              "node": "STAGE) Prep Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "SLA) Slack Notify (reroute) & Button": {
+        "main": [
+          []
+        ]
+      },
+      "STAGE) Update lead stage to CONTACTED": {
+        "main": [
+          []
+        ]
+      },
+      "STAGE) Authorize click (must be assigned sales)": {
+        "main": [
+          [
+            {
+              "node": "STAGE) If authorized",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 35,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 4
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 8
+      },
+      "n8n-nodes-base.slack": {
+        "count": 3
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 4
+      },
+      "n8n-nodes-base.formTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 1
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 11
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Muh Resky Adiansyah",
+    "username": "adiardian",
+    "bio": "",
+    "verified": false,
+    "links": [
+      "https://github.com/muhreskyadi"
+    ],
+    "avatar": "https://gravatar.com/avatar/7d35fbff6b35655f66a6ba80ad5fc659d4b26fc94cfa09f9be5c9adef2e66d61?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1225,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.formTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "table",
+            "submit",
+            "post"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.formtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "On form submission"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form Trigger",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 38,
+      "name": "Lead Nurturing"
+    }
+  ],
+  "image": []
+}

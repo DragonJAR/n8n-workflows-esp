@@ -1,0 +1,1878 @@
+{
+  "id": 8724,
+  "name": "Automated daily stock market report with Bright Data, GPT-4.1, Airtable/Gmail",
+  "views": 1875,
+  "recentViews": 1,
+  "totalViews": 1875,
+  "createdAt": "2025-09-18T14:02:05.882Z",
+  "description": "# 📘 Workflow Documentation – Stock Market Daily Digest\n\n![automatisationrapportboursierquotidienbaptistefort.png](fileId:2661)\n\n## 👋 Introduction\nWake up to a clean, analyst-style stock digest in your inbox—top gainers/losers, a readable performance table, 3–5 insights, and upcoming events—**no spreadsheets, no manual scraping, no copy-paste**.  \nThis article explains, step by step, how to build a robust, daily, end-to-end automation that collects market data (Bright Data), waits until scraping is done, aggregates results, asks an AI model (OpenAI) to draft a **styled HTML email**, logs everything to Airtable, and finally sends the report via Gmail.\n\nYou’ll find a friendly but technical tour of **every single node**, so you can rebuild or adapt the same pipeline with confidence.\n\n---\n\n## 🎯 Who is this workflow for?\n- **Investors & traders** who want a quick, readable daily summary.  \n- **Finance/Product teams** building data-driven alerts/digests.  \n- **Consultants & agencies** sending recurring client updates.  \n- **Automation builders** prototyping finance ops quickly.\n\n---\n\n## 🧰 Tools you’ll need\n- **Bright Data** — dataset triggers & snapshots for reliable web data.  \n- ** OpenAI (GPT)** — to generate a professional HTML digest.  \n- **Airtable** — store daily rows for history, filters, dashboards.  \n\n### Example Airtable Table: `Daily Stocks`\n\n| Ticker | Company                  | Price   | Change % | Sentiment | Date                |\n|--------|--------------------------|---------|----------|-----------|---------------------|\n| AAPL   | Apple Inc.               | 225.80  | +1.4%    | 🟢 Positive | 2025-09-18 09:00    |\n| MSFT   | Microsoft Corporation    | 415.20  | -0.7%    | 🔴 Negative | 2025-09-18 09:00    |\n| NVDA   | NVIDIA Corporation       | 124.55  | +2.1%    | 🟢 Positive | 2025-09-18 09:00    |\n| TSLA   | Tesla Inc.               | 260.00  | -3.0%    | 🔴 Negative | 2025-09-18 09:00    |\n| META   | Meta Platforms Inc.      | 310.45  | +0.5%    | 🟡 Neutral  | 2025-09-18 09:00    |\n\n\n\n- **Gmail** — deliver the final HTML email to stakeholders.  \n- **n8n** — the automation engine that orchestrates every step.\n\n&gt; Keep API keys in n8n **Credentials** (never hard-code secrets).\n\n---\n\n## 🗺️ Architecture at a glance\n1. **Schedule** fires daily  \n2. **Seed list** of tickers  \n3. **Split** into one item per stock  \n4. **Prepare keyword** for scraping  \n5. **Launch Bright Data** job  \n6. **Poll progress** with a **wait-loop**  \n7. **Fetch snapshot data**  \n8. **Aggregate** for the AI  \n9. **Generate HTML summary** (GPT)  \n10. **Save rows to Airtable**  \n11. **Send email via Gmail**\n\n---\n\n# ⚙️ Step-by-step — Every node explained\n\n## ⏰ Daily Run Trigger (Schedule Trigger)\n\n\n![baptistefortautomatisationscrapingboursierbrightdata.png](fileId:2658)\n\n### Purpose\nStart the automation at a precise time each day so nobody needs to push a button.\n\n### Parameters (English)\n- **Trigger Type**: `Time Interval` or `Cron`  \n- **Every X**: `1 Day` (or your preferred cadence)  \n- **Timezone**: `UTC` (or your own)  \n- **Start Time**: optional (e.g., `09:00`)\n\n---\n\n## 📝 Set Stock List (Set Node – SAMPLE DATA)\n\n### Purpose\nDefine the universe of stocks to monitor. This acts as the **seed data** for scraping.\n\n### Parameters\n- **Values to Set**: `Fixed JSON (array of objects)`  \n- **Keep Only Set**: `true`  \n- **Fields per item**: `ticker`, `name`, `market_cap` (you may add `sector`, `isin`, etc.)\n\n---\n\n## 🔀 Split Stocks (Split Out)\n\n### Purpose\nTurn the array into **individual items** so each ticker is processed independently (scraping, polling, results).\n\n### Parameters\n- **Operation**: `Split Out Items`  \n- **Field to Split**: the array defined in the previous Set node\n\n---\n\n## 🏷 Prepare Stock Keyword (Set Node)\n\n### Purpose\nCreate a `keyword` field (typically equal to `ticker`) for Bright Data discovery.\n\n### Parameters\n- **Values to Set**: `Add Field`  \n- **Field Name**: `keyword`  \n- **Value**: use an expression referencing the current item’s ticker (e.g., `` {{ $json.ticker }} ``)\n\n---\n\n## 🕸 Bright Data Scraper (HTTP Request)\n\n### Purpose\nTrigger the Bright Data dataset to start collecting information for the `keyword`. Returns a `snapshot_id` to poll later.\n\n### Parameters\n- **Method**: `POST`  \n- **Endpoint**: `https://api.brightdata.com/datasets/v1/trigger`  \n- **Authentication**: `Authorization: Bearer &lt;token&gt;` (header)  \n- **Body Fields**:  \n  - `dataset_id`: your Bright Data dataset ID  \n  - `discover_by`: usually `keyword`  \n  - `keyword`: the value prepared above\n\n&gt; Add a retry/backoff policy on 429/5xx in node options.\n\n---\n\n## 🔄 Check Scraper Progress (HTTP Request)\n\n![baptistefortautomatisationdigestboursier.png](fileId:2660)\n\n### Purpose\nPoll Bright Data to see whether the snapshot is `running` or `ready`.\n\n### Parameters\n- **Method**: `GET`  \n- **Endpoint**: `https://api.brightdata.com/datasets/v1/snapshots/{snapshot_id}`  \n- **Authentication**: `Authorization: Bearer &lt;token&gt;`  \n- **Expected Output**: a `status` field (`running`, `ready`)\n\n---\n\n## ⏳ Wait for Data (Wait Node)\n\n### Purpose\nPause between progress checks to avoid rate limits and give Bright Data time to finish.\n\n### Parameters\n- **Mode**: `Wait a fixed amount of time`  \n- **Time**: e.g., `30 seconds` (tune to your dataset size)\n\n---\n\n## 🔀 Scraper Status Switch (Switch Node)\n\n### Purpose\nRoute logic based on the polled `status`.\n\n### Parameters\n- **Value to Check**: `status`  \n- **Rules**:  \n  - Equals `running` → go to **Wait for Data** (then re-check)  \n  - Equals `ready` → proceed to **Fetch Scraper Results**\n\n&gt; Loop pattern: **Check → Wait → Check**, until `ready`.\n\n---\n\n## 📥 Fetch Scraper Results (HTTP Request)\n\n### Purpose\nDownload the completed snapshot data once Bright Data marks it `ready`.\n\n### Parameters\n- **Method**: `GET`  \n- **Endpoint**: `https://api.brightdata.com/datasets/v1/snapshots/{snapshot_id}/data`  \n- **Authentication**: `Authorization: Bearer &lt;token&gt;`  \n- **Query**: `format=json`  \n- **Output**: array of rows per ticker (price, change %, any fields your dataset yields)\n\n&gt; Normalize fields with a **Set/Code** node if needed.\n\n---\n\n## 📊 Aggregate Stock Data (Aggregate Node)\n\n### Purpose\nCombine all individual items into **one consolidated object** so the AI can analyze the entire market snapshot.\n\n### Parameters\n- **Mode**: `Aggregate` (merge to a single item)  \n- **Fields to Include**: `ticker`, `name`, `price`, `change`, `sentiment` (plus any extra fields captured)  \n- **Output**: one JSON item containing an array/map of the day’s stocks\n\n---\n\n## 🤖 Generate Daily Summary (AI Node – OpenAI)\n\n### Purpose\nAsk the model to convert raw data into a **styled HTML email**: headline, top movers, table, insights, and (optional) upcoming events.\n\n### Parameters\n- **Model**: gpt-4.1 \n- **Input**: the aggregated JSON from the previous node  \n- **Prompt guidelines**:  \n  - Output **HTML only** with inline styles (email-safe)  \n  - Include a **table** (Ticker, Company, % Change with ↑/↓ & color, Market Cap, Sentiment icon)  \n  - Highlight **top 2 gainers & 2 losers** with short reasoning if present  \n  - Provide **3–5 insights** (sector rotation, volatility, outliers)  \n  - Add **upcoming events** when available (earnings, launches, macro)  \n  - Footer: “Generated automatically by your AI-powered stock monitor”  \n- **Output field**: confirm the exact property that contains the HTML (e.g., `output`, `message`, `text`)\n\n---\n\n## 🗂 Save to Airtable (Airtable – Create Record)\n\n### Purpose\nLog each item (or the roll-up) to Airtable for history, filtering, and dashboards.\n\n### Parameters\n- **Operation**: `Create Record`  \n- **Base ID**: from your Airtable URL  \n- **Table**: e.g., `Daily Stocks`  \n- **Field Mapping**:  \n  - `Ticker` ← `` {{ $json.ticker }} ``  \n  - `Company` ← `` {{ $json.name }} ``  \n  - `Price` ← `` {{ $json.price }} ``  \n  - `Change %` ← `` {{ $json.change }} ``  \n  - `Sentiment` ← `` {{ $json.sentiment }} ``  \n  - `Date` ← `` {{ $now.toISO() }} ``\n\n&gt; Use a Single-Select for `Sentiment` (🟢 / 🟡 / 🔴) to build clean Airtable views.\n\n---\n\n## 📧 Send Report via Gmail (Gmail Node)\n\n![automatisationenvoiemailrapportboursierbaptistefort.png](fileId:2659)\n\n### Purpose\nDeliver the AI-generated HTML digest to your recipients.\n\n### Parameters\n- **Operation**: `Send Email`  \n- **Send To**: one or more recipients (e.g., `investor@domain.com`)  \n- **Subject**: `Daily Stock Market Digest – {{ $now.format(\"yyyy-MM-dd\") }}`  \n- **Message (HTML)**: reference the AI node’s HTML property (e.g., `` {{ $('Generate Daily Summary').first().json.output }} ``)  \n- **Options**: set **Append Attribution** to `false` (keep the email clean)\n\n&gt; Test in Gmail, Outlook, and mobile to validate inline CSS.\n\n---\n\n# 🧪 Error handling & reliability tips\n- **Backoff on Bright Data** — If scraping many tickers, increase **Wait** or batch requests.  \n- **Guard against empty results** — If a snapshot returns 0 rows, branch to a fallback email (“No data today”).  \n- **AI guardrails** — Enforce “HTML-only” and skip missing sections gracefully.  \n- **Airtable normalization** — Strip `%`, cast numbers to float before insert.  \n- **Observability** — Add a final Slack/Email **On Fail** node with run ID and error message.\n\n---\n\n# 🧩 Customization ideas\n- **Sector deep-dives**: add sector fields and a second AI paragraph on sector rotation.  \n- **CSV attachment**: generate & attach a CSV for power users.  \n- **Multiple lists**: run parallel branches for Tech, Healthcare, or regions.  \n- **Other asset classes**: Crypto, ETFs, Indices, FX.  \n- **Audience targeting**: different “To” lists and slightly different prompts per audience.\n\n---\n\n# ✅ Why this workflow is powerful\n- **Hands-off** — the report simply shows up every day.  \n- **Analyst-grade** — clean HTML, top movers, tidy table, actionable insights.  \n- **Auditable** — rows archived in Airtable for history and dashboards.  \n- **Composable** — swap scrapers, LLMs, storage, or email service.  \n- **Scalable** — start with 10 tickers, grow to many lists using the same loop.\n\nFor advanced no-code & AI projects, see [0vni – Agence automatisation](https://www.0vni.fr/). ",
+  "workflow": {
+    "id": "dnw1cvGPaYS9dCog",
+    "meta": {
+      "instanceId": "18b0d04ad5030054be4ab49562e84ea4a079ab4cb036003697394140227c7e76",
+      "templateId": "5305",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Automated Daily Stock Market Report with Bright Data, GPT, Airtable, and Gmail",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "0a0def72-9c6f-43fb-8db5-268da98f82dd",
+        "name": "Simple Memory",
+        "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+        "position": [
+          3904,
+          656
+        ],
+        "parameters": {},
+        "typeVersion": 1.3
+      },
+      {
+        "id": "e13cbed2-0837-4b4b-82b4-49c61510dff5",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          3760,
+          656
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "cf744498-62bf-4e6a-8570-dda7fea35fe5",
+        "name": "Daily Run Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          208,
+          576
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {}
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "d0ee4823-0536-415e-8fa9-861c1701665d",
+        "name": "Set Stock List",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          528,
+          576
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "8d1bd0c8-37bf-4028-a20c-ac214ec06d7b",
+                "name": "json",
+                "type": "array",
+                "value": "=[\n  {\n    \"ticker\": \"SHEL\",\n    \"name\": \"Shell plc\",\n    \"market_cap\": \"≈ $250B\"\n  },\n  {\n    \"ticker\": \"NESN.SW\",\n    \"name\": \"Nestlé S.A.\",\n    \"market_cap\": \"≈ $320B\"\n  },\n  {\n    \"ticker\": \"SAP\",\n    \"name\": \"SAP SE\",\n    \"market_cap\": \"≈ $210B\"\n  },\n  {\n    \"ticker\": \"ASML\",\n    \"name\": \"ASML Holding N.V.\",\n    \"market_cap\": \"≈ $470B\"\n  },\n  {\n    \"ticker\": \"SONY\",\n    \"name\": \"Sony Group Corporation\",\n    \"market_cap\": \"≈ $110B\"\n  },\n  {\n    \"ticker\": \"TCEHY\",\n    \"name\": \"Tencent Holdings Ltd.\",\n    \"market_cap\": \"≈ $420B\"\n  },\n  {\n    \"ticker\": \"BABA\",\n    \"name\": \"Alibaba Group Holding Ltd.\",\n    \"market_cap\": \"≈ $190B\"\n  },\n  {\n    \"ticker\": \"7203.T\",\n    \"name\": \"Toyota Motor Corporation\",\n    \"market_cap\": \"≈ $270B\"\n  },\n  {\n    \"ticker\": \"RHHBY\",\n    \"name\": \"Roche Holding AG\",\n    \"market_cap\": \"≈ $210B\"\n  },\n  {\n    \"ticker\": \"NFLX\",\n    \"name\": \"Netflix Inc.\",\n    \"market_cap\": \"≈ $260B\"\n  }\n]\n"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "88b7e912-af0c-4527-baa3-4f8cf0b072d1",
+        "name": "Split Stocks",
+        "type": "n8n-nodes-base.splitOut",
+        "position": [
+          816,
+          576
+        ],
+        "parameters": {
+          "options": {},
+          "fieldToSplitOut": "json"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2aab292f-0287-4da6-86ee-83c5a9aee30a",
+        "name": "Prepare Stock Keyword",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          1104,
+          576
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "8d9e80d9-16dd-4658-928f-d94735209bfd",
+                "name": "keyword",
+                "type": "string",
+                "value": "={{ $json.ticker }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "13f81727-f586-4fb6-be73-4880c9efd165",
+        "name": "Bright Data Scraper",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1456,
+          576
+        ],
+        "parameters": {
+          "url": "https://api.brightdata.com/datasets/v3/trigger",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={{ $('Prepare Stock Keyword').all().map(item => item.json)}}",
+          "sendBody": true,
+          "sendQuery": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "dataset_id",
+                "value": "gd_lmrpz3vxmz972ghd7"
+              },
+              {
+                "name": "include_errors",
+                "value": "true"
+              },
+              {
+                "name": "type",
+                "value": "discover_new"
+              },
+              {
+                "name": "discover_by",
+                "value": "keyword"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer YOUR_TOKEN_HERE"
+              }
+            ]
+          }
+        },
+        "executeOnce": true,
+        "typeVersion": 4.2
+      },
+      {
+        "id": "2cc8d35f-f255-4adc-b1d7-7f9ab34dde66",
+        "name": "Check Scraper Progress",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          1936,
+          576
+        ],
+        "parameters": {
+          "url": "=https://api.brightdata.com/datasets/v3/progress/{{ $json.snapshot_id }}",
+          "options": {},
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "eb6ab86c-3e8b-4dc6-8d70-3346531905fa",
+        "name": "Scraper Status Switch",
+        "type": "n8n-nodes-base.switch",
+        "position": [
+          2368,
+          576
+        ],
+        "parameters": {
+          "rules": {
+            "values": [
+              {
+                "outputKey": "ready",
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "4712e222-2bad-4d91-be87-ab0e0693c0c6",
+                      "operator": {
+                        "name": "filter.operator.equals",
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.status }}",
+                      "rightValue": "ready"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              },
+              {
+                "outputKey": "running",
+                "conditions": {
+                  "options": {
+                    "version": 2,
+                    "leftValue": "",
+                    "caseSensitive": true,
+                    "typeValidation": "strict"
+                  },
+                  "combinator": "and",
+                  "conditions": [
+                    {
+                      "id": "9a473960-6ba5-4f1b-afc6-396348bd338d",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      },
+                      "leftValue": "={{ $json.status }}",
+                      "rightValue": "=running"
+                    }
+                  ]
+                },
+                "renameOutput": true
+              }
+            ]
+          },
+          "options": {}
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "e27afbc7-8cae-44b6-b506-474bb2692f08",
+        "name": "Wait for Data",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          2480,
+          1088
+        ],
+        "webhookId": "cf27222d-20db-4ba5-bd4c-e6ca05efd4d7",
+        "parameters": {
+          "amount": 20
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "5e828381-8268-4114-b16c-a60c4ca23e80",
+        "name": "Fetch Scraper Results",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          2848,
+          560
+        ],
+        "parameters": {
+          "url": "=https://api.brightdata.com/datasets/v3/snapshot/{{ $json.snapshot_id }}",
+          "options": {},
+          "sendQuery": true,
+          "sendHeaders": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "format",
+                "value": "json"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "4c2826ee-30bb-4438-a531-c370edbe2103",
+        "name": "Aggregate Stock Data",
+        "type": "n8n-nodes-base.aggregate",
+        "position": [
+          3312,
+          560
+        ],
+        "parameters": {
+          "options": {},
+          "aggregate": "aggregateAllItemData"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ef5165a4-0452-4b20-b2fa-994429f3bc5b",
+        "name": "Generate Daily Summary (AI)",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          3792,
+          416
+        ],
+        "parameters": {
+          "text": "=## 🎯 ROLE\nYou are an **AI-powered financial analyst agent** integrated inside an n8n workflow.  \nYour responsibilities are to:  \n- Parse incoming JSON datasets of U.S. equities (typically top 10 by market cap).  \n- Detect **market trends, anomalies, and investor-relevant signals** from the data.  \n- Convert raw JSON into a **professionally written HTML email digest**, with clear structure, styling, and actionable insights.  \n- Act as if you were a **senior analyst writing for institutional investors**, keeping the tone sharp, concise, and technical.  \n- Output only **clean HTML content** ready for use inside an email body (no markdown, no plaintext, no metadata).  \n\n---\n\n## 📥 INPUT FORMAT (JSON)\n\nYou will receive daily input structured like this:\n\n```\nThe day and date today is {{ $now.format('cccc yyyy-MM-dd t') }}\n\nHere is today’s stock market data: =\n\n{{ $json.data.toJsonString() }}\n```\n\nWhere each stock object may contain:  \n- `ticker` → Stock symbol (e.g., AAPL, NVDA)  \n- `name` → Company name (e.g., Apple Inc.)  \n- `market_cap` → Market capitalization  \n- `price` → Current price or last close price  \n- `change` → Daily percentage change (can be positive or negative)  \n- `sentiment` → Qualitative sentiment (optional: 🟢 Positive, 🟡 Neutral, 🔴 Negative)  \n- `news` → Associated news snippets (optional)  \n\n---\n\n## ✅ TASKS\n\n1. **Market Context**  \n   - Start with a headline summary of the day (general trend: bullish, bearish, or mixed).  \n   - Mention notable **macro events** or **sector-specific highlights** if derivable from input.  \n\n2. **Top Movers**  \n   - Identify and highlight the **2 biggest gainers** and **2 biggest losers**.  \n   - Give context if available (based on percentage change or attached news).  \n\n3. **Stock Data Table**  \n   - Generate a professional `<table>` with the following columns:  \n     - Ticker  \n     - Company Name  \n     - Daily % Change (with ↑/↓ and colored formatting)  \n     - Market Cap  \n     - Sentiment Icon (🟢 🟡 🔴)  \n\n4. **Insights Section**  \n   - Provide **3–5 key takeaways**:  \n     - Example: “Tech continues outperforming with NVDA +X% and AAPL +Y%”  \n     - Highlight any **sector rotation, unusual volatility, or outlier performance**.  \n     - Mention if the **trend diverges** from broader market sentiment.  \n\n5. **Upcoming Catalysts**  \n   - If `news` mentions future events (earnings calls, product launches, Fed meetings), list them in a dedicated section.  \n   - If no events are available, skip gracefully.  \n\n6. **Professional Formatting**  \n   - Use inline CSS to ensure email compatibility.  \n   - Use clear hierarchy:  \n     - `<h2>` for main title (“Daily U.S. Stock Market Digest – {Date}”)  \n     - `<h3>` for sub-sections (e.g., “Top Gainers & Losers”, “Market Insights”, “Upcoming Events”)  \n     - `<ul>` for bullet point insights  \n     - `<table>` for stock performance data  \n   - Add color indicators for sentiment:  \n     - 🟢 Positive = green text  \n     - 🟡 Neutral = gold text  \n     - 🔴 Negative = red text  \n\n---\n\n## ✨ OUTPUT FORMAT (HTML Only)\n\n- Produce **only** HTML, no markdown.  \n- Must be **email-client safe**:  \n  - Inline styles only (no external CSS).  \n  - Avoid JavaScript or advanced CSS.  \n- Structure example:  \n\n```html\n<h2>Daily U.S. Stock Market Digest – Thursday 2025-09-18</h2>\n\n<h3>📈 Top Gainers & Losers</h3>\n<ul>\n  <li>NVDA +4.2% 🟢 — driven by strong chip demand</li>\n  <li>TSLA -3.1% 🔴 — impacted by regulatory concerns</li>\n</ul>\n\n<h3>📊 Market Overview</h3>\n<table style=\"border-collapse:collapse;width:100%;\">\n  <tr style=\"background:#f2f2f2;\">\n    <th>Ticker</th><th>Company</th><th>Change %</th><th>Market Cap</th><th>Sentiment</th>\n  </tr>\n  <tr>\n    <td>NVDA</td><td>NVIDIA Corporation</td><td style=\"color:green;\">+4.2%</td><td>$3.6T</td><td>🟢</td>\n  </tr>\n  <tr>\n    <td>TSLA</td><td>Tesla Inc.</td><td style=\"color:red;\">-3.1%</td><td>$830B</td><td>🔴</td>\n  </tr>\n</table>\n\n<h3>💡 Key Insights</h3>\n<ul>\n  <li>Tech leads with NVDA and MSFT posting strong gains.</li>\n  <li>Healthcare sector showed weakness with JNJ down 2%.</li>\n  <li>Overall sentiment remained mixed ahead of Fed decision.</li>\n</ul>\n\n<h3>📅 Upcoming Events</h3>\n<ul>\n  <li>Fed interest rate decision — Sept 20</li>\n  <li>Apple iPhone launch event — Sept 21</li>\n</ul>\n\n<footer style=\"margin-top:20px;font-size:12px;color:#888;\">\n  Generated automatically by your AI-powered stock monitor.\n</footer>\n```\n\n---\n\n## ⚠️ CONSTRAINTS\n\n- Do **not** include email subject or headers.  \n- Do **not** output explanations, reasoning, or markdown.  \n- Always output **clean HTML only**.  \n- Ensure the HTML is **ready-to-send** in an email body without manual edits.  \n- If data is missing, skip the section gracefully without placeholders.  \n\n---\n\n## 📬 GOAL\n\nDeliver a **polished, mobile-friendly, and insight-rich stock market digest email**.  \nFinal output must require zero manual edits, look professional for finance users, and be directly usable in n8n’s Gmail/SMTP nodes.  \n",
+          "options": {},
+          "promptType": "define"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "3f953ffd-4faa-4cd5-bd3a-b3a6d021eebf",
+        "name": "Send Report via Gmail",
+        "type": "n8n-nodes-base.gmailTool",
+        "position": [
+          4064,
+          624
+        ],
+        "webhookId": "fe4a416a-43f3-4ad1-80c8-51f1de4c2343",
+        "parameters": {
+          "sendTo": "user@example.com",
+          "message": "={{ $('Generate Daily Summary (AI)').first().json.output }}",
+          "options": {
+            "appendAttribution": false
+          },
+          "subject": "=Daily Stock Market Digest "
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "ae4e0ac6-1afb-463a-a273-7dac2dc975e3",
+        "name": "Save to Airtable (Daily Stocks)",
+        "type": "n8n-nodes-base.airtable",
+        "position": [
+          2944,
+          -288
+        ],
+        "parameters": {
+          "base": {
+            "__rl": true,
+            "mode": "list",
+            "value": "appqPdjbR45flhdgT",
+            "cachedResultUrl": "https://airtable.com/appqPdjbR45flhdgT",
+            "cachedResultName": "Untitled Base"
+          },
+          "table": {
+            "__rl": true,
+            "mode": "list",
+            "value": "tblvIkbZriGaCrfzP",
+            "cachedResultUrl": "https://airtable.com/appqPdjbR45flhdgT/tblvIkbZriGaCrfzP",
+            "cachedResultName": "Daily Stocks"
+          },
+          "columns": {
+            "value": {
+              "Price": "={{ $json.price }}",
+              "Ticker": "={{ $json.ticker }}",
+              "Company": "={{ $json.name }}",
+              "Change %": "={{ $json.change }}",
+              "Sentiment": "={{ $json.sentiment }}",
+              "Market Cap": "={{ $json.market_cap }}"
+            },
+            "schema": [
+              {
+                "id": "Ticker",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Ticker",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Company",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Company",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Market Cap",
+                "type": "string",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Market Cap",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Price",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Price",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Change %",
+                "type": "number",
+                "display": true,
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Change %",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Sentiment",
+                "type": "options",
+                "display": true,
+                "options": [
+                  {
+                    "name": "🟢 Positive",
+                    "value": "🟢 Positive"
+                  },
+                  {
+                    "name": "🟡 Neutral",
+                    "value": "🟡 Neutral"
+                  },
+                  {
+                    "name": "🔴 Negative",
+                    "value": "🔴 Negative"
+                  }
+                ],
+                "removed": false,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Sentiment",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Date",
+                "type": "dateTime",
+                "display": true,
+                "removed": true,
+                "readOnly": false,
+                "required": false,
+                "displayName": "Date",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "create"
+        },
+        "credentials": {
+          "airtableTokenApi": {
+            "id": "credential-id",
+            "name": "airtableTokenApi Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "ae35f4c3-6d12-440e-9cf5-c465a7c7d3ee",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          144,
+          160
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 288,
+          "height": 592,
+          "content": "## ⏰ Daily Run Trigger (Schedule Trigger)\n\n### Purpose\nStarts the workflow automatically at fixed intervals.  \nThis ensures the stock digest runs daily without manual input.\n\n### Parameters\n- **Trigger Type**: `Time Interval` or `Cron`\n- **Every X**: `1 Day` (or custom interval)\n- **Timezone**: `UTC` or your local timezone\n- **Start Time**: optional (e.g., `09:00`)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "faa08484-c83e-49dd-bc8a-c29a0c9a95ce",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          432,
+          96
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 288,
+          "height": 656,
+          "content": "## 📝 Set Stock List (Set Node – SAMPLE DATA)\n\n### Purpose\nDefines the list of stocks to track.  \nThis acts as the **seed data** for the scraping step.\n\n### Parameters\n- **Values to Set**: `Fixed JSON`\n- **Keep Only Set**: `true`\n- **JSON Example**:\n  ```json\n  [\n    { \"ticker\": \"AAPL\", \"name\": \"Apple Inc.\", \"market_cap\": \"≈ $3.0T\" },\n    { \"ticker\": \"MSFT\", \"name\": \"Microsoft Corporation\", \"market_cap\": \"≈ $3.6T\" }\n  ]"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "57ff48b7-fb7a-4c8e-b122-ff8878a46a97",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          720,
+          208
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 288,
+          "height": 544,
+          "content": "## 🔀 Split Stocks (Split Out)\n\n### Purpose\nTakes the stock list (array) and splits it into **individual items**,  \nso each stock can be processed separately in the workflow.\n\n### Parameters\n- **Operation**: `Split Out Items`\n- **Field to Split**: `stocks[]` (array field from Set node)\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "04a19b0a-1d0f-4fc3-9b5a-a1dbe39daf8e",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1008,
+          160
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 288,
+          "height": 592,
+          "content": "## 🏷 Prepare Stock Keyword (Set Node)\n\n### Purpose\nAdds a `keyword` field for each stock item.  \nThis keyword is used by Bright Data’s scraper to identify which stock to fetch.\n\n### Parameters\n- **Values to Set**: `Add Field`\n- **Field Name**: `keyword`\n- **Value**: `{{ $json[\"ticker\"] }}`"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a24344d1-ef9c-4333-83b8-b8e1055667ed",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1296,
+          160
+        ],
+        "parameters": {
+          "color": 2,
+          "width": 480,
+          "height": 592,
+          "content": "## 🕸 Bright Data Scraper (HTTP Request)\n\n### Purpose\nSends a request to **Bright Data API** to launch a stock scraping job.  \nIt returns a `snapshot_id` used later to fetch results.\n\n### Parameters\n- **Method**: `POST`\n- **Endpoint**: `https://api.brightdata.com/datasets/v1/trigger`\n- **Authentication**: `API Token`  \n  (Header: `Authorization: Bearer <token>`)\n- **Body Fields**:\n  - `dataset_id`: Bright Data dataset ID\n  - `discover_by`: `keyword`\n  - `keyword`: stock ticker\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "608e6709-2b53-4b85-8a6f-04339d4f7029",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1776,
+          160
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 432,
+          "height": 592,
+          "content": "## 🔄 Check Scraper Progress (HTTP Request)\n\n### Purpose\nChecks if the Bright Data scraping job is finished or still running.  \nLoops until results are ready.\n\n### Parameters\n- **Method**: `GET`\n- **Endpoint**: `https://api.brightdata.com/datasets/v1/snapshots/{snapshot_id}`\n- **Authentication**: `API Token`\n- **Query Params**:\n  - `snapshot_id`: returned from Bright Data Scraper\n  - `status`: current job status (`running`, `ready`)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8e82b0a8-1682-4b7f-b12d-a5569ac1e70a",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2208,
+          752
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 432,
+          "height": 512,
+          "content": "## ⏳ Wait for Data (Wait Node)\n\n### Purpose\nPauses the workflow for a fixed time before checking the scraper progress again.  \nThis prevents API rate limits and ensures Bright Data has time to finish the job.\n\n### Parameters\n- **Mode**: `Wait a fixed amount of time`\n- **Time**: e.g., `30 seconds`"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6350cebc-4794-49df-a637-a982ab96a7fe",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2208,
+          160
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 432,
+          "height": 592,
+          "content": "## 🔀 Scraper Status Switch (Switch Node)\n\n### Purpose\nRoutes the workflow based on the scraper job status.  \nIf the status is `running`, it loops back to **Wait for Data**.  \nIf the status is `ready`, it continues to fetch the snapshot.\n\n### Parameters\n- **Value to Check**: `status`\n- **Rules**:\n  - Equals `running` → go to Wait\n  - Equals `ready` → go to Fetch Scraper Results\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "93becc4b-e2ea-42e8-8eca-9e9e0f79d0c8",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2640,
+          160
+        ],
+        "parameters": {
+          "width": 512,
+          "height": 608,
+          "content": "## 📥 Fetch Scraper Results (HTTP Request)\n\n### Purpose\nRetrieves the completed stock market data from Bright Data once the job is finished.  \nThe results are returned as JSON and include price, change %, sentiment, and more.\n\n### Parameters\n- **Method**: `GET`\n- **Endpoint**: `https://api.brightdata.com/datasets/v1/snapshots/{snapshot_id}/data`\n- **Authentication**: `API Token`\n- **Query Params**:\n  - `snapshot_id`: ID from Bright Data Scraper\n  - `format`: `json`"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "867cf6ea-2a5f-45fa-98a7-68d194df1dfc",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3152,
+          112
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 512,
+          "height": 656,
+          "content": "## 📊 Aggregate Stock Data (Aggregate Node)\n\n### Purpose\nMerges the stock data from multiple items (each ticker) into one consolidated dataset.  \nThis is used as input for the AI to generate a summary.\n\n### Parameters\n- **Mode**: `Aggregate`\n- **Fields to Include**:  \n  - `ticker`  \n  - `name`  \n  - `price`  \n  - `change`  \n  - `sentiment`  \n- **Output**: Single JSON object with all stock records\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8e741c22-987f-4f7a-9e2b-d1d2158ec074",
+        "name": "Sticky Note10",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3664,
+          -240
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 880,
+          "height": 1008,
+          "content": "## 🤖 Generate Daily Summary (AI Node – OpenAI/Gemini)\n\n### Purpose\nUses an AI model to analyze the aggregated stock data.  \nGenerates an HTML-formatted email with trends, top movers, insights, and upcoming events.\n\n### Parameters\n- **Model**: `gemini-2.0-flash-lite` (or `gpt-4.1` if using OpenAI)\n- **Input**: JSON data from Aggregate node\n- **Prompt**:  \n  - Analyze market trends  \n  - Identify top gainers/losers  \n  - Generate stock performance table  \n  - Add 3–5 insights  \n  - Format everything as **HTML email body**\n\n## 📧 Send Report via Gmail (Gmail Node)\n\n### Purpose\nDelivers the generated HTML stock market digest directly to the recipient’s inbox.  \nThis is the final step that sends the daily summary email.\n\n### Parameters\n- **Operation**: `Send Email`\n- **Send To**: recipient email (e.g., `investor@domain.com`)\n- **Subject**:   \n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e03b89d9-d530-4c7f-8b9e-b85a39a1fa11",
+        "name": "Sticky Note11",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2784,
+          -752
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 512,
+          "height": 656,
+          "content": "## 🗂 Save to Airtable (Airtable – Create Record)\n\n### Purpose\nStores each day’s stock data in Airtable for historical tracking.  \nActs as a database of all reports.\n\n### Parameters\n- **Operation**: `Create Record`\n- **Base ID**: `appXXXXXX` (from Airtable URL)\n- **Table**: `Daily Stocks`\n- **Field Mapping**:\n  - `Ticker` → `{{ $json.ticker }}`\n  - `Company` → `{{ $json.name }}`\n  - `Price` → `{{ $json.price }}`\n  - `Change %` → `{{ $json.change }}`\n  - `Sentiment` → `{{ $json.sentiment }}`\n  - `Date` → `{{ $now.toISO() }}`\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "ccdfd109-9fd2-40e4-981e-f85eef7cfba6",
+    "connections": {
+      "Split Stocks": {
+        "main": [
+          [
+            {
+              "node": "Prepare Stock Keyword",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Simple Memory": {
+        "ai_memory": [
+          [
+            {
+              "node": "Generate Daily Summary (AI)",
+              "type": "ai_memory",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Wait for Data": {
+        "main": [
+          [
+            {
+              "node": "Check Scraper Progress",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Stock List": {
+        "main": [
+          [
+            {
+              "node": "Split Stocks",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Daily Run Trigger": {
+        "main": [
+          [
+            {
+              "node": "Set Stock List",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Generate Daily Summary (AI)",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Bright Data Scraper": {
+        "main": [
+          [
+            {
+              "node": "Check Scraper Progress",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Aggregate Stock Data": {
+        "main": [
+          [
+            {
+              "node": "Generate Daily Summary (AI)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Scraper Results": {
+        "main": [
+          [
+            {
+              "node": "Aggregate Stock Data",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Save to Airtable (Daily Stocks)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Stock Keyword": {
+        "main": [
+          [
+            {
+              "node": "Bright Data Scraper",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Scraper Status Switch": {
+        "main": [
+          [
+            {
+              "node": "Fetch Scraper Results",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Wait for Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Report via Gmail": {
+        "ai_tool": [
+          [
+            {
+              "node": "Generate Daily Summary (AI)",
+              "type": "ai_tool",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Scraper Progress": {
+        "main": [
+          [
+            {
+              "node": "Scraper Status Switch",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Daily Summary (AI)": {
+        "main": [
+          []
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 29,
+  "workflowInfo": {
+    "nodeCount": 27,
+    "nodeTypes": {
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.switch": {
+        "count": 1
+      },
+      "n8n-nodes-base.airtable": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitOut": {
+        "count": 1
+      },
+      "n8n-nodes-base.aggregate": {
+        "count": 1
+      },
+      "n8n-nodes-base.gmailTool": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 12
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.memoryBufferWindow": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Baptiste Fort",
+    "username": "baptistefort",
+    "bio": "Fondateur de l'agence : visionia.io\n\ncontact : baptiste@visionia.io",
+    "verified": true,
+    "links": [
+      ""
+    ],
+    "avatar": "https://gravatar.com/avatar/c6af5fdba42935bb8e72d24dabe74556c34344eeb92318b512c1784f8271767f?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 2,
+      "icon": "file:airtable.svg",
+      "name": "n8n-nodes-base.airtable",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-sms-the-low-code-way-with-airtable-twilio-programmable-sms-and-n8n/",
+                "icon": "📱",
+                "label": "Sending SMS the Low-Code Way with Airtable, Twilio Programmable SMS, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automating-conference-organization-processes-with-n8n/",
+                "icon": "🙋‍♀️",
+                "label": "Automating Conference Organization Processes with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.airtable/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/airtable/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Airtable"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMTcwIj48cGF0aCBmaWxsPSIjZmNiNDAwIiBkPSJNODkgNC44IDE2LjIgMzQuOWMtNC4xIDEuNy00IDcuNC4xIDkuMWw3My4yIDI5YzYuNCAyLjYgMTMuNiAyLjYgMjAgMGw3My4yLTI5YzQuMS0xLjYgNC4xLTcuNC4xLTkuMWwtNzMtMzAuMUMxMDMuMiAyIDk1LjcgMiA4OSA0LjgiLz48cGF0aCBmaWxsPSIjMThiZmZmIiBkPSJNMTA1LjkgODguOXY3Mi41YzAgMy40IDMuNSA1LjggNi43IDQuNWw4MS42LTMxLjdjMS45LS43IDMuMS0yLjUgMy4xLTQuNVY1Ny4yYzAtMy40LTMuNS01LjgtNi43LTQuNUwxMDkgODQuM2MtMS45LjgtMy4xIDIuNi0zLjEgNC42Ii8+PHBhdGggZmlsbD0iI2Y4MmI2MCIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctMi41IDEuMkw5LjEgMTMwYy0zLjIgMS42LTcuNC0uOC03LjQtNC40VjU3LjVjMC0xLjMuNy0yLjQgMS42LTMuM3EuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNSA0LjMgNy4xLjUgOC45Ii8+PHBhdGggZmlsbD0iI2JhMWU0NSIgZD0ibTg2LjkgOTIuNi0yNC4yIDExLjctNTkuNC01MHEuNi0uNiAxLjItLjljMS4yLS43IDMtLjkgNC40LS4zbDc3LjUgMzAuN2M0IDEuNCA0LjMgNyAuNSA4LjgiLz48L3N2Zz4="
+      },
+      "displayName": "Airtable",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.switch",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "If",
+            "Path",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Branch",
+            "Case"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.switch/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Switch",
+        "color": "#506000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "Switch",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1163,
+      "icon": "fa:database",
+      "name": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.memorybufferwindow/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Memory"
+            ],
+            "Memory": [
+              "For beginners"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Simple Memory"
+      },
+      "iconData": {
+        "icon": "database",
+        "type": "icon"
+      },
+      "displayName": "Simple Memory",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1236,
+      "icon": "file:aggregate.svg",
+      "name": "n8n-nodes-base.aggregate",
+      "codex": {
+        "data": {
+          "alias": [
+            "Aggregate",
+            "Combine",
+            "Flatten",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.aggregate/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Aggregate"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjRkY2RDVBIiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTMyIDE0OGMwLTYuNjI3IDUuMzczLTEyIDEyLTEyaDE0NmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJINDRjLTYuNjI3IDAtMTItNS4zNzMtMTItMTJ6bTAgOTZjMC02LjYyNyA1LjM3My0xMiAxMi0xMmgxNDZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnYyNGMwIDYuNjI3LTUuMzczIDEyLTEyIDEySDQ0Yy02LjYyNyAwLTEyLTUuMzczLTEyLTEyem0wIDk2YzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMTQ2YzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MjRjMCA2LjYyNy01LjM3MyAxMi0xMiAxMkg0NGMtNi42MjcgMC0xMi01LjM3My0xMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjxwYXRoIGQ9Ik03NCA3NmMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDExNi4yMTdjMTcuNjczIDAgMzIgMTQuMzI3IDMyIDMydjU2YzAgMjYuOTc4IDEwLjI3MiA1MS41NTcgMjcuMTE5IDcwLjAzOSA1LjA1NSA1LjU0NSA1LjA1NSAxNC4zNzcgMCAxOS45MjItMTYuODQ3IDE4LjQ4Mi0yNy4xMTkgNDMuMDYxLTI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMtMTQuMzI3IDMyLTMyIDMySDg2Yy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTE2LjIxN2M0NC4xODMgMCA4MC0zNS44MTcgODAtODB2LTU2YzAtMzAuOTI4IDI1LjA3Mi01NiA1Ni01NmE1Ljc4MyA1Ljc4MyAwIDAgMCA1Ljc4My01Ljc4M3YtMzYuNDM0YTUuNzgzIDUuNzgzIDAgMCAwLTUuNzgzLTUuNzgzYy0zMC45MjggMC01Ni0yNS4wNzItNTYtNTZ2LTU2YzAtNDQuMTgzLTM1LjgxNy04MC04MC04MEg4NmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0zNzYgMjQ0YzAtNi42MjcgNS4zNzMtMTIgMTItMTJoMTEyYzYuNjI3IDAgMTIgNS4zNzMgMTIgMTJ2MjRjMCA2LjYyNy01LjM3MyAxMi0xMiAxMkgzODhjLTYuNjI3IDAtMTItNS4zNzMtMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48L2c+PGRlZnM+PGNsaXBQYXRoIGlkPSJhIj48cGF0aCBmaWxsPSIjZmZmIiBkPSJNMCAwaDUxMnY1MTJIMHoiLz48L2NsaXBQYXRoPjwvZGVmcz48L3N2Zz4="
+      },
+      "displayName": "Aggregate",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1239,
+      "icon": "file:splitOut.svg",
+      "name": "n8n-nodes-base.splitOut",
+      "codex": {
+        "data": {
+          "alias": [
+            "Split",
+            "Nested",
+            "Transform",
+            "Array",
+            "List",
+            "Item"
+          ],
+          "details": "",
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitout/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Split Out"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJub25lIj48ZyBmaWxsPSIjOUI2REQ1IiBjbGlwLXBhdGg9InVybCgjYSkiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTQ4MCAxNDhjMC02LjYyNy01LjM3My0xMi0xMi0xMkgzMjJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxNDZjNi42MjcgMCAxMi01LjM3MyAxMi0xMnptMCA5NmMwLTYuNjI3LTUuMzczLTEyLTEyLTEySDMyMmMtNi42MjcgMC0xMiA1LjM3My0xMiAxMnYyNGMwIDYuNjI3IDUuMzczIDEyIDEyIDEyaDE0NmM2LjYyNyAwIDEyLTUuMzczIDEyLTEyem0wIDk2YzAtNi42MjctNS4zNzMtMTItMTItMTJIMzIyYy02LjYyNyAwLTEyIDUuMzczLTEyIDEydjI0YzAgNi42MjcgNS4zNzMgMTIgMTIgMTJoMTQ2YzYuNjI3IDAgMTItNS4zNzMgMTItMTJ6IiBjbGlwLXJ1bGU9ImV2ZW5vZGQiLz48cGF0aCBkPSJNNDM4IDc2YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtMTcuNjczIDAtMzIgMTQuMzI3LTMyIDMydjU2YzAgMjYuOTc4LTEwLjI3MiA1MS41NTctMjcuMTE5IDcwLjAzOS01LjA1NSA1LjU0NS01LjA1NSAxNC4zNzcgMCAxOS45MjIgMTYuODQ3IDE4LjQ4MiAyNy4xMTkgNDMuMDYxIDI3LjExOSA3MC4wMzl2NTZjMCAxNy42NzMgMTQuMzI3IDMyIDMyIDMySDQyNmM2LjYyNyAwIDEyIDUuMzczIDEyIDEydjI0YzAgNi42MjctNS4zNzMgMTItMTIgMTJIMzA5Ljc4M2MtNDQuMTgzIDAtODAtMzUuODE3LTgwLTgwdi01NmMwLTMwLjkyOC0yNS4wNzItNTYtNTYtNTZhNS43ODMgNS43ODMgMCAwIDEtNS43ODMtNS43ODN2LTM2LjQzNGE1Ljc4MyA1Ljc4MyAwIDAgMSA1Ljc4My01Ljc4M2MzMC45MjggMCA1Ni0yNS4wNzIgNTYtNTZ2LTU2YzAtNDQuMTgzIDM1LjgxNy04MCA4MC04MEg0MjZjNi42MjcgMCAxMiA1LjM3MyAxMiAxMnoiLz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMzYgMjQ0YzAtNi42MjctNS4zNzMtMTItMTItMTJIMTJjLTYuNjI3IDAtMTIgNS4zNzMtMTIgMTJ2MjRjMCA2LjYyNyA1LjM3MyAxMiAxMiAxMmgxMTJjNi42MjcgMCAxMi01LjM3MyAxMi0xMnoiIGNsaXAtcnVsZT0iZXZlbm9kZCIvPjwvZz48ZGVmcz48Y2xpcFBhdGggaWQ9ImEiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik01MTIgMEgwdjUxMmg1MTJ6Ii8+PC9jbGlwUGF0aD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Split Out",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 44,
+      "name": "Crypto Trading"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": [
+    {
+      "id": 2658,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/baptiste_fort_automatisation_scraping_boursier_bright_data_b18617a906.png"
+    },
+    {
+      "id": 2659,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/automatisation_envoi_email_rapport_boursier_baptiste_fort_7678dfb305.png"
+    },
+    {
+      "id": 2660,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/baptiste_fort_automatisation_digest_boursier_22902b49f5.png"
+    },
+    {
+      "id": 2661,
+      "url": "https://n8niostorageaccount.blob.core.windows.net/n8nio-strapi-blobs-prod/assets/automatisation_rapport_boursier_quotidien_baptiste_fort_7dc4c49616.png"
+    }
+  ]
+}

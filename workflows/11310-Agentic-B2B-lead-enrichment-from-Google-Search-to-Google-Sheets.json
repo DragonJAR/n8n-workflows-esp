@@ -1,0 +1,2392 @@
+{
+  "id": 8851,
+  "name": "Agentic B2B lead enrichment from Google Search to Google Sheets",
+  "views": 303,
+  "recentViews": 0,
+  "totalViews": 303,
+  "createdAt": "2025-09-23T06:35:18.609Z",
+  "description": "## How it works\n\nThis is an advanced \"Agentic\" workflow that acts as an autonomous lead generation specialist. It goes beyond simple scraping by \"thinking\" about where to look for contact info.\n\n1. **Search & Filter:** It performs a Google Search for your niche (e.g., \"Marketing Agencies in Toronto\"), normalizing results to remove directories (Clutch, Yelp) and junk links.\n2. **Homepage Analysis:** It visits every lead's website and uses an AI Agent to identify key pages (Contact, About, Careers) and social profiles.\n3. **Deep Scan (Branch A):** If a \"Contact Us\" page is found, a second AI Agent visits that specific page to extract hidden emails and phone numbers.\n4. **LinkedIn Enrichment (Branch B):** Simultaneously, if a LinkedIn profile is found, it scrapes the profile to extract Company Size, Industry, and Headquarters location.\n5. **Aggregation:** Finally, it merges data from all sources, formats the arrays into readable text, and saves the complete profile to Google Sheets.\n\n## Set up steps\n\n1. **Configure APIs:**\n   * **Serper.dev:** Required for the initial Google Search results.\n   * **ScraperAPI:** Required to bypass bot detection when visiting company websites and LinkedIn.\n   * **Google Gemini (or OpenAI):** Required for the AI Agents to analyze HTML.\n\n2. **Setup Google Sheet:**\n   * Create a new Sheet with these exact headers in Row 1: `Company Name`, `Linked Summary`, `employee count`, `industry`, `Emails`, `Phone`, `Website`.\n   * Connect the **Google Sheets** node to this file.\n\n3. **Configure Variables:**\n   * In the **Edit Fields** node (Start), enter your `search_query` (e.g., \"Plumbers in Chicago\").\n\n4. **Important Note:**\n   * This workflow uses a **Loop** with a 1.5s wait time to be polite to servers. A batch of 50 leads will take approximately 10-15 minutes to complete.",
+  "workflow": {
+    "meta": {
+      "instanceId": "10215853c4801e5639deaf521f25f7bf4080db160528a7c77f6f3b15eb83e446",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "5073ba97-93b4-4b08-9f20-a19256f08699",
+        "name": "When clicking ‘Execute workflow’",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          -864,
+          336
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "4ee3e1c9-24cb-468d-8f62-d5b2b7568fd5",
+        "name": "Serper Search",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -416,
+          336
+        ],
+        "parameters": {
+          "url": "https://google.serper.dev/search",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"q\": \"{{ $json.search_query }}\",\n  \"num\": 50\n}\n ",
+          "sendBody": true,
+          "sendHeaders": true,
+          "specifyBody": "json",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "credential-id",
+            "name": "httpHeaderAuth Credential"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "05a255ed-4cde-47a6-a627-5bee768f2bb8",
+        "name": "parse search results",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -192,
+          336
+        ],
+        "parameters": {
+          "jsCode": "// Serper returns JSON with \"organic\" results array\nconst results = items[0].json.organic || [];\nconst leads = [];\n\nfor (const r of results) {\n  if (!r.link) continue;\n\n  leads.push({\n    json: {\n      company_name: (r.title || \"\").replace(/\\|.*$/, \"\").trim(),\n      website: r.link,\n      snippet: r.snippet || \"\",\n      status: \"raw_from_serper\"\n    }\n  });\n}\n\nreturn leads;\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d5d2fb78-c2e5-416e-8412-e059c8991462",
+        "name": "Normalize leads",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          32,
+          336
+        ],
+        "parameters": {
+          "jsCode": "// Get all the leads from the previous node\nconst leads = $input.all().map((item) => item.json);\n\n// This is our new, smarter blocklist. It looks for patterns, not just names.\nconst junkKeywords = [\n  'top 10', 'top 20', 'best agencies', 'best companies', 'top rated',\n  'reviews of', 'list of', 'directory of', 'find the best', 'agencies in',\n  'firms in', 'jobs in', 'has anyone', 'reddit.com', 'youtube.com',\n  'indeed.com', 'glassdoor.com', 'clutch.co', 'designrush.com',\n  'goodfirms.co', 'themanifest.com'\n];\n\nconst normalizedLeads = leads\n  .map((lead) => {\n    // Clean up the company name and website URL\n    let cleanCompanyName = lead.company_name\n      .split(' - ')[0]\n      .split(' • ')[0]\n      .split(' (@')[0]\n      .trim();\n    \n    let cleanWebsite = lead.website.trim();\n    if (cleanWebsite.endsWith('/')) {\n      cleanWebsite = cleanWebsite.slice(0, -1);\n    }\n    \n    return {\n      company_name: cleanCompanyName,\n      website: cleanWebsite,\n      original_title: lead.title, // Keep the original title for checking\n      original_snippet: lead.snippet, // Keep the original snippet for checking\n      status: \"normalized\"\n    };\n  })\n  .filter((lead) => {\n    // Now, check if the original title or website contains any junk keywords\n    const textToSearch = (lead.original_title + ' ' + lead.website).toLowerCase();\n    \n    const isJunk = junkKeywords.some(keyword => textToSearch.includes(keyword));\n    \n    // Return true only if it's NOT junk\n    return !isJunk;\n  });\n\nreturn normalizedLeads;"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "5cebc6a1-58c0-4469-bd1b-180d832e9858",
+        "name": "Loop Over Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "onError": "continueRegularOutput",
+        "position": [
+          256,
+          336
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "a6386eea-66ac-4885-a6ac-ac5654530b18",
+        "name": "Wait",
+        "type": "n8n-nodes-base.wait",
+        "position": [
+          480,
+          336
+        ],
+        "webhookId": "8e6e905b-6613-4d83-9c4d-15dacbdd171d",
+        "parameters": {
+          "amount": 1.5
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "264116f1-e587-4b8d-ae0d-69b99cc71530",
+        "name": "Fetch Homepage",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          704,
+          336
+        ],
+        "parameters": {
+          "url": "=http://api.scraperapi.com",
+          "options": {
+            "redirect": {
+              "redirect": {}
+            },
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            },
+            "allowUnauthorizedCerts": true
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "api_key",
+                "value": "your-api-key"
+              },
+              {
+                "name": "url",
+                "value": "={{ $json.website }}"
+              },
+              {
+                "name": "render",
+                "value": "true"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2,
+        "alwaysOutputData": false
+      },
+      {
+        "id": "fc0f56fc-f326-490b-b010-4895992ff747",
+        "name": "Google Gemini Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+        "position": [
+          928,
+          512
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "googlePalmApi": {
+            "id": "credential-id",
+            "name": "googlePalmApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8f8fed6a-f6e1-445c-8281-b4f984d6475f",
+        "name": "Edit Fields",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          -640,
+          336
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "8b63ae6a-cf26-4a3e-882d-d2e6cdae34b1",
+                "name": "search_query",
+                "type": "string",
+                "value": "Marketing and Advertising agencies in Canada"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "b0fd9c92-dc54-4d09-95fc-87d13f873025",
+        "name": "HTTP Request1",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          -624,
+          688
+        ],
+        "parameters": {
+          "url": "http://api.scraperapi.com",
+          "options": {
+            "redirect": {
+              "redirect": {}
+            },
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            },
+            "allowUnauthorizedCerts": true
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "api_key",
+                "value": "your-api-key"
+              },
+              {
+                "name": "url",
+                "value": "={{ $json.Detail }}"
+              },
+              {
+                "name": "render",
+                "value": "true"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "4134a602-e739-4237-8260-b835da530926",
+        "name": "Google Gemini Chat Model1",
+        "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+        "position": [
+          -400,
+          864
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "googlePalmApi": {
+            "id": "credential-id",
+            "name": "googlePalmApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e013ce45-9c3c-4e96-86fd-2dde63234ed2",
+        "name": "output combiner",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -48,
+          688
+        ],
+        "parameters": {
+          "jsCode": "// This node receives all the separate findings from the deep scan\nconst allItems = $input.all();\nconst aggregatedResult = {\n  emails: [],\n  phones: [],\n  contact_form_present: false,\n  summaries: []\n};\n\n// Loop through each finding (from the about page, contact page, etc.)\nfor (const item of allItems) {\n  // 1. Get the raw string from the 'output' field.\n  const rawOutput = item.json.output;\n  if (!rawOutput) continue; // Skip if the AI returned nothing.\n\n  try {\n    // 2. Clean the string to remove markdown and get the pure JSON.\n    const jsonString = rawOutput.replace(/```json\\n|\\n```/g, '').trim();\n    if (!jsonString) continue; // Skip if the string is empty after cleaning.\n\n    // 3. Parse the string into a usable object. THIS IS THE STEP WE MISSED.\n    const data = JSON.parse(jsonString);\n\n    // 4. Now, the original aggregation logic will work on the clean data.\n    if (data.emails && data.emails.length > 0) {\n      aggregatedResult.emails.push(...data.emails);\n    }\n    if (data.phones && data.phones.length > 0) {\n      aggregatedResult.phones.push(...data.phones);\n    }\n    if (data.contact_form_present) {\n      aggregatedResult.contact_form_present = true;\n    }\n    if (data.summary) {\n      aggregatedResult.summaries.push(data.summary);\n    }\n  } catch (error) {\n    // This will prevent the workflow from crashing if the AI returns bad JSON.\n    console.error(\"Could not parse AI output:\", item.json.output, error);\n  }\n}\n\n// IMPORTANT: Remove any duplicate emails or phone numbers\naggregatedResult.emails = [...new Set(aggregatedResult.emails)];\naggregatedResult.phones = [...new Set(aggregatedResult.phones)];\n\n// Return a single, clean object with all the combined results\nreturn [{ json: aggregatedResult }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d235c3e4-b133-49b3-8834-f074ccce2f0c",
+        "name": "Merge",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          640,
+          1008
+        ],
+        "parameters": {
+          "mode": "combine",
+          "options": {},
+          "combineBy": "combineByPosition",
+          "numberInputs": 3
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "31692d8d-b7ed-4cea-b436-5cfd6e98084e",
+        "name": "Merge1",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          416,
+          1120
+        ],
+        "parameters": {
+          "mode": "chooseBranch",
+          "useDataOfInput": 2
+        },
+        "typeVersion": 3.2
+      },
+      {
+        "id": "04d6675a-206c-4b9a-985b-49b823251389",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -928,
+          160
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 656,
+          "height": 336,
+          "content": "## 1. Search & Initialize\nDefines the target niche and executes a Google Search to get raw results."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "06c1c953-b26b-4da6-9e4b-e87e1595bdcf",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -256,
+          176
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 672,
+          "height": 320,
+          "content": "## 2. Clean & Loop\nFilters out directories (like Yelp) to save AI credits, then starts a polite loop (1.5s delay) to process leads one by one."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "23f8cb2b-561f-415c-9a54-c855a7d8200d",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          464,
+          176
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 944,
+          "height": 480,
+          "content": "## 3. Homepage Analysis\nScrapes the main website. The AI Agent reads the HTML to find hidden \"Contact Us\" sub-pages and social media links."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "17212719-41ce-46d5-879c-7faaba77935e",
+        "name": "Format output",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1280,
+          336
+        ],
+        "parameters": {
+          "jsCode": "// Get the input string from the previous node\nconst rawOutput = items[0].json.output;\n\n// 1. Clean the string to remove the Markdown \"```json\" fences\n//    This isolates the pure JSON array text.\nconst jsonString = rawOutput.replace(/```json\\n|\\n```/g, '');\n\n// 2. Parse the clean string into a JavaScript array\nconst dataArray = JSON.parse(jsonString);\n\n// 3. Return the data so n8n creates a separate item for each object\n//    This is the key step to get separate objects as the output.\nreturn dataArray.map(item => {\n  return {\n    json: item\n  };\n});"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6a1a89ce-61dd-4c4f-be86-af3164ee49f7",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -880,
+          560
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 1008,
+          "height": 384,
+          "content": "## 4. Contact Page Scan\nIf a specific \"Contact Us\" page was found, this branch visits it to extract emails and phone numbers hidden in the code."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "47384a1c-cff3-464c-9c18-7ef37d177f66",
+        "name": "Linked in Details",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          416,
+          928
+        ],
+        "parameters": {
+          "jsCode": "// Get the raw output string from the AI Agent\nconst rawOutput = items[0].json.output;\n\n// Parse the JSON string into a real JavaScript object\nconst parsedData = JSON.parse(rawOutput);\n\n// Return the clean object for the next node to use\nreturn {\n  json: parsedData\n};"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "19e0c312-ce38-4dff-a0cb-3ff2682c86fd",
+        "name": "LinkedIN scraper",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          -368,
+          1152
+        ],
+        "parameters": {
+          "url": "=https://www.linkedin.com/",
+          "options": {
+            "redirect": {
+              "redirect": {}
+            },
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "api_key",
+                "value": "your-api-key"
+              },
+              {
+                "name": "type",
+                "value": "company"
+              },
+              {
+                "name": "linkId",
+                "value": "={{ $json.linkId }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "eb636666-ad63-4bf3-b771-04607e07c866",
+        "name": "convert scrapable link",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -592,
+          1152
+        ],
+        "parameters": {
+          "jsCode": "// Get the full LinkedIn URL from the incoming item\nconst fullUrl = items[0].json.Detail;\n\n// This logic safely splits the URL by '/' and gets the last part,\n// even if there's a trailing slash.\nconst parts = fullUrl.split('/').filter(part => part); // Split and remove empty parts\nconst linkId = parts[parts.length - 1];\n\n// Add the new 'linkId' field to the data\nitems[0].json.linkId = linkId;\n\n// Pass the updated item to the next node\nreturn items;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6ddab130-b3db-42ee-9ff5-0d6e63c96abb",
+        "name": "filter redirecting links",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -848,
+          688
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "or",
+            "conditions": [
+              {
+                "id": "6ab66308-bd6a-4545-ad5a-5de3ab4766aa",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json['Contact Method'] }}",
+                "rightValue": "Contact Page Link"
+              },
+              {
+                "id": "1f729687-7ba3-47ad-8e58-8e7c3bbb2fde",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json['Contact Method'] }}",
+                "rightValue": "About Page Link"
+              },
+              {
+                "id": "fe1d229e-e833-44c9-ad6e-07727dda37ff",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json['Contact Method'] }}",
+                "rightValue": "Careers Page Link"
+              },
+              {
+                "id": "faba28a0-d13b-4891-af75-a7f6358cc93b",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json['Contact Method'] }}",
+                "rightValue": "LinkedIn Profile"
+              },
+              {
+                "id": "63572f9d-3f08-4e84-8fd3-0f26933b7ef0",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json[\"Contact Method\"] }}",
+                "rightValue": "Contact Form Link"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "ec33ee8b-2175-4b78-b922-54f22fa8636b",
+        "name": "Filter Linked In specific link",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -816,
+          1152
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "18501573-a673-401a-a0e1-6ce83883ef11",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ $json['Contact Method'] }}",
+                "rightValue": "LinkedIn Profile"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "725ff34c-786a-436a-a7f1-d5fe01890f4c",
+        "name": "Append row in sheet",
+        "type": "n8n-nodes-base.googleSheets",
+        "position": [
+          1088,
+          1024
+        ],
+        "parameters": {
+          "columns": {
+            "value": {
+              "Phone": "={{ $json.phone_string }}",
+              "Emails": "={{ $json.email_string }}",
+              "Website": "={{ $json.website_url }}",
+              "industry": "={{ $json.industry }}",
+              "Company Name": "={{ $('Loop Over Items').item.json.company_name }}",
+              "Linked Summary": "={{ $json.linkedin_summary }}",
+              "employee count": "={{ $json.employee_count }}"
+            },
+            "schema": [
+              {
+                "id": "Company Name",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Company Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Name",
+                "type": "string",
+                "display": true,
+                "removed": true,
+                "required": false,
+                "displayName": "Name",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Linked Summary",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Linked Summary",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "employee count",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "employee count",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "industry",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "industry",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "headquarter",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "headquarter",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Emails",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Emails",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Website",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Website",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Phone",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Phone",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              },
+              {
+                "id": "Source",
+                "type": "string",
+                "display": true,
+                "required": false,
+                "displayName": "Source",
+                "defaultMatch": false,
+                "canBeUsedToMatch": true
+              }
+            ],
+            "mappingMode": "defineBelow",
+            "matchingColumns": [],
+            "attemptToConvertTypes": false,
+            "convertFieldsToString": false
+          },
+          "options": {},
+          "operation": "append",
+          "sheetName": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gid=0",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1-YOUR_AWS_SECRET_KEY_HERE-g/edit#gid=0",
+            "cachedResultName": "Sheet1"
+          },
+          "documentId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "1-YOUR_AWS_SECRET_KEY_HERE-g",
+            "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1-YOUR_AWS_SECRET_KEY_HERE-g/edit?usp=drivesdk",
+            "cachedResultName": "Linked in details"
+          }
+        },
+        "credentials": {
+          "googleSheetsOAuth2Api": {
+            "id": "credential-id",
+            "name": "googleSheetsOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 4.7
+      },
+      {
+        "id": "fce4e3f4-ceba-401e-a7ec-2c338ffeb134",
+        "name": "Send a message",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          320,
+          576
+        ],
+        "webhookId": "5b42f61d-58e3-420c-840f-b256e7d5cce7",
+        "parameters": {
+          "sendTo": "user@example.com",
+          "message": "=The Extraction has been completed and google sheets has been filled with the extracted data from the scrapers",
+          "options": {},
+          "subject": "Extraction Completed",
+          "emailType": "text"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "789e3dc4-dfe3-4f58-ba94-aed8cfe5fe85",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -832,
+          1040
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 960,
+          "height": 464,
+          "content": "## 5. LinkedIn Enrichment\nIf a LinkedIn profile was found, this branch scrapes it to gather company stats (Size, Industry, HQ)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "829726fc-30d2-4374-b922-c2c665a1db2a",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          272,
+          784
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 992,
+          "height": 496,
+          "content": "## 6. Merge & Save\nConsolidates data from all branches, formats lists (like multiple emails) into text, and saves to Google Sheets."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ab1a2b35-716d-41ff-b1f4-2fcf56499500",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1744,
+          144
+        ],
+        "parameters": {
+          "width": 656,
+          "height": 592,
+          "content": "## 🕵️ Overview\nThis is an \"Agentic\" lead generation workflow that behaves like a human researcher, not just a dumb scraper. It turns a simple Google Search into a verified lead list.\n\n1. **Smart Search:** It searches Google for your niche (e.g., \"Web Agencies in Toronto\") \n2. **Homepage Scout:** An AI Agent visits every company website to identify the *correct* \"Contact Us\" page and look for LinkedIn profiles.\n3. **Deep Dive (Parallel Processing):**\n   - **Branch A:** Visits the specific Contact page to extract hidden emails and phone numbers.\n   - **Branch B:** Visits the LinkedIn company profile to grab headcount, industry, and location data.\n4. **Aggregation:** Merges all data, formats it into a clean row, and saves it to Google Sheets.\n\n## ⚙️ Setup steps\n1. **Credentials:** You need **Serper** (Search), **ScraperAPI** (Proxy/Bypassing), and **Google Gemini** (Intelligence).\n2. **Google Sheet:** Create a new sheet with these exact headers in Row 1:\n   `Company Name`, `Linked Summary`, `employee count`, `industry`, `Emails`, `Phone`, `Website`\n3. **Configuration:**\n   - Open the **Edit Fields** node (Start).\n   - Enter your keyword in the `search_query` field.\n4. **Run:** The workflow uses a loop with a 1.5s delay to be polite to servers. A batch of 50 leads takes ~10-15 mins."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "af061e90-b596-4ef1-b215-2e13acdcbd4e",
+        "name": "Google Gemini Chat Model3",
+        "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+        "position": [
+          -144,
+          1344
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "googlePalmApi": {
+            "id": "credential-id",
+            "name": "googlePalmApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "18292c48-65b4-4d3e-a92c-eccea81cb5af",
+        "name": "Linked In Agent",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          -144,
+          1152
+        ],
+        "parameters": {
+          "text": "=Analyze this page and give me the Details of this linked profile or company :  {{ $json.data }}",
+          "batching": {},
+          "messages": {
+            "messageValues": [
+              {
+                "message": "=## System Prompt You are an expert at analyzing the data from a LinkedIn company page. Your goal is to extract key business information.  ## Your Task Analyze the provided data and extract the following details. If a detail is not present, use an empty string \"\" or null.  ## Output Format You MUST output a single, clean JSON object. Do not use markdown. {   \"linkedin_summary\":,   \"employee_count\": ,   \"industry\": ,   \"headquarters\":    \"email\":. \"contact  details\":, \"adresss\":, }"
+              }
+            ]
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 1.7
+      },
+      {
+        "id": "9347b69b-e5d1-4237-84ac-75188bfdc6f9",
+        "name": "Contact Page Scan Agent",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          -400,
+          688
+        ],
+        "parameters": {
+          "text": "=Analyze the following HTML and extract all contact details:  {{ $json.data }}",
+          "batching": {},
+          "messages": {
+            "messageValues": [
+              {
+                "message": "=## System Prompt\nYou are a specialist data extractor. Your only goal is to find email addresses and phone numbers within the provided HTML of a company's contact page.\n\n## Your Task\n1.  Meticulously scan the entire HTML for any email addresses (mailto: links or plain text) and any phone numbers (tel: links or plain text in various formats).\n2.  If you cannot find any direct emails or phone numbers, check for the presence of a contact form (look for <form> tags associated with text like \"contact us,\" \"send a message,\" or \"get in touch\").\n3.  You MUST output your findings as a single, clean JSON object. Do not provide any text, explanation, or markdown fences before or after the JSON.\n\n## Output Format\nYour entire output must be ONLY the JSON object, structured exactly like this:\n{\n  \"emails\": [\"email@example.com\", \"another@example.com\"],\n  \"phones\": [\"+1-555-123-4567\", \"(555) 987-6543\"],\n  \"contact_form_present\": true,\n  \"summary\": \"Found two emails and a contact form on the page.\"\n}\n\n## Rules\n- If no emails are found, the \"emails\" array should be empty: [].\n- If no phone numbers are found, the \"phones\" array should be empty: [].\n- If no contact form is detected, \"contact_form_present\" should be false.\n- The summary should be a brief, one-sentence description of what you found."
+              }
+            ]
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 1.7
+      },
+      {
+        "id": "a7d816ce-cc0b-43c3-81bf-fdf89ca6973c",
+        "name": "Home Page Analyst",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          928,
+          336
+        ],
+        "parameters": {
+          "text": "=Analyze the following HTML and extract all contact details: {{ $json.data }}",
+          "batching": {},
+          "messages": {
+            "messageValues": [
+              {
+                "message": "=## System Prompt\nYou are an expert-level Data Extraction Bot. Your sole purpose is to meticulously analyze raw HTML content from a company's webpage and extract every possible piece of contact information. You must be thorough, accurate, and systematic in your approach.\n\n## Your Task\n\nYou will be given raw HTML as input. Your task is to parse this HTML and identify all contact details. You must then structure this information into a single, clean Markdown table.\n\n## Information to Extract\n\nYou must find the following types of information:\n\nContact-Related Page Links:\n\nScour all <a> tags.\n\nIdentify any link that helps a user contact or learn more about the company.\n\nLook for anchor text containing keywords like: Contact, About Us, Support, Connect, Get in Touch, Help, Locations, Careers, Press, Inquiries.\n\nExtract the full, absolute URL from the href attribute. If the link is relative (e.g., /contact), construct the full URL based on the main website's domain.\n\nCapture the link's anchor text (the visible text of the link).\n\nEmail Addresses:\n\nSearch for all mailto: links within href attributes.\n\nScan the entire text content of the HTML for email address patterns (e.g., name@domain.com). Be thorough, as they are often not in <a> tags.\n\nPhone Numbers:\n\nSearch for all tel: links within href attributes.\n\nScan the entire text content for common phone number formats, including international codes, extensions, and different uses of parentheses, dashes, and spaces.\n\nPhysical Addresses:\n\nLook for structured address formats, often found in the page <footer> or within elements with classes like address or location.\n\nIdentify components like street names, city, state/province, postal codes, and country.\n\nPay attention to schema.org/PostalAddress microdata if present.\n\nOther Contact Methods:\n\nSocial Media: Extract links to primary social media platforms like LinkedIn, X (Twitter), Facebook, Instagram, etc.\n\nContact Forms: If you find a link to a page that contains a contact form, list that URL.\n\n## Output Format\n\nYou MUST format your entire output as a \n\n  {\n    \"Contact Method\": \"Contact Page Link\",\n    \"Detail\": \"https://www.tmpb2b.com/en-gb/contact-us\",\n    \"Notes / Source Text\": \"Contact us, Talk to us, Connect with us\"\n  },\n  {\n    \"Contact Method\": \"About Page Link\",\n    \"Detail\": \"https://www.tmpb2b.com/en-gb/about\",\n    \"Notes / Source Text\": \"About us, Read all about us\"\n  },\n  {\n    \"Contact Method\": \"Careers Page Link\",\n    \"Detail\": \"https://www.tmpb2b.com/en-gb/culture-and-careers\",\n    \"Notes / Source Text\": \"Careers\"\n  },\n  {\n    \"Contact Method\": \"LinkedIn Profile\",\n    \"Detail\": \"https://www.linkedin.com/company/the-marketing-practice/posts/?feedView=all\",\n    \"Notes / Source Text\": \"LinkedIn\"\n  },\n  {\n    \"Contact Method\": \"Instagram Profile\",\n    \"Detail\": \"https://www.instagram.com/themarketingpractice/?hl=en\",\n    \"Notes / Source Text\": \"Instagram\"\n  }\n\nso it flows well in n8n \n\n\nIf you dont get any available emails on the home page  then write no emails found on email page but only after a thorough check to never miss onee !"
+              }
+            ]
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 1.7
+      },
+      {
+        "id": "4d340adb-37eb-4f9d-b5f7-fbca0039badd",
+        "name": "Format for Sheets",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          864,
+          1024
+        ],
+        "parameters": {
+          "jsCode": "// Loop through all incoming items\nreturn items.map(item => {\n  const data = item.json;\n\n  return {\n    json: {\n      // Keep the URL\n      website_url: data.Detail,\n      \n      // FLATTEN THE ARRAYS:\n      // This turns [\"a\", \"b\"] into \"a, b\"\n      // If the array is empty or null, it returns an empty string \"\"\n      email_string: (data.emails && Array.isArray(data.emails)) ? data.emails.join(', ') : '',\n      phone_string: (data.phones && Array.isArray(data.phones)) ? data.phones.join(', ') : '',\n      \n      // CLEAN UP LINKEDIN DATA:\n      // If data is null, put \"Not Found\" instead of leaving it blank\n      linkedin_summary: data.linkedin_summary || 'Not Found',\n      employee_count: data.employee_count || 'Not Found',\n      industry: data.industry || 'Not Found',\n      \n      // Pick the first summary found, if any\n      ai_summary: (data.summaries && data.summaries.length > 0) ? data.summaries[0] : ''\n    }\n  };\n});"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Wait": {
+        "main": [
+          [
+            {
+              "node": "Fetch Homepage",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge": {
+        "main": [
+          [
+            {
+              "node": "Format for Sheets",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge1": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Edit Fields": {
+        "main": [
+          [
+            {
+              "node": "Serper Search",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format output": {
+        "main": [
+          [
+            {
+              "node": "filter redirecting links",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HTTP Request1": {
+        "main": [
+          [
+            {
+              "node": "Contact Page Scan Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Serper Search": {
+        "main": [
+          [
+            {
+              "node": "parse search results",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Homepage": {
+        "main": [
+          [
+            {
+              "node": "Home Page Analyst",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Linked In Agent": {
+        "main": [
+          [
+            {
+              "node": "Linked in Details",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items": {
+        "main": [
+          [
+            {
+              "node": "Send a message",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Wait",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize leads": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "output combiner": {
+        "main": [
+          [
+            {
+              "node": "Merge1",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "LinkedIN scraper": {
+        "main": [
+          [
+            {
+              "node": "Linked In Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format for Sheets": {
+        "main": [
+          [
+            {
+              "node": "Append row in sheet",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Home Page Analyst": {
+        "main": [
+          [
+            {
+              "node": "Format output",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Linked in Details": {
+        "main": [
+          [
+            {
+              "node": "Merge",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Append row in sheet": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "parse search results": {
+        "main": [
+          [
+            {
+              "node": "Normalize leads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "convert scrapable link": {
+        "main": [
+          [
+            {
+              "node": "LinkedIN scraper",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Contact Page Scan Agent": {
+        "main": [
+          [
+            {
+              "node": "output combiner",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Gemini Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Home Page Analyst",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "filter redirecting links": {
+        "main": [
+          [
+            {
+              "node": "HTTP Request1",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Filter Linked In specific link",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Merge1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Gemini Chat Model1": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Contact Page Scan Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Google Gemini Chat Model3": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Linked In Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Filter Linked In specific link": {
+        "main": [
+          [
+            {
+              "node": "convert scrapable link",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When clicking ‘Execute workflow’": {
+        "main": [
+          [
+            {
+              "node": "Edit Fields",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 51,
+  "workflowInfo": {
+    "nodeCount": 34,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 7
+      },
+      "n8n-nodes-base.wait": {
+        "count": 1
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 2
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 4
+      },
+      "n8n-nodes-base.googleSheets": {
+        "count": 1
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chainLlm": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.lmChatGoogleGemini": {
+        "count": 3
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Dhruv Mali",
+    "username": "dhruvmali",
+    "bio": "Automation Engineer and consultant  providing Real World Solution in a scalable and efficient way . ",
+    "verified": true,
+    "links": [
+      "https://linkedin.com/in/malidhruv"
+    ],
+    "avatar": "https://gravatar.com/avatar/507b759944faa2d33106884dc7c1162f347eaeb72855421e50ea6cbc63ee7f77?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 18,
+      "icon": "file:googleSheets.svg",
+      "name": "n8n-nodes-base.googleSheets",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Sheet",
+            "Spreadsheet",
+            "GS"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-triggers-for-n8n-workflows-using-polling/",
+                "icon": "⏲",
+                "label": "Creating triggers for n8n workflows using polling"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.googlesheets/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage",
+            "Productivity"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "Google Sheets"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCI+PGcgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNS42OSAxIDUyIDE3LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0OC4yOTMgNjBIMTIuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDkgNTYuMzEyVjQuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTIuNzA3IDF6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM1LjY5IDEgNTIgMTcuMjI1SDM5LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzkuMjExIDE3LjIyNSA1MiAyMi40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTIwLjEyIDMxLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMS42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzEuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjxwYXRoIGZpbGw9IiMyOEI0NDYiIGQ9Ik0zNC42OSAwIDUxIDE2LjIyNXYzOS4wODdhMy42NyAzLjY3IDAgMCAxLTEuMDg0IDIuNjFBMy43IDMuNyAwIDAgMSA0Ny4yOTMgNTlIMTEuNzA3YTMuNyAzLjcgMCAwIDEtMi42MjMtMS4wNzhBMy42NyAzLjY3IDAgMCAxIDggNTUuMzEyVjMuNjg4YTMuNjcgMy42NyAwIDAgMSAxLjA4NC0yLjYxQTMuNyAzLjcgMCAwIDEgMTEuNzA3IDB6Ii8+PHBhdGggZmlsbD0iIzZBQ0U3QyIgZD0iTTM0LjY5IDAgNTEgMTYuMjI1SDM4LjM5N2MtMi4wNTQgMC0zLjcwNy0xLjgyOS0zLjcwNy0zLjg3MnoiLz48cGF0aCBmaWxsPSIjMjE5QjM4IiBkPSJNMzguMjExIDE2LjIyNSA1MSAyMS40OHYtNS4yNTV6Ii8+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTE5LjEyIDMwLjk3NWMwLS44MTcuNjYyLTEuNDc1IDEuNDgzLTEuNDc1aDE3Ljc5NGMuODIxIDAgMS40ODIuNjU4IDEuNDgyIDEuNDc1djE1LjQ4N2MwIC44MTgtLjY2MSAxLjQ3NS0xLjQ4MiAxLjQ3NUgyMC42MDNhMS40NzYgMS40NzYgMCAwIDEtMS40ODItMS40NzRWMzAuOTc0em0yLjIyNSAxLjQ3NWg2LjY3MnYyLjIxMmgtNi42NzJ6bTAgNS4xNjJoNi42NzJ2Mi4yMTNoLTYuNjcyem0wIDUuMTYzaDYuNjcydjIuMjEyaC02LjY3MnptOS42MzgtMTAuMzI1aDYuNjcydjIuMjEyaC02LjY3MnptMCA1LjE2Mmg2LjY3MnYyLjIxM2gtNi42NzJ6bTAgNS4xNjNoNi42NzJ2Mi4yMTJoLTYuNjcyeiIvPjwvZz48L3N2Zz4="
+      },
+      "displayName": "Google Sheets",
+      "typeVersion": 5,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 4,
+          "name": "Productivity"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "icon": "fa:pause-circle",
+      "name": "n8n-nodes-base.wait",
+      "codex": {
+        "data": {
+          "alias": [
+            "pause",
+            "sleep",
+            "delay",
+            "timeout"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Wait",
+        "color": "#804050"
+      },
+      "iconData": {
+        "icon": "pause-circle",
+        "type": "icon"
+      },
+      "displayName": "Wait",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1123,
+      "icon": "fa:link",
+      "name": "@n8n/n8n-nodes-langchain.chainLlm",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.chainllm/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Basic LLM Chain",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "link",
+        "type": "icon"
+      },
+      "displayName": "Basic LLM Chain",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1262,
+      "icon": "file:google.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatgooglegemini/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Google Gemini Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgNDggNDgiPjxkZWZzPjxwYXRoIGlkPSJhIiBkPSJNNDQuNSAyMEgyNHY4LjVoMTEuOEMzNC43IDMzLjkgMzAuMSAzNyAyNCAzN2MtNy4yIDAtMTMtNS44LTEzLTEzczUuOC0xMyAxMy0xM2MzLjEgMCA1LjkgMS4xIDguMSAyLjlsNi40LTYuNEMzNC42IDQuMSAyOS42IDIgMjQgMiAxMS44IDIgMiAxMS44IDIgMjRzOS44IDIyIDIyIDIyYzExIDAgMjEtOCAyMS0yMiAwLTEuMy0uMi0yLjctLjUtNCIvPjwvZGVmcz48Y2xpcFBhdGggaWQ9ImIiPjx1c2UgeGxpbms6aHJlZj0iI2EiIG92ZXJmbG93PSJ2aXNpYmxlIi8+PC9jbGlwUGF0aD48cGF0aCBmaWxsPSIjRkJCQzA1IiBkPSJNMCAzN1YxMWwxNyAxM3oiIGNsaXAtcGF0aD0idXJsKCNiKSIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im0wIDExIDE3IDEzIDctNi4xTDQ4IDE0VjBIMHoiIGNsaXAtcGF0aD0idXJsKCNiKSIvPjxwYXRoIGZpbGw9IiMzNEE4NTMiIGQ9Im0wIDM3IDMwLTIzIDcuOSAxTDQ4IDB2NDhIMHoiIGNsaXAtcGF0aD0idXJsKCNiKSIvPjxwYXRoIGZpbGw9IiM0Mjg1RjQiIGQ9Ik00OCA0OCAxNyAyNGwtNC0zIDM1LTEweiIgY2xpcC1wYXRoPSJ1cmwoI2IpIi8+PC9zdmc+"
+      },
+      "displayName": "Google Gemini Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 37,
+      "name": "Lead Generation"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

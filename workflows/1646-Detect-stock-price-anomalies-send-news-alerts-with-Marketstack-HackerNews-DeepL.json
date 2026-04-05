@@ -1,0 +1,1445 @@
+{
+  "id": 10306,
+  "name": "Detect stock price anomalies & send news alerts with Marketstack, HackerNews & DeepL",
+  "views": 786,
+  "recentViews": 0,
+  "totalViews": 786,
+  "createdAt": "2025-10-30T07:18:52.364Z",
+  "description": "## Price Anomaly Detection & News Alert (Marketstack + HN + DeepL + Slack)\n\n## Overview\nThis workflow monitors a stock’s closing price via **Marketstack**. It computes a **20-day moving average** and **standard deviation (±2σ)**. If the latest close is outside ±2σ, it flags an **anomaly**, fetches **related headlines from Hacker News**, **translates** them to Japanese with **DeepL**, and **posts both original and translated text to Slack**. When no anomaly is detected, it sends a concise “normal” report.\n\n## How it works\n1) Daily trigger at 09:00 JST  \n2) Marketstack: fetch EOD data  \n3) Code: compute mean/σ and classify (normal/high/low)  \n4) IF: anomaly? → yes = news path / no = normal report  \n5) Hacker News: search related items  \n6) DeepL: translate EN → JA  \n7) Slack: send bilingual notification\n\n## Requirements\n- Marketstack API key\n- DeepL API key\n- Slack OAuth2 (bot token / channel permission)\n\n## Notes\n- Edit the ticker in **Get Stock Data**.\n- Adjust **N** (days) and **k** (sigma multiplier) in **Calculate Deviation**.\n- Keep credentials out of HTTP nodes (use n8n Credentials).\n",
+  "workflow": {
+    "id": "72lks0Gu4Zqi4t0i",
+    "meta": {
+      "instanceId": "15d6057a37b8367f33882dd60593ee5f6cc0c59310ff1dc66b626d726083b48d",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Stock Price Anomaly Detection and Related News Automatic Notification Workflow",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "a69b05fc-16c6-4f68-bd14-717b647ad900",
+        "name": "Daily Check",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -544,
+          0
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "triggerAtHour": 9
+              },
+              {}
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "7ab68dfb-380e-4880-a948-89ad068e7533",
+        "name": "Get Stock Data",
+        "type": "n8n-nodes-base.marketstack",
+        "position": [
+          -320,
+          0
+        ],
+        "parameters": {
+          "filters": {
+            "dateTo": "2025-09-30T00:00:00",
+            "latest": false,
+            "dateFrom": "2025-09-01T00:00:00"
+          },
+          "symbols": "AMZN"
+        },
+        "credentials": {
+          "marketstackApi": {
+            "id": "credential-id",
+            "name": "marketstackApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e8b1795e-59dd-4c7a-9db0-78d3e3228b25",
+        "name": "Calculate Deviation",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -96,
+          0
+        ],
+        "parameters": {
+          "jsCode": "// === パラメータ設定 ===\nconst N = 20;   // 移動平均の期間\nconst k = 2;    // σの倍率（±2σ）\n\n// === データ取得 ===\nlet data = [];\n\n// Marketstackの出力構造をチェック\nif (items[0].json.data) {\n  // 通常ケース（Marketstackノードからそのまま）\n  data = items[0].json.data;\n} else {\n  // 予備パターン：items配列にデータが直接並んでいるケース\n  data = items.map(item => item.json);\n}\n\n// N件だけ抽出\ndata = data.slice(0, N);\n\n// === 終値のみ抽出 ===\nconst closes = data.map(d => d.close).filter(v => typeof v === 'number');\n\n// データがない場合の対策\nif (closes.length === 0) {\n  return [{ json: { error: \"No valid close data found.\" } }];\n}\n\n// === 移動平均と標準偏差を計算 ===\nconst mean = closes.reduce((a, b) => a + b, 0) / closes.length;\nconst variance = closes.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / closes.length;\nconst sigma = Math.sqrt(variance);\n\n// === 最新値（先頭） ===\nconst latestClose = closes[0] + 100;\n\n// === 判定 ===\nlet status = \"normal\";\nif (latestClose > mean + k * sigma) {\n  status = \"high (above +2σ)\";\n} else if (latestClose < mean - k * sigma) {\n  status = \"low (below -2σ)\";\n}\n\n// === 出力 ===\nreturn [\n  {\n    json: {\n      mean: mean.toFixed(2),\n      sigma: sigma.toFixed(2),\n      upper: (mean + k * sigma).toFixed(2),\n      lower: (mean - k * sigma).toFixed(2),\n      latest: latestClose.toFixed(2),\n      status,\n      count: closes.length\n    }\n  }\n];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "5f5c9951-f936-495d-985f-7ae2108d2787",
+        "name": "Is Anomaly? (status != \"normal\")",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          128,
+          0
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "f79f5888-e19f-4273-81b7-5b6f434fea65",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEquals"
+                },
+                "leftValue": "={{$json[\"status\"]}}",
+                "rightValue": "=normal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "830c1c3b-92d7-42c2-a698-ec213787ace9",
+        "name": "Get Related News",
+        "type": "n8n-nodes-base.hackerNews",
+        "position": [
+          800,
+          96
+        ],
+        "parameters": {
+          "resource": "all",
+          "additionalFields": {
+            "keyword": "={{ $json.keyword }}"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "31e2ca1d-9c30-4dbc-9a67-54e12ca974a3",
+        "name": "Translate News",
+        "type": "n8n-nodes-base.deepL",
+        "position": [
+          1248,
+          32
+        ],
+        "parameters": {
+          "text": "={{ $json.message }}",
+          "translateTo": "JA",
+          "additionalFields": {}
+        },
+        "credentials": {
+          "deepLApi": {
+            "id": "credential-id",
+            "name": "deepLApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "478fdb62-dde4-40e3-9e0b-2676330f91c0",
+        "name": "Send Alert to Slack",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          1696,
+          96
+        ],
+        "webhookId": "e0a002a8-b1df-41ff-a431-459120a37e77",
+        "parameters": {
+          "text": "=🌐 *Original (English)*  \n{{ $json.message }}\n\n---\n\n🇯🇵 *Translated (Japanese)*  \n{{ $json.text }}",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "CKUCBTG0H",
+            "cachedResultName": "general"
+          },
+          "otherOptions": {},
+          "authentication": "oAuth2"
+        },
+        "credentials": {
+          "slackOAuth2Api": {
+            "id": "credential-id",
+            "name": "slackOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "7ea2b37e-e074-400d-9e3b-28ac0bc9c816",
+        "name": "Send Normal Report to Slack",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          352,
+          -96
+        ],
+        "webhookId": "b0f44cfc-ae30-4339-9428-c4fb468f900e",
+        "parameters": {
+          "text": "=✅ 異常なし この銘柄の終値は安定しています。 現在値：{{ $('Calculate Deviation').item.json.latest }}（平均 {{ $('Calculate Deviation').item.json.mean }} ± {{ $('Calculate Deviation').item.json.sigma }})",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "CKUCBTG0H",
+            "cachedResultName": "general"
+          },
+          "otherOptions": {},
+          "authentication": "oAuth2"
+        },
+        "credentials": {
+          "slackOAuth2Api": {
+            "id": "credential-id",
+            "name": "slackOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 2.3
+      },
+      {
+        "id": "34c1613d-306b-47fa-b982-db156c54e053",
+        "name": "Merge Original + Translated",
+        "type": "n8n-nodes-base.merge",
+        "position": [
+          1472,
+          96
+        ],
+        "parameters": {},
+        "typeVersion": 3.2
+      },
+      {
+        "id": "be7b89c0-99ac-44cb-aec0-03b844bc50f5",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -640,
+          -224
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 224,
+          "height": 192,
+          "content": "## Daily Check (09:00 JST)\n\nStarts the workflow every morning at 09:00 JST. Adjust schedule/timezone as needed."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2ea66681-b507-4737-a6f4-0d0c2590646f",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -400,
+          208
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 192,
+          "content": "## Get Stock Data (Marketstack)\nRetrieves the latest EOD prices for the configured ticker. Edit symbol and date range. Keep the limit ≥ 20 for a stable mean/σ."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e85baa53-b0ed-4017-98b0-e7a07a88c7aa",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1472,
+          304
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 624,
+          "height": 256,
+          "content": "## Customization Tips\n\n- Monitor multiple tickers: duplicate **Get Stock Data** and merge results.\n- Replace Hacker News with **NewsAPI** / **Google News RSS** for broader coverage.\n- Switch Slack to **Telegram / Discord / Teams / LINE Messaging API**.\n- Add a **Set (Fields)** node to centralize user-configurable variables:\n  - `symbol` (ticker), `days` (N), `sigmaK` (k), `newsQuery`, `slackChannel`\n- Add an **IF** to translate only when language != JA (cost optimization).\n\n\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "22cad535-6c1f-44c1-9018-910baa276cba",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -112,
+          496
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 400,
+          "height": 384,
+          "content": "## Node Structure Overview\n\nFlow:\n🕘 Daily Check (09:00) \n → 📊 Get Stock Data (Marketstack)\n → 🧮 Calculate Deviation (±2σ)\n → 🔀 IF: Is Anomaly? (status != \"normal\")\n\nTrue (Anomaly):\n  → 📰 Get Related News (Hacker News)\n  → ✍️ Format News (Title + Summary + URL)\n  → 🌐 Translate News (EN → JA, DeepL)\n  → 🔗 Merge Original + Translated\n  → 💬 Send Alert to Slack\n\nFalse (Normal):\n  → 💬 Send Normal Report to Slack\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fa231074-0537-4cc6-b33c-e90006605377",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          320,
+          352
+        ],
+        "parameters": {
+          "color": 7,
+          "height": 176,
+          "content": "## Send Normal Report to Slack\n\nSends a concise “no anomaly” message with basic stats.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2c8bbc35-0320-4350-b64f-e58eacd7c974",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -320,
+          -448
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 304,
+          "height": 272,
+          "content": "## 🛠️ Setup Instructions\n\n1. Connect your **Marketstack**, **DeepL**, and **Slack** credentials.\n2. Update ticker symbol inside “Get Stock Data”.\n3. Customize Slack channel in both Slack nodes.\n4. Modify time or schedule in “Daily Check” as needed.\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7fbb2805-1ffd-4ce6-86a6-04d9ba827191",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1184,
+          -288
+        ],
+        "parameters": {
+          "width": 480,
+          "height": 816,
+          "content": "## Price Anomaly Detection & News Alert (Marketstack + HN + DeepL + Slack)\n\n## Overview\nThis workflow monitors a stock’s closing price via **Marketstack**. It computes a **20-day moving average** and **standard deviation (±2σ)**. If the latest close is outside ±2σ, it flags an **anomaly**, fetches **related headlines from Hacker News**, **translates** them to Japanese with **DeepL**, and **posts both original and translated text to Slack**. When no anomaly is detected, it sends a concise “normal” report.\n\n## How it works\n1) Daily trigger at 09:00 JST  \n2) Marketstack: fetch EOD data  \n3) Code: compute mean/σ and classify (normal/high/low)  \n4) IF: anomaly? → yes = news path / no = normal report  \n5) Hacker News: search related items  \n6) DeepL: translate EN → JA  \n7) Slack: send bilingual notification\n\n## Requirements\n- Marketstack API key\n- DeepL API key\n- Slack OAuth2 (bot token / channel permission)\n\n## Notes\n- Edit the ticker in **Get Stock Data**.\n- Adjust **N** (days) and **k** (sigma multiplier) in **Calculate Deviation**.\n- Keep credentials out of HTTP nodes (use n8n Credentials).\n"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4a60a88c-3f9d-4919-9f8e-769138eebad2",
+        "name": "Sticky Note7",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -192,
+          -160
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 256,
+          "content": "## Calculate Deviation\n\nComputes 20-day mean and standard deviation; classifies the latest close as normal, high (+2σ), or low (−2σ)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d3e597a0-0400-400d-970d-f179bf3c574c",
+        "name": "Sticky Note8",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          32,
+          176
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 256,
+          "height": 176,
+          "content": "## Is Anomaly? (status != \"normal\")\n\nBranches to the news path only when the latest close exceeds ±2σ."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cb2c48c9-349d-4c3e-9f17-ed4636ca0b82",
+        "name": "Sticky Note9",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          720,
+          288
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 256,
+          "height": 176,
+          "content": "## Get Related News (Hacker News)\n\nSearches articles by the ticker/company keyword. You can switch to NewsAPI/Google RSS."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8a824d8c-3d66-4838-9c5e-a8708afcfa1d",
+        "name": "Sticky Note10",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          944,
+          -208
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 256,
+          "height": 176,
+          "content": "## Format News (Title + Summary + URL)\n\nCleans HTML (e.g., <em>) and formats top items for translation/Slack."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1ef7949a-e396-449a-b21c-4e72e7031c38",
+        "name": "Sticky Note11",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1232,
+          -208
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 208,
+          "height": 176,
+          "content": "## Translate News (EN → JA)\n\nDeepL translation to Japanese. Change target_lang if needed."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4a410b17-9763-4723-a5f2-61fb6ab50fd7",
+        "name": "Sticky Note12",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1504,
+          -208
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 208,
+          "height": 176,
+          "content": "## Merge Original + Translated\n\nAppends original English and translated Japanese into one message payload."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0d5d6b48-6983-4136-80e3-0cf9de926972",
+        "name": "Sticky Note13",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1744,
+          -208
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 208,
+          "height": 176,
+          "content": "## Send Alert to Slack (Anomaly)\n\nSends bilingual alert with stats (latest, mean, σ) and related news."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "fe474a5c-9358-4f1b-ad07-b2ae6169c280",
+        "name": "Add Symbol Field",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          352,
+          96
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "a1de4889-f506-46c6-8189-4e173dad6c39",
+                "name": "symbol",
+                "type": "string",
+                "value": "={{$item(0).$node[\"Get Stock Data\"].json[\"symbol\"]}}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "ad957b08-b108-427e-9843-b48be879cb3b",
+        "name": "Compose Slack Message",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1024,
+          96
+        ],
+        "parameters": {
+          "jsCode": "// === Hacker News 出力からタイトル・本文・URLを整形 ===\nconst results = items.map(item => {\n  const highlight = item.json._highlightResult || {};\n\n  const title =\n    highlight.title?.value ||\n    item.json.title ||\n    \"No Title\";\n\n  const story =\n    highlight.story_text?.value ||\n    item.json.story_text ||\n    \"No summary available.\";\n\n  const url =\n    item.json.url ||\n    highlight.url?.value ||\n    \"No URL\";\n\n  // === HTMLタグ（<em>など）を除去 ===\n  const cleanTitle = title.replace(/<[^>]*>/g, \"\");\n  const cleanStory = story.replace(/<[^>]*>/g, \"\");\n\n  return `📰 ${cleanTitle}\\n${cleanStory}\\n🔗 ${url}`;\n});\n\n// === 出力 ===\nreturn [\n  {\n    json: {\n      message: results.slice(0, 3).join(\"\\n\\n---\\n\\n\"), // 上位3件を区切って結合\n    },\n  },\n];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "a5ecf56c-8e7d-42da-9335-a2b1a08b71a1",
+        "name": "Build News Keyword",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          576,
+          96
+        ],
+        "parameters": {
+          "jsCode": "const map = {\n  AMZN: 'Amazon',\n  AAPL: 'Apple',\n  GOOG: 'Google',\n  MSFT: 'Microsoft',\n  TSLA: 'Tesla',\n};\n\n// 入力の中身を確認\nconsole.log('INPUT items:', items);\n\nconst first = (items && items[0] && items[0].json) ? items[0].json : {};\nconst symbol = String(first.symbol || first.ticker || '').toUpperCase();\n\nif (!symbol) {\n  // symbolが無い時は理由と入力を返して可視化\n  return [\n    {\n      json: {\n        error: 'symbol is missing',\n        debugInput: first,\n      },\n    },\n  ];\n}\n\nconst keyword = map[symbol] || symbol;\n\nreturn [\n  {\n    json: { keyword, symbol },\n  },\n];\n"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "e90eb5a4-58e8-4a2d-82c3-30862bc8832f",
+    "connections": {
+      "Daily Check": {
+        "main": [
+          [
+            {
+              "node": "Get Stock Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Stock Data": {
+        "main": [
+          [
+            {
+              "node": "Calculate Deviation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Translate News": {
+        "main": [
+          [
+            {
+              "node": "Merge Original + Translated",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Add Symbol Field": {
+        "main": [
+          [
+            {
+              "node": "Build News Keyword",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Related News": {
+        "main": [
+          [
+            {
+              "node": "Compose Slack Message",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build News Keyword": {
+        "main": [
+          [
+            {
+              "node": "Get Related News",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Calculate Deviation": {
+        "main": [
+          [
+            {
+              "node": "Is Anomaly? (status != \"normal\")",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Alert to Slack": {
+        "main": [
+          []
+        ]
+      },
+      "Compose Slack Message": {
+        "main": [
+          [
+            {
+              "node": "Translate News",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Merge Original + Translated",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Merge Original + Translated": {
+        "main": [
+          [
+            {
+              "node": "Send Alert to Slack",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Anomaly? (status != \"normal\")": {
+        "main": [
+          [
+            {
+              "node": "Add Symbol Field",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Send Normal Report to Slack",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 26,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 3
+      },
+      "n8n-nodes-base.deepL": {
+        "count": 1
+      },
+      "n8n-nodes-base.merge": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 2
+      },
+      "n8n-nodes-base.hackerNews": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 14
+      },
+      "n8n-nodes-base.marketstack": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "noda",
+    "username": "shusaku",
+    "bio": "",
+    "verified": true,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/d7d8bc588c7d848fe34a4c0247043818087870cf4bd774d1b11ce444753af048?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "icon": "file:merge.svg",
+      "name": "n8n-nodes-base.merge",
+      "codex": {
+        "data": {
+          "alias": [
+            "Join",
+            "Concatenate",
+            "Wait"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-to-sync-data-between-two-systems/",
+                "icon": "🏬",
+                "label": "How to synchronize data between two systems (one-way vs. two-way sync"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/migrating-community-metrics-to-orbit-using-n8n/",
+                "icon": "📈",
+                "label": "Migrating Community Metrics to Orbit using n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.merge/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Merge"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTc3XzUxOCkiPgo8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTAgNDhDMCAyMS40OTAzIDIxLjQ5MDMgMCA0OCAwSDExMkMxMzguNTEgMCAxNjAgMjEuNDkwMyAxNjAgNDhWNTZIMTk2LjI1MkMyNDAuNDM1IDU2IDI3Ni4yNTIgOTEuODE3MiAyNzYuMjUyIDEzNlYxOTJDMjc2LjI1MiAyMTQuMDkxIDI5NC4xNjEgMjMyIDMxNi4yNTIgMjMySDM1MlYyMjRDMzUyIDE5Ny40OSAzNzMuNDkgMTc2IDQwMCAxNzZINDY0QzQ5MC41MSAxNzYgNTEyIDE5Ny40OSA1MTIgMjI0VjI4OEM1MTIgMzE0LjUxIDQ5MC41MSAzMzYgNDY0IDMzNkg0MDBDMzczLjQ5IDMzNiAzNTIgMzE0LjUxIDM1MiAyODhWMjgwSDMxNi4yNTJDMjk0LjE2MSAyODAgMjc2LjI1MiAyOTcuOTA5IDI3Ni4yNTIgMzIwVjM3NkMyNzYuMjUyIDQyMC4xODMgMjQwLjQzNSA0NTYgMTk2LjI1MiA0NTZIMTYwVjQ2NEMxNjAgNDkwLjUxIDEzOC41MSA1MTIgMTEyIDUxMkg0OEMyMS40OTAzIDUxMiAwIDQ5MC41MSAwIDQ2NFY0MDBDMCAzNzMuNDkgMjEuNDkwMyAzNTIgNDggMzUySDExMkMxMzguNTEgMzUyIDE2MCAzNzMuNDkgMTYwIDQwMFY0MDhIMTk2LjI1MkMyMTMuOTI1IDQwOCAyMjguMjUyIDM5My42NzMgMjI4LjI1MiAzNzZWMzIwQzIyOC4yNTIgMjk0Ljc4NCAyMzguODU5IDI3Mi4wNDQgMjU1Ljg1MyAyNTZDMjM4Ljg1OSAyMzkuOTU2IDIyOC4yNTIgMjE3LjIxNiAyMjguMjUyIDE5MlYxMzZDMjI4LjI1MiAxMTguMzI3IDIxMy45MjUgMTA0IDE5Ni4yNTIgMTA0SDE2MFYxMTJDMTYwIDEzOC41MSAxMzguNTEgMTYwIDExMiAxNjBINDhDMjEuNDkwMyAxNjAgMCAxMzguNTEgMCAxMTJWNDhaTTEwNCA0OEMxMDguNDE4IDQ4IDExMiA1MS41ODE3IDExMiA1NlYxMDRDMTEyIDEwOC40MTggMTA4LjQxOCAxMTIgMTA0IDExMkg1NkM1MS41ODE3IDExMiA0OCAxMDguNDE4IDQ4IDEwNFY1NkM0OCA1MS41ODE3IDUxLjU4MTcgNDggNTYgNDhIMTA0Wk00NTYgMjI0QzQ2MC40MTggMjI0IDQ2NCAyMjcuNTgyIDQ2NCAyMzJWMjgwQzQ2NCAyODQuNDE4IDQ2MC40MTggMjg4IDQ1NiAyODhINDA4QzQwMy41ODIgMjg4IDQwMCAyODQuNDE4IDQwMCAyODBWMjMyQzQwMCAyMjcuNTgyIDQwMy41ODIgMjI0IDQwOCAyMjRINDU2Wk0xMTIgNDA4QzExMiA0MDMuNTgyIDEwOC40MTggNDAwIDEwNCA0MDBINTZDNTEuNTgxNyA0MDAgNDggNDAzLjU4MiA0OCA0MDhWNDU2QzQ4IDQ2MC40MTggNTEuNTgxNyA0NjQgNTYgNDY0SDEwNEMxMDguNDE4IDQ2NCAxMTIgNDYwLjQxOCAxMTIgNDU2VjQwOFoiIGZpbGw9IiM1NEI4QzkiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTc3XzUxOCI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Merge",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 342,
+      "icon": "file:hackernews.png",
+      "name": "n8n-nodes-base.hackerNews",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-goals-level-up-your-vocabulary-with-vonage-and-n8n/",
+                "icon": "🎯",
+                "label": "2021 Goals: Level Up Your Vocabulary With Vonage and n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.hackernews/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "Marketing"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Hacker News"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADwAAAA8CAMAAAANIilAAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAACrFBMVEUAAAD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD/ZgD+ZQD+ZAD+ZgD/ZQD8chf8hzn9hjj7fiv+ZwP8cBL9hjf9hzj7eCD+ZgH7gS/959j/+PT/9/L+9/P75dX7fy39ZAD9ZQH8sH3+9/L88ef7lE79ZwP9uo79///////+///8t4n9ZgH8fCf86dv70bL9bQ3/ZAD9fir76t386979fiv7sYD7/v78kUr+ZQH8//76tof8ZgL8fCn96t37yqb+agj8eSL85tX8fSr7tYX99Ov8ij/7qXL9/fv8fCj76tv7wpz8aAf9dBv838v8fiv8tYX87+X9hDP8oWT8+/j6tYX8fSn86t37uo/+ZgP+cBL717786tv8fSj9ZgL7mVf9+fX//v/9//37soH97eD9/v38soD9bQ760LL66dn8eyb6t4j85dX9eSL8kUv99/H7soD6fyv76938/fv7qnP9ZAH8agr6yaf66Nn7fCX+ZgL7uIn738n8dRv8iT388ur///78//36sH77fyv87N79/Pr8omX+aAT9wZr85tb8eSH9ZQD7t4f8///72cH8cRX8hDX87+T9/fz6pm38eyj969/9+vj8m1r9ZgT6uIv73Mb7vZT+/v7907f9bQ/8fir86tz+/Pv8+fT+//779/H7k0/8ZQL6sH37zKr8awr8eCH75dP99ez7jUL7qXH+/fz6w5z8aAj9hTb+9e/++/f9k03+YwD+9e7++vX+jkP++vb+jkT/9e79hDT+9u/9+/f+j0b8fy3838n96Nj859f849D9iTv+aQb+dBj+dRr+dRn+agfY0XAQAAAAInRSTlMAAAosXI641+v4/gYwdLfjDU+r6ge69y6k9WXeFpUjsynDSy44jgAAAAFiS0dEQYnebE4AAAAJcEhZcwAACxMAAAsTAQCanBgAAAAHdElNRQfkBgoOCCvPB7iyAAADiUlEQVRIx6VX9V/bUBBPoaUEKFCGQylL0gymzGHay7SDMXf3jbm7u7u7u7u7u7v/I7u0dG3S99r00/utl/v2++7e2WMYlehkCQvXGyKMkWxUFBtpjDDow8Ocasa/yCbRMabYOJbzEjYu1hQTHQAuf443J5ThCFImwRzvD46fEs1JyRxFkpPMiVQ0fkhJTeP8SFpqChkt06ZncAEkI51EjqpMC8sFFNaS6YNGRZaV0yTWLBUaf2aX5TRK2WwlGnk1YxGd5Q1Gf61cEGLN9KAxzhYuKLEkutHoQTobHJhNd7uNueF1v7wgi8rYJspK3ua57xQXGA+d6jETy+Xk5uaUr6AE8xUrVc7NqZLn0aS6Dq7Tmb1yUqxarXqNmrVq5yvABXVq1qhbr77XgdLMMhjrKMnbrkFDO0j2Ro0VxE2aAkjNmtu8dElYYzKxoo4cLQoBoKil6FHlFRS3AqjbWhGJZJlaF52g9K9NsQTQtl17j0bo0FECe6fOosIuIRrBMara57t0lUAq6sb/D3VedztAj54OVXeIQbBJfYl8r97oYff/oeX79MV/69dfbWfSMWGxaqU4YCAaFw5yUzcejH4MKVHfPRcbxoTH+eSPMHQYBnx4QSnxiJH4a9RoH7O4cEbvm5nimLHINW68K0AThrfFc5QXfHNUzxgIqZs/cdJkmDLVSS3UnibB9Bk8wczARBC0tpmzMFNmz0Fq24S5GIB580WCWQRjJFWNY8FCAPsipOMXL5Fg6bLlJCsjE0lSiytWIvWq1Ty3Zi26v2496dRcJEOu5PwNG2HT5i28sHUbSNt3COSqZqLI5b5zF2b47j179+0H+4GDRGIuigYWDh2W4MjRY8clOHGSTIxgSgOynTqNXp85ew7g/AVaMyIHTA74xUsAl69cla5dpxBjwIy0Jnfj5nSAqyDduk2zMBKTxOX1nbt4S9K9+zRiTBIDtb8KDx5ipjx6bKMZGEiF4QY/eQrw7PkLavPWk0rSDS55CfDqtYP2HUvStxkowG/eUsHYDHzbkFawidAAtYKdDVDderWCna1X1fS1gl1NXzVutIKd40Y16LSCXYNONWK1gktHrGq4awO7hzt1rRBK3tHAnrWCttAI7z9I0sdPDr8LDW2VEj5/+frt+w+H/1WKtsT9/PX795+/gZY42vooogReH0NaXENbmUNb1kN7JoT4QAntaRTaoyzY5+A/CkvsJFPewR8AAAAZdEVYdENvbW1lbnQAQ3JlYXRlZCB3aXRoIEdJTVBXgQ4XAAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDIwLTA2LTEwVDE0OjA4OjIzKzAwOjAwK0pwVgAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyMC0wNi0xMFQxNDowODoyMyswMDowMFoXyOoAAAAASUVORK5CYII="
+      },
+      "displayName": "Hacker News",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 27,
+          "name": "Marketing"
+        }
+      ]
+    },
+    {
+      "id": 470,
+      "icon": "file:deepl.svg",
+      "name": "n8n-nodes-base.deepL",
+      "codex": {
+        "data": {
+          "alias": [
+            "Translate",
+            "Translator"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.deepl/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/deepl/"
+              }
+            ]
+          },
+          "categories": [
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\",\"output\"]",
+      "defaults": {
+        "name": "DeepL"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTE5Ljk0MjkgMEMyMC4wNDc0IDAgMjAuMTExMiAwLjAwNTc5Nzk0IDIwLjE4NjYgMC4wMTE1OTU5QzIwLjI0NDYgMC4wMTczOTM4IDIwLjMyIDAuMDI4OTg5NyAyMC4zNTQ5IDAuMDM0Nzg3N0MyMC4zODk3IDAuMDQwNTg1NiAyMC40NTM1IDAuMDU3OTc5NCAyMC40OTQxIDAuMDYzNzc3NEMyMC41MzQ3IDAuMDc1MzczMiAyMC42MTAxIDAuMDk4NTY1IDIwLjY2MjMgMC4xMTU5NTlDMjAuNzA4OCAwLjEyNzU1NSAyMC43OSAwLjE1NjU0NCAyMC44MzY0IDAuMTc5NzM2QzIwLjg4MjggMC4xOTcxMyAyMC45NTI0IDAuMjMxOTE4IDIwLjk4NzIgMC4yNDkzMTJDMjEuMDI3OCAwLjI3MjUwMyAyNC4xNTQ5IDIuMDgxNDYgMjcuOTM3NiA0LjI3ODg4QzMxLjcyMDMgNi40NzA1IDM0Ljg0NzQgOC4yODUyNiAzNC44ODggOC4zMTQyNUMzNC45Mjg2IDguMzQzMjQgMzQuOTk4MiA4LjM5NTQyIDM1LjA0NDYgOC40MzAyMUMzNS4wODUyIDguNDY0OTkgMzUuMTYwNyA4LjUyODc3IDM1LjIwNzEgOC41NzUxNkMzNS4yNTM1IDguNjIxNTQgMzUuMzE3MyA4LjY4NTMyIDM1LjM0NjMgOC43MjAxQzM1LjM3NTMgOC43NDkwOSAzNS40MTU5IDguODAxMjggMzUuNDM5MSA4LjgzNjA2QzM1LjQ2ODEgOC44NzA4NSAzNS41MDMgOC45MTcyMyAzNS41MjA0IDguOTQ2MjJDMzUuNTQzNiA4Ljk3NTIxIDM1LjU3ODQgOS4wMzMxOSAzNS42MDE2IDkuMDczNzhDMzUuNjI0OCA5LjExNDM2IDM1LjY1OTYgOS4xODM5NCAzNS42NzcgOS4yMTg3M0MzNS42OTQ0IDkuMjU5MzEgMzUuNzI5MiA5LjMyODg5IDM1Ljc0NjYgOS4zNzUyN0MzNS43NjQgOS40MjE2NSAzNS43ODcyIDkuNDg1NDMgMzUuNzk4OCA5LjUyMDIyQzM1LjgxMDQgOS41NjA4MSAzNS44Mjc4IDkuNjE4NzkgMzUuODM5NSA5LjY1OTM3QzM1Ljg0NTMgOS42OTk5NiAzNS44NjI3IDkuNzY5NTMgMzUuODY4NSA5LjgxNTkyQzM1Ljg4MDEgOS44NTY1IDM1Ljg5MTcgOS45MzE4NyAzNS44OTc1IDkuOTcyNDZDMzUuOTAzMyAxMC4wNDIgMzUuOTAzMyAxMC41MzQ5IDM1LjkwOTEgMTguMTE4NkMzNS45MDkxIDIzLjg4MTcgMzUuOTA5MSAyNi4yMTgzIDM1LjkwMzMgMjYuMjgyMUMzNS44OTc1IDI2LjMyODUgMzUuODkxNyAyNi40MDM4IDM1Ljg4NTkgMjYuNDUwMkMzNS44ODAxIDI2LjQ5MDggMzUuODY4NSAyNi41NDg4IDM1Ljg2MjcgMjYuNTcyQzM1Ljg1NjkgMjYuNjAxIDM1Ljg0NTMgMjYuNjUzMSAzNS44Mzk1IDI2LjY5MzdDMzUuODI3OCAyNi43Mjg1IDM1LjgwNDYgMjYuNzk4MSAzNS43OTMgMjYuODQ0NUMzNS43NzU2IDI2Ljg5MDkgMzUuNzUyNCAyNi45NjA0IDM1LjczNSAyNi45OTUyQzM1LjcyMzQgMjcuMDM1OCAzNS43MDAyIDI3LjA4OCAzNS42ODI4IDI3LjExN0wzNS42MTkgMjcuMjQ0NUMzNS41OTU4IDI3LjI4NTEgMzUuNTU1MiAyNy4zNDg5IDM1LjUzMiAyNy4zODk1QzM1LjUwODggMjcuNDI0MyAzNS40NjgxIDI3LjQ4MjIgMzUuNDM5MSAyNy41MTdDMzUuNDE1OSAyNy41NDYgMzUuMzgxMSAyNy41OTI0IDM1LjM1NzkgMjcuNjE1NkMzNS4zMzQ3IDI3LjY0NDYgMzUuMjg4MyAyNy42OTY4IDM1LjI0NzcgMjcuNzM3NEMzNS4yMDcxIDI3Ljc3NzkgMzUuMTQ5MSAyNy44MzAxIDM1LjEyMDEgMjcuODU5MUMzNS4wODUyIDI3Ljg4ODEgMzUuMDMzIDI3LjkzNDUgMzQuOTk4MiAyNy45NTc3QzM0Ljk2OTIgMjcuOTgwOSAzNC45MTEyIDI4LjAyMTUgMzQuODcwNiAyOC4wNDQ2QzM0LjgzNTggMjguMDczNiAzMy4wMDI0IDI5LjEzNDcgMzAuODAzNiAzMC40MTAyQzI4LjU5OSAzMS42ODU4IDI2Ljc5NDcgMzIuNzM1MiAyNi43ODg5IDMyLjc0MUMyNi43ODMxIDMyLjc0NjggMjYuNjYxMiAzMi44MTY0IDI2LjUxNjIgMzIuODk3NUMyNi4zNzEyIDMyLjk4NDUgMjYuMjI2MSAzMy4wNjU3IDI2LjE5NzEgMzMuMDgzMUMyNi4xNjgxIDMzLjEwMDQgMjYuMTM5MSAzMy4xMTc4IDI2LjEyNzUgMzMuMTI5NEMyNi4xMTU5IDMzLjEzNTIgMjYuMDgxMSAzMy4xNjQyIDI2LjA0NjMgMzMuMTkzMkwyNS45NDE4IDMzLjI5NzZDMjUuOTE4NiAzMy4zMjY2IDI1Ljg4MzggMzMuMzczIDI1Ljg2MDYgMzMuNDAxOUMyNS44NDMyIDMzLjQyNTEgMjUuODA4NCAzMy40ODMxIDI1Ljc4NTIgMzMuNTIzN0MyNS43NjIgMzMuNTY0MyAyNS43Mzg4IDMzLjYyMjMgMjUuNzI3MiAzMy42NTEzQzI1LjcxNTYgMzMuNjgwMiAyNS42OTgyIDMzLjczMjQgMjUuNjkyNCAzMy43NjcyQzI1LjY4MDggMzMuNzk2MiAyNS42NjkyIDMzLjg0ODQgMjUuNjY5MiAzMy44ODMyQzI1LjY1NzYgMzMuOTI5NiAyNS42NTc2IDM0LjAxMDcgMjUuNjUxOCAzNC4zMDY0QzI1LjY1MTggMzQuNTA5MyAyNS42NDYgMzUuMDg5MSAyNS42NDAyIDM1LjYwNTJDMjUuNjM0NCAzNi40NDU5IDI1LjYzNDQgMzYuNzAxIDI1LjY0NiAzOC4yNjY0QzI1LjY1MTggMzkuMjIzMSAyNS42NTE4IDQwIDI1LjY1MTggNDBMMjIuMzE1OCAzOC4wNjkzQzIwLjQ4MjUgMzcuMDAyNSAxOC45NTA5IDM2LjExNTQgMTguOTE2IDM2LjA5OEMxOC44ODEyIDM2LjA4MDYgMTUuNzU5OSAzNC4yNjU4IDExLjk3NzMgMzIuMDc0MkM4LjE5NDU5IDI5Ljg4MjYgNS4wNjc1IDI4LjA2MiA1LjAyNjg5IDI4LjAzM0M0Ljk4NjI4IDI4LjAwOTkgNC45MjI0NiAyNy45NjM1IDQuODg3NjUgMjcuOTM0NUM0Ljg1Mjg0IDI3LjkwNTUgNC43ODkwMiAyNy44NTMzIDQuNzQ4NDEgMjcuODE4NUM0LjcxMzYgMjcuNzgzNyA0LjY0OTc4IDI3LjcyNTggNC42MTQ5NyAyNy42ODUyQzQuNTgwMTYgMjcuNjQ0NiA0LjUzMzc1IDI3LjU5MjQgNC41MTA1NSAyNy41NjM0QzQuNDg3MzQgMjcuNTM0NCA0LjQ1MjUzIDI3LjQ4OCA0LjQyOTMyIDI3LjQ1MzNDNC40MDYxMiAyNy40MjQzIDQuMzcxMzEgMjcuMzY2MyA0LjM0ODEgMjcuMzMxNUM0LjMyNDg5IDI3LjI5NjcgNC4yOTAwOCAyNy4yMzI5IDQuMjY2ODggMjcuMTg2NUM0LjI0MzY3IDI3LjE0NiA0LjIwODg2IDI3LjA3MDYgNC4xOTE0NSAyNy4wMjQyQzQuMTY4MjUgMjYuOTc3OCA0LjEzOTI0IDI2LjkwMjQgNC4xMjE4MyAyNi44NTYxQzQuMTEwMjMgMjYuODA5NyA0LjA4NzAyIDI2LjczNDMgNC4wNzU0MiAyNi42OTk1QzQuMDY5NjIgMjYuNjU4OSA0LjA1MjIxIDI2LjYwMSA0LjA0NjQxIDI2LjU2NjJDNC4wNDA2MSAyNi41MzE0IDQuMDM0ODEgMjYuNDc5MiA0LjAyOTAxIDI2LjQzODZDNC4wMjMyMSAyNi40MDM4IDQuMDExNiAyNi4zMjI3IDQuMDExNiAyNi4yNjQ3QzQgMjYuMTcxOSA0IDI1LjIyMSA0IDE4LjE3NjVDNCAxMS4wOTE1IDQgMTAuMTgxMiA0LjAxMTYgMTAuMDg4NEM0LjAxMTYgMTAuMDMwNCA0LjAyMzIxIDkuOTU1MDcgNC4wMjkwMSA5LjkyMDI4QzQuMDM0ODEgOS44ODU0OSA0LjA0MDYxIDkuODIxNzEgNC4wNTIyMSA5Ljc4MTEzQzQuMDU4MDIgOS43NDYzNCA0LjA3NTQyIDkuNjgyNTYgNC4wODEyMiA5LjY0Nzc3TDQuMTMzNDQgOS40OTEyM0M0LjE0NTA0IDkuNDQ0ODUgNC4xNzk4NSA5LjM2MzY4IDQuMTk3MjYgOS4zMTcyOUM0LjIyMDQ2IDkuMjcwOTEgNC4yNjEwNyA5LjE4OTc0IDQuMjkwMDggOS4xNDMzNUM0LjMxMzI5IDkuMDkxMTcgNC4zNTk3IDkuMDE1OCA0LjM4ODcxIDguOTc1MjFDNC40MTc3MiA4LjkzNDYzIDQuNDU4MzMgOC44NzA4NSA0LjQ4NzM0IDguODM2MDZDNC41MTYzNSA4LjgwMTI4IDQuNTY4NTYgOC43NDMzIDQuNjAzMzcgOC43MDI3MUM0LjYzODE4IDguNjYyMTMgNC42OTYyIDguNTk4MzUgNC43MzY4MSA4LjU2MzU2QzQuNzc3NDIgOC41Mjg3NyA0LjgzNTQ0IDguNDc2NTkgNC44NzAyNSA4LjQ0NzZDNC45MDUwNiA4LjQyNDQxIDQuOTc0NjggOC4zNzIyMyA1LjAyNjg5IDguMzM3NDRDNS4wNzMzMSA4LjMwMjY1IDUuNDE1NiA4LjA5OTcyIDUuNzg2OTEgNy44OTFDNi4xNTI0MSA3LjY3NjQ4IDkuMjM4ODkgNS44NzkxMSAxMi42NDQ1IDMuODk2MjJDMTYuMDU1OCAxLjkxMzMyIDE4Ljg4MTIgMC4yNzI1MDMgMTguOTMzNCAwLjI0OTMxMkMxOC45Nzk5IDAuMjIwMzIyIDE5LjA2NjkgMC4xODU1MzQgMTkuMTE5MSAwLjE2MjM0MkMxOS4xNzEzIDAuMTM5MTUxIDE5LjI1MjUgMC4xMTU5NTkgMTkuMjkzMSAwLjA5ODU2NUMxOS4zMzM4IDAuMDg2OTY5MSAxOS40MDM0IDAuMDY5NTc1MyAxOS40NDQgMC4wNTc5Nzk0QzE5LjQ4NDYgMC4wNTIxODE1IDE5LjU1NDIgMC4wMzQ3ODc2IDE5LjU5NDggMC4wMjg5ODk3QzE5LjYzNTQgMC4wMjMxOTE4IDE5LjY5OTMgMC4wMTczOTM4IDE5LjczNDEgMC4wMTE1OTU5QzE5Ljc2ODkgMC4wMDU3OTc5NCAxOS43OTc5IDAuMDA1Nzk3OTQgMTkuNzk3OSAwTDE5Ljk0MjkgMFoiIGZpbGw9IiMwRjJCNDYiLz4KPHBhdGggZD0iTTE2LjExMzcgMTAuMjczOUMxNi4yMDY2IDEwLjI3MzkgMTYuMjk5NCAxMC4yNzk3IDE2LjM0NTggMTAuMjg1NUMxNi4zOTIyIDEwLjI5MTMgMTYuNDYxOCAxMC4zMDI5IDE2LjUwMjQgMTAuMzA4N0MxNi41NDg5IDEwLjMyMDMgMTYuNjE4NSAxMC4zMzE5IDE2LjY2NDkgMTAuMzQzNUMxNi43MDU1IDEwLjM1NTEgMTYuNzc1MSAxMC4zNzgzIDE2LjgxNTcgMTAuMzg5OUMxNi44NTY0IDEwLjQwMTUgMTYuOTE0NCAxMC40MjQ3IDE2Ljk0MzQgMTAuNDM2M0MxNi45NzI0IDEwLjQ0NzkgMTcuMDQyIDEwLjQ3NjkgMTcuMDk0MiAxMC41QzE3LjE0NjQgMTAuNTI5IDE3LjIxNjEgMTAuNTYzOCAxNy4yNTY3IDEwLjU4N0MxNy4yOTE1IDEwLjYwNDQgMTcuMzQ5NSAxMC42NDUgMTcuMzc4NSAxMC42NjI0QzE3LjQxMzMgMTAuNjg1NiAxNy40NjU1IDEwLjcyMDQgMTcuNDg4NyAxMC43NDM2QzE3LjUxNzcgMTAuNzYxIDE3LjU2NDIgMTAuNzk1NyAxNy41OTMyIDEwLjgyNDdDMTcuNjIyMiAxMC44NDc5IDE3LjY5MTggMTAuOTE3NSAxNy43NTU2IDEwLjk3NTVDMTcuODEzNiAxMS4wMzkzIDE3Ljg4OSAxMS4xMTQ2IDE3LjkxODEgMTEuMTQ5NEMxNy45NDEzIDExLjE4NDIgMTcuOTg3NyAxMS4yMzY0IDE4LjAxMDkgMTEuMjcxMkMxOC4wMzQxIDExLjMwNiAxOC4wODA1IDExLjM3NTUgMTguMTA5NSAxMS40MTYxQzE4LjEzODUgMTEuNDYyNSAxOC4xNzkxIDExLjU0MzcgMTguMjA4MSAxMS42MDE3QzE4LjIzNzEgMTEuNjUzOCAxOC4yNzIgMTEuNzQwOCAxOC4yOTUyIDExLjc4NzJDMTguMzEyNiAxMS44Mzk0IDE4LjMzNTggMTEuOTAzMSAxOC4zNDE2IDExLjkyNjNDMTguMzUzMiAxMS45NTUzIDE4LjM2NDggMTIuMDAxNyAxOC4zNzY0IDEyLjAzMDdDMTguMzgyMiAxMi4wNTk3IDE4LjM5MzggMTIuMTExOSAxOC40MDU0IDEyLjE1MjVDMTguNDExMiAxMi4xODcyIDE4LjQyMjggMTIuMjQ1MiAxOC40Mjg2IDEyLjI3NDJDMTguNDM0NCAxMi4zMDMyIDE4LjQ0MDIgMTIuMzYxMiAxOC40NDYgMTIuNDA3NkMxOC40NTE4IDEyLjQ0ODIgMTguNDU3NiAxMi41NDA5IDE4LjQ1NzYgMTIuNjA0N1YxMi44MTkyQzE4LjQ1MTggMTIuODY1NiAxOC40NDYgMTIuOTI5NCAxOC40NDAyIDEyLjk1ODRDMTguNDQwMiAxMi45ODE2IDE4LjQyODYgMTMuMDQ1MyAxOC40MjI4IDEzLjA4NTlDMTguNDExMiAxMy4xMzIzIDE4LjM5OTYgMTMuMTkwMyAxOC4zOTM4IDEzLjIyNTFDMTguMzgyMiAxMy4yNzE1IDE4LjM4MjIgMTMuMjg4OSAxOC4zODIyIDEzLjI4ODlDMTguMzg4IDEzLjI5NDcgMTkuODAzNiAxNC4xMTggMjQuNjY1NCAxNi45NTMyTDI0LjcxNzYgMTYuOTAxQzI0Ljc0NjYgMTYuODcyIDI0Ljc5MyAxNi44MzE0IDI0LjgxMDQgMTYuODE0QzI0LjgzMzYgMTYuNzk2NiAyNC44OTE2IDE2Ljc1MDIgMjQuOTMyMiAxNi43MjEyQzI0Ljk3MjkgMTYuNjg2NCAyNS4wNDI1IDE2LjY0MDEgMjUuMDg4OSAxNi42MTExQzI1LjEyOTUgMTYuNTg3OSAyNS4xOTkxIDE2LjU0NzMgMjUuMjUxMyAxNi41MTgzQzI1LjI5NzggMTYuNDk1MSAyNS4zNzMyIDE2LjQ2MDMgMjUuNDE5NiAxNi40MzcxQzI1LjQ2NiAxNi40MTk3IDI1LjU0NzIgMTYuMzkwOCAyNS41OTM2IDE2LjM3MzRDMjUuNjQgMTYuMzYxOCAyNS43MjEzIDE2LjMzMjggMjUuNzc5MyAxNi4zMjEyQzI1LjgzMTUgMTYuMzA5NiAyNS45MDY5IDE2LjI5MjIgMjUuOTQ3NSAxNi4yODY0QzI1Ljk4MjMgMTYuMjgwNiAyNi4wNDYyIDE2LjI2OSAyNi4wODEgMTYuMjY5QzI2LjEyMTYgMTYuMjYzMiAyNi4yMDg2IDE2LjI1NzQgMjYuMzM2MiAxNi4yNTc0QzI2LjQ5MjkgMTYuMjU3NCAyNi41NTA5IDE2LjI2MzIgMjYuNjE0NyAxNi4yNjlDMjYuNjU1MyAxNi4yNzQ4IDI2LjcyNSAxNi4yODY0IDI2Ljc3MTQgMTYuMjkyMkMyNi44MTIgMTYuMzAzOCAyNi44ODE2IDE2LjMxNTQgMjYuOTI4IDE2LjMyN0MyNi45Njg2IDE2LjMzODYgMjcuMDQ0IDE2LjM2MTggMjcuMDk2MyAxNi4zNzkyQzI3LjE0MjcgMTYuMzk2NiAyNy4yMTIzIDE2LjQxOTcgMjcuMjQxMyAxNi40MzcxQzI3LjI3MDMgMTYuNDQ4NyAyNy4zMzQxIDE2LjQ3NzcgMjcuMzgwNSAxNi41MDA5QzI3LjQyNyAxNi41MjQxIDI3LjUwMjQgMTYuNTU4OSAyNy41NDMgMTYuNTg3OUMyNy41ODk0IDE2LjYxNjkgMjcuNjQxNiAxNi42NDU5IDI3LjY2NDggMTYuNjYzM0MyNy42ODIyIDE2LjY4MDcgMjcuNzIyOCAxNi43MDM4IDI3Ljc0NiAxNi43MjdDMjcuNzc1MSAxNi43NDQ0IDI3LjgyMTUgMTYuNzc5MiAyNy44NTA1IDE2LjgwODJDMjcuODc5NSAxNi44MzE0IDI3LjkzNzUgMTYuODg5NCAyNy45ODM5IDE2LjkzQzI4LjAzMDMgMTYuOTc2MyAyOC4wODgzIDE3LjA0MDEgMjguMTE3NCAxNy4wNjkxQzI4LjE0NjQgMTcuMTAzOSAyOC4xOTI4IDE3LjE1NjEgMjguMjE2IDE3LjE5MDlDMjguMjQ1IDE3LjIyNTcgMjguMjg1NiAxNy4yODM2IDI4LjMxNDYgMTcuMzI0MkMyOC4zMzc4IDE3LjM1OSAyOC4zNzI2IDE3LjQxNyAyOC4zOTU4IDE3LjQ1NzZDMjguNDE5IDE3LjQ5MjQgMjguNDQ4IDE3LjU0NDUgMjguNDU5NyAxNy41NzM1QzI4LjQ3MTMgMTcuNTk2NyAyOC41MDAzIDE3LjY2MDUgMjguNTIzNSAxNy43MDY5QzI4LjU0MDkgMTcuNzUzMyAyOC41Njk5IDE3LjgyODYgMjguNTg3MyAxNy44NjkyQzI4LjU5ODkgMTcuOTE1NiAyOC42MjIxIDE3Ljk3OTQgMjguNjMzNyAxOC4wMkMyOC42NDUzIDE4LjA2MDYgMjguNjU2OSAxOC4xMzAxIDI4LjY2ODUgMTguMTcwN0MyOC42NzQzIDE4LjIxNzEgMjguNjg1OSAxOC4yODY3IDI4LjY5MTcgMTguMzMzMUMyOC42OTc1IDE4LjM3OTQgMjguNzA5MSAxOC40NjY0IDI4LjcwOTEgMTguNTMwMkMyOC43MTMgMTguNjA3NSAyOC43MTMgMTguNjgyOSAyOC43MDkxIDE4Ljc1NjNDMjguNzA5MSAxOC44MjAxIDI4LjcwMzMgMTguOTAxMyAyOC42OTc1IDE4Ljk0MThDMjguNjkxNyAxOC45ODI0IDI4LjY4MDEgMTkuMDQ2MiAyOC42NzQzIDE5LjA5MjZDMjguNjYyNyAxOS4xMzMyIDI4LjY1MTEgMTkuMTk3IDI4LjYzOTUgMTkuMjM3NUMyOC42Mjc5IDE5LjI3ODEgMjguNjA0NyAxOS4zNTM1IDI4LjU5MzEgMTkuNDA1N0MyOC41Njk5IDE5LjQ1NzkgMjguNTQwOSAxOS41MzkgMjguNTIzNSAxOS41ODU0QzI4LjUwMDMgMTkuNjMxOCAyOC40NzEzIDE5LjY5NTYgMjguNDU5NyAxOS43MTg4QzI4LjQ0OCAxOS43NDc4IDI4LjQxOSAxOS43OTk5IDI4LjM5NTggMTkuODM0N0MyOC4zNzI2IDE5Ljg3NTMgMjguMzQzNiAxOS45MjE3IDI4LjMyNjIgMTkuOTQ0OUMyOC4zMTQ2IDE5Ljk2ODEgMjguMjc5OCAyMC4wMjAzIDI4LjI1MDggMjAuMDU1MUMyOC4yMjc2IDIwLjA4OTggMjguMTgxMiAyMC4xNDc4IDI4LjE1OCAyMC4xNzY4QzI4LjEyOSAyMC4yMDU4IDI4LjA3NjcgMjAuMjY5NiAyOC4wMzYxIDIwLjMxMDJDMjcuOTk1NSAyMC4zNTA3IDI3LjkzMTcgMjAuNDE0NSAyNy44OTY5IDIwLjQ0MzVDMjcuODYyMSAyMC40NzgzIDI3LjgwNDEgMjAuNTI0NyAyNy43NjkzIDIwLjU0NzlDMjcuNzQwMiAyMC41NzExIDI3LjY4MjIgMjAuNjE3NSAyNy42NDE2IDIwLjY0MDZDMjcuNjA2OCAyMC42NjM4IDI3LjU0ODggMjAuNjk4NiAyNy41MTk4IDIwLjcxNkMyNy40OTA4IDIwLjczMzQgMjcuNDMyOCAyMC43NjgyIDI3LjM4NjMgMjAuNzg1NkMyNy4zNDU3IDIwLjgwODggMjcuMjgxOSAyMC44Mzc4IDI3LjI0NzEgMjAuODU1MkMyNy4yMTgxIDIwLjg2NjggMjcuMTYwMSAyMC44OSAyNy4xMjUzIDIwLjkwMTZDMjcuMDkwNSAyMC45MTMxIDI3LjAyMDggMjAuOTM2MyAyNi45NzQ0IDIwLjk0NzlDMjYuOTMzOCAyMC45NTk1IDI2Ljg1ODQgMjAuOTc2OSAyNi44MDYyIDIwLjk4ODVDMjYuNzU5OCAyMS4wMDAxIDI2LjY3ODUgMjEuMDExNyAyNi42MjYzIDIxLjAxNzVDMjYuNTM5MyAyMS4wMjkxIDI2LjQ5ODcgMjEuMDM0OSAyNi4zNDIgMjEuMDM0OUMyNi4xOTcgMjEuMDM0OSAyNi4xMzkgMjEuMDI5MSAyNi4wNzUyIDIxLjAyMzNDMjYuMDI4OCAyMS4wMTc1IDI1Ljk1OTEgMjEuMDA1OSAyNS45MTI3IDIxLjAwMDFMMjUuNzUwMyAyMC45NTk1QzI1LjcwMzkgMjAuOTQ3OSAyNS42MjI2IDIwLjkyNDcgMjUuNTc2MiAyMC45MDc0QzI1LjUyNCAyMC44OSAyNS40NDg2IDIwLjg2MSAyNS40MTM4IDIwLjg0OTRDMjUuMzczMiAyMC44MzIgMjUuMzAzNiAyMC43OTcyIDI1LjI1NzEgMjAuNzc0QzI1LjIxMDcgMjAuNzUwOCAyNS4xNDExIDIwLjcxMDIgMjUuMTA2MyAyMC42ODdDMjUuMDcxNSAyMC42Njk2IDI1LjAyNTEgMjAuNjQwNiAyNS4wMDc3IDIwLjYyMzNDMjQuOTg0NSAyMC42MDU5IDI0Ljk0MzkgMjAuNTgyNyAyNC45MjA2IDIwLjU1OTVDMjQuODkxNiAyMC41NDIxIDI0Ljg0NTIgMjAuNTAxNSAyNC44MTA0IDIwLjQ3MjVDMjQuNzgxNCAyMC40NDkzIDI0LjcxMTggMjAuMzc5NyAyNC42NTk2IDIwLjMzMzRDMjQuNjEzMiAyMC4yODEyIDI0LjU0OTMgMjAuMjExNiAyNC41MjAzIDIwLjE4MjZDMjQuNDkxMyAyMC4xNDc4IDI0LjQ1MDcgMjAuMDk1NiAyNC40MzMzIDIwLjA2NjZDMjQuNDEwMSAyMC4wMzc3IDI0LjM3NTMgMTkuOTkxMyAyNC4zNTc5IDE5Ljk2MjNDMjQuMzM0NyAxOS45MzMzIDI0LjI5OTkgMTkuODc1MyAyNC4yNzY3IDE5LjgzNDdDMjQuMjUzNSAxOS43OTQxIDI0LjIxODYgMTkuNzI0NiAyNC4xOTU0IDE5LjY4NEMyNC4xNzggMTkuNjM3NiAyNC4xNDMyIDE5LjU2OCAyNC4xMjU4IDE5LjUyMTZDMjQuMTA4NCAxOS40NzUzIDI0LjA4NTIgMTkuNDExNSAyNC4wNzM2IDE5LjM3MDlDMjQuMDYyIDE5LjMzNjEgMjQuMDQ0NiAxOS4yNzIzIDI0LjAzMyAxOS4yMjU5QzI0LjAyMTQgMTkuMTc5NiAyNC4wMDQgMTkuMTE1OCAyMy45OTgyIDE5LjA4MUMyMy45OTI0IDE5LjA0MDQgMjMuOTgwOCAxOC45ODI0IDIzLjk3NSAxOC45NDE4QzIzLjk3NSAxOC45MDEzIDIzLjk2MzQgMTguODIwMSAyMy45NjM0IDE4Ljc1NjNDMjMuOTU3NiAxOC42ODY3IDIzLjk1NzYgMTguNjA1NiAyMy45NjM0IDE4LjUzNkMyMy45NjM0IDE4LjQ3OCAyMy45NzUgMTguMzkxIDIzLjk3NSAxOC4zNTA1QzIzLjk4MDggMTguMzA5OSAyMy45OTgyIDE4LjIyODcgMjQuMDA5OCAxOC4xNzA3QzI0LjAxNTYgMTguMTE4NSAyNC4wMzg4IDE4LjAzNzQgMjQuMDUwNCAxOC4wMDI2QzI0LjA1NjIgMTcuOTYyIDI0LjA2NzggMTcuOTIxNCAyNC4wNzM2IDE3LjkxNTZDMjQuMDc3NSAxNy45MDc5IDI0LjA3NTUgMTcuOTA1OSAyNC4wNjc4IDE3LjkwOThDMjQuMDYyIDE3LjkxNTYgMjMuMjE1IDE3LjQyODYgMTcuODE5NCAxNC4yOTc3TDE3LjcyNjYgMTQuMzc4OUMxNy42ODAyIDE0LjQyNTMgMTcuNjEwNiAxNC40ODkgMTcuNTc1OCAxNC41MThDMTcuNTQwOSAxNC41NDcgMTcuNDgyOSAxNC41OTM0IDE3LjQ0ODEgMTQuNjE2NkMxNy40MDc1IDE0LjY0NTYgMTcuMzQ5NSAxNC42ODYyIDE3LjMyMDUgMTQuNzAzNkMxNy4yODU3IDE0LjcyNjcgMTcuMjE2MSAxNC43NjE1IDE3LjE2MzggMTQuNzkwNUMxNy4xMTE2IDE0LjgxOTUgMTcuMDQyIDE0Ljg1NDMgMTcuMDAxNCAxNC44NjU5QzE2Ljk2NjYgMTQuODgzMyAxNi44OTcgMTQuOTEyMyAxNi44NTY0IDE0LjkyMzlDMTYuODE1NyAxNC45NDEzIDE2Ljc0NjEgMTQuOTU4NyAxNi42OTk3IDE0Ljk3MDNDMTYuNjU5MSAxNC45ODE5IDE2LjYwMTEgMTQuOTk5MiAxNi41NjYzIDE1LjAwNUMxNi41MzE1IDE1LjAxMDggMTYuNDg1IDE1LjAyMjQgMTYuNDU2IDE1LjAyODJDMTYuNDI3IDE1LjAyODIgMTYuMzc0OCAxNS4wMzk4IDE2LjM0IDE1LjAzOThDMTYuMjk5NCAxNS4wNDU2IDE2LjIwNjYgMTUuMDUxNCAxNi4wNzg5IDE1LjA1MTRDMTUuOTEwNyAxNS4wNTE0IDE1Ljg3MDEgMTUuMDQ1NiAxNS43ODg4IDE1LjAzNEMxNS43MzY2IDE1LjAyODIgMTUuNjU1NCAxNS4wMTY2IDE1LjYxNDggMTUuMDEwOEMxNS41NzQyIDE0Ljk5OTIgMTUuNTA0NiAxNC45ODE5IDE1LjQ1MjQgMTQuOTcwM0MxNS40MDU5IDE0Ljk1ODcgMTUuMzM2MyAxNC45MzU1IDE1LjI5NTcgMTQuOTE4MUMxNS4yNTUxIDE0LjkwNjUgMTUuMTk3MSAxNC44ODMzIDE1LjE2MjMgMTQuODY1OUMxNS4xMzMzIDE0Ljg1NDMgMTUuMDYzNiAxNC44MjUzIDE1LjAxNzIgMTQuNzk2M0MxNC45NjUgMTQuNzczMSAxNC44ODk2IDE0LjczMjUgMTQuODQ5IDE0LjcwMzZDMTQuODAyNiAxNC42NzQ2IDE0LjczODcgMTQuNjM0IDE0LjY5ODEgMTQuNjA1QzE0LjY2MzMgMTQuNTc2IDE0LjYwNTMgMTQuNTM1NCAxNC41ODIxIDE0LjUxMjJDMTQuNTUzMSAxNC40ODkgMTQuNTAwOSAxNC40NDI2IDE0LjQ2MDMgMTQuNDAyMUMxNC40MTk3IDE0LjM2MTUgMTQuMzU1OCAxNC4yOTc3IDE0LjMyMSAxNC4yNTcxQzE0LjI4NjIgMTQuMjIyMyAxNC4yMzQgMTQuMTU4NSAxNC4yMDUgMTQuMTIzOEMxNC4xNzYgMTQuMDg5IDE0LjEyOTYgMTQuMDI1MiAxNC4xMDA2IDEzLjk3ODhDMTQuMDcxNiAxMy45MzI0IDE0LjAzMDkgMTMuODc0NCAxNC4wMTkzIDEzLjg0NTVDMTQuMDAxOSAxMy44MjIzIDEzLjk3MjkgMTMuNzcwMSAxMy45NTU1IDEzLjcyOTVDMTMuOTM4MSAxMy42ODg5IDEzLjkwOTEgMTMuNjMwOSAxMy44OTE3IDEzLjU5MDNDMTMuODc0MyAxMy41NTU2IDEzLjg1MTEgMTMuNDgwMiAxMy44Mjc5IDEzLjQyMjJDMTMuODEwNSAxMy4zNyAxMy43ODczIDEzLjI5NDcgMTMuNzgxNSAxMy4yNjU3QzEzLjc2OTkgMTMuMjMwOSAxMy43NTgzIDEzLjE3MjkgMTMuNzUyNSAxMy4xMzIzQzEzLjc0MDkgMTMuMDg1OSAxMy43MjkzIDEzLjAxNjQgMTMuNzIzNSAxMi45NjQyQzEzLjcxMTkgMTIuOTA2MiAxMy43MTE5IDEyLjgyNSAxMy43MDYxIDEyLjcyMDdDMTMuNzA2MSAxMi42Mjc5IDEzLjcwNjEgMTIuNTM1MSAxMy43MTE5IDEyLjQ4MjlDMTMuNzExOSAxMi40NDI0IDEzLjcyMzUgMTIuMzY3IDEzLjcyOTMgMTIuMzIwNkMxMy43MzUxIDEyLjI3NDIgMTMuNzQ2NyAxMi4yMTYyIDEzLjc1MjUgMTIuMTkzQzEzLjc1MjUgMTIuMTY5OSAxMy43Njk5IDEyLjExNzcgMTMuNzc1NyAxMi4wNzcxQzEzLjc4NzMgMTIuMDM2NSAxMy44MDQ3IDExLjk3MjcgMTMuODIyMSAxMS45MzIxQzEzLjgzMzcgMTEuODkxNiAxMy44NTY5IDExLjgyNzggMTMuODY4NSAxMS43ODcyQzEzLjg4NTkgMTEuNzUyNCAxMy45MTQ5IDExLjY3NyAxMy45MzgxIDExLjYzMDZDMTMuOTY3MSAxMS41Nzg1IDEzLjk5NjEgMTEuNTE0NyAxNC4wMTM1IDExLjQ5MTVDMTQuMDI1MSAxMS40NjI1IDE0LjA2IDExLjQxMDMgMTQuMDgzMiAxMS4zNzU1QzE0LjEwNjQgMTEuMzQwNyAxNC4xNDcgMTEuMjgyOCAxNC4xNzAyIDExLjI0OEMxNC4xOTkyIDExLjIxMzIgMTQuMjM5OCAxMS4xNTUyIDE0LjI2ODggMTEuMTIwNEMxNC4yOTc4IDExLjA5MTQgMTQuMzYxNiAxMS4wMjE5IDE0LjQwODEgMTAuOTY5N0MxNC40NjAzIDEwLjkyMzMgMTQuNTM1NyAxMC44NTM3IDE0LjU3NjMgMTAuODE4OUMxNC42MTY5IDEwLjc4NDEgMTQuNjg2NSAxMC43MzIgMTQuNzIxMyAxMC43MDNDMTQuNzYyIDEwLjY3OTggMTQuODI1OCAxMC42MzM0IDE0Ljg2NjQgMTAuNjEwMkMxNC45MDcgMTAuNTg3IDE0Ljk3NjYgMTAuNTQ2NCAxNS4wMTcyIDEwLjUyMzJDMTUuMDYzNiAxMC41MDU4IDE1LjEyNzUgMTAuNDcxMSAxNS4xNzM5IDEwLjQ1MzdDMTUuMjE0NSAxMC40MzYzIDE1LjI4OTkgMTAuNDA3MyAxNS4zMzA1IDEwLjM5NTdDMTUuMzc2OSAxMC4zNzgzIDE1LjQ1ODIgMTAuMzU1MSAxNS41MTA0IDEwLjM0MzVDMTUuNTU2OCAxMC4zMzE5IDE1LjYzOCAxMC4zMTQ1IDE1LjY4NDQgMTAuMzAyOUMxNS43MzA4IDEwLjI5NzEgMTUuODAwNSAxMC4yOTEzIDE1Ljg0MTEgMTAuMjg1NUMxNS44NzU5IDEwLjI3OTcgMTUuOTE2NSAxMC4yNzk3IDE1LjkzMzkgMTAuMjczOUgxNi4xMTM3Wk0yMy4zNzE2IDIwLjE3NjhDMjMuMzc3NCAyMC4xNzY4IDIzLjYzMjcgMjAuMzIxOCAyMy45NDYgMjAuNDk1N0MyNC4yNTM1IDIwLjY3NTQgMjQuNTA4NyAyMC44MjA0IDI0LjUxNDUgMjAuODIwNEMyNC41MTQ1IDIwLjgyNjIgMjMuMTMzNyAyMS42MjYzIDIxLjQ1MTMgMjIuNjA2MUMxOC41MDk4IDI0LjMxNjUgMTguMzg4IDI0LjM4NjEgMTguMzkzOCAyNC40MDM1QzE4LjM5MzggMjQuNDA5MyAxOC40MDU0IDI0LjQ1NTcgMTguNDExMiAyNC41MDIxQzE4LjQyMjggMjQuNTQ4NSAxOC40MzQ0IDI0LjYxOCAxOC40NDAyIDI0LjY1ODZDMTguNDQ2IDI0LjY5OTIgMTguNDUxOCAyNC43Njg4IDE4LjQ1NzYgMjQuODIxQzE4LjQ1NzYgMjQuODczMSAxOC40NjM0IDI0Ljk1NDMgMTguNDU3NiAyNS4wMjk3QzE4LjQ1NzYgMjUuMDk5MyAxOC40NTE4IDI1LjE4NjIgMTguNDQ2IDI1LjIzMjZDMTguNDQwMiAyNS4yNzMyIDE4LjQzNDQgMjUuMzM3IDE4LjQyODYgMjUuMzY2QzE4LjQyMjggMjUuMzk1IDE4LjQxMTIgMjUuNDQxMyAxOC40MDU0IDI1LjQ3NjFDMTguMzk5NiAyNS41MDUxIDE4LjM4MjIgMjUuNTYzMSAxOC4zNzY0IDI1LjYwMzdDMTguMzY0OCAyNS42NDQzIDE4LjM0NzQgMjUuNzAyMiAxOC4zMzU4IDI1LjczN0MxOC4zMjQyIDI1Ljc3MTggMTguMzAxIDI1LjgyNCAxOC4yODk0IDI1Ljg1M0MxOC4yNzc4IDI1Ljg4MiAxOC4yNDg3IDI1Ljk1MTYgMTguMjI1NSAyNi4wMDM3QzE4LjIwMjMgMjYuMDUwMSAxOC4xNjc1IDI2LjExOTcgMTguMTUwMSAyNi4xNDg3QzE4LjEzMjcgMjYuMTc3NyAxOC4wOTIxIDI2LjI0MTUgMTguMDU3MyAyNi4yOTM2QzE4LjAyODMgMjYuMzQgMTcuOTcwMyAyNi40MjEyIDE3LjkzNTUgMjYuNDYxOEMxNy45MDA2IDI2LjUwODIgMTcuODMxIDI2LjU4MzUgMTcuNzc4OCAyNi42MzU3QzE3LjcyNjYgMjYuNjg3OSAxNy42NTcgMjYuNzU3NSAxNy42MjIyIDI2Ljc4NjVDMTcuNTg3NCAyNi44MjEyIDE3LjUyOTMgMjYuODYxOCAxNy41MDAzIDI2Ljg4NUMxNy40NzEzIDI2LjkwODIgMTcuNDEzMyAyNi45NDg4IDE3LjM3ODUgMjYuOTcyQzE3LjM0OTUgMjYuOTk1MiAxNy4yOTE1IDI3LjAzIDE3LjI2MjUgMjcuMDQ3NEMxNy4yMzM1IDI3LjA2NDggMTcuMTYzOCAyNy4wOTk1IDE3LjExMTYgMjcuMTIyN0MxNy4wNTk0IDI3LjE1MTcgMTYuOTg5OCAyNy4xODA3IDE2Ljk0OTIgMjcuMTk4MUMxNi45MTQ0IDI3LjIwOTcgMTYuODU2NCAyNy4yMzI5IDE2LjgyMTUgMjcuMjQ0NUMxNi43ODY3IDI3LjI1NjEgMTYuNzM0NSAyNy4yNzM1IDE2LjY5OTcgMjcuMjc5M0MxNi42NjQ5IDI3LjI5MDkgMTYuNjEyNyAyNy4zMDI1IDE2LjU4MzcgMjcuMzA4M0MxNi41NDg5IDI3LjMxNDEgMTYuNTAyNCAyNy4zMjU3IDE2LjQ3MzQgMjcuMzMxNUMxNi40NDQ0IDI3LjMzNzMgMTYuMzgwNiAyNy4zNDMxIDE2LjM0IDI3LjM0ODlDMTYuMjkzNiAyNy4zNTQ3IDE2LjIwNjYgMjcuMzYwNSAxNi4xNDI3IDI3LjM2MDVDMTYuMDczMSAyNy4zNjYzIDE1Ljk5MTkgMjcuMzYwNSAxNS45MzM5IDI3LjM2MDVDMTUuODgxNyAyNy4zNTQ3IDE1LjgxMjEgMjcuMzQ4OSAxNS43NzcyIDI3LjM0MzFDMTUuNzM2NiAyNy4zMzczIDE1LjY2NyAyNy4zMjU3IDE1LjYxNDggMjcuMzE0MUMxNS41Njg0IDI3LjMwODMgMTUuNTA0NiAyNy4yOTA5IDE1LjQ3NTYgMjcuMjg1MUMxNS40NDY1IDI3LjI3MzUgMTUuMzk0MyAyNy4yNTYxIDE1LjM1MzcgMjcuMjUwM0MxNS4zMTg5IDI3LjIzMjkgMTUuMjYwOSAyNy4yMTU1IDE1LjIyNjEgMjcuMTk4MUMxNS4xODU1IDI3LjE4NjUgMTUuMTE1OSAyNy4xNTE3IDE1LjA2MzYgMjcuMTI4NUMxNS4wMTcyIDI3LjEwNTMgMTQuOTQ3NiAyNy4wNzA2IDE0LjkxMjggMjcuMDQ3NEMxNC44NzggMjcuMDMgMTQuODE0MiAyNi45ODk0IDE0Ljc3OTQgMjYuOTY2MkMxNC43Mzg3IDI2LjkzNzIgMTQuNjgwNyAyNi45MDI0IDE0LjY1MTcgMjYuODc5MkMxNC42MjI3IDI2Ljg1NiAxNC41NzYzIDI2LjgxNTUgMTQuNTQxNSAyNi43ODY1QzE0LjUxMjUgMjYuNzYzMyAxNC40NDI5IDI2LjY5MzcgMTQuMzkwNiAyNi42NDE1QzE0LjMzMjYgMjYuNTgzNSAxNC4yNjg4IDI2LjUwODIgMTQuMjM5OCAyNi40NzkyQzE0LjIxNjYgMjYuNDQ0NCAxNC4xNzYgMjYuMzk4IDE0LjE1ODYgMjYuMzY5QzE0LjE0MTIgMjYuMzQ1OCAxNC4xMDY0IDI2LjI5OTQgMTQuMDg5IDI2LjI3MDRDMTQuMDY1OCAyNi4yMzU3IDE0LjAzNjcgMjYuMTgzNSAxNC4wMTM1IDI2LjE0ODdDMTMuOTk2MSAyNi4xMTM5IDEzLjk2NzEgMjYuMDY3NSAxMy45NTU1IDI2LjAzODVDMTMuOTQzOSAyNi4wMTUzIDEzLjkxNDkgMjUuOTU3NCAxMy44OTc1IDI1LjkxMUMxMy44NzQzIDI1Ljg2NDYgMTMuODUxMSAyNS43ODkyIDEzLjgzMzcgMjUuNzQ4NkMxMy44MTYzIDI1LjcwMjIgMTMuNzkzMSAyNS42MjExIDEzLjc4MTUgMjUuNTYzMUMxMy43NjQxIDI1LjUwNTEgMTMuNzQ2NyAyNS40Mjk3IDEzLjc0MDkgMjUuMzg5MkMxMy43MzUxIDI1LjM1NDQgMTMuNzIzNSAyNS4yOTA2IDEzLjcxNzcgMjUuMjVDMTMuNzExOSAyNS4xOTIgMTMuNzExOSAyNS4xMzQxIDEzLjcxMTkgMjQuOTcxN0MxMy43MTE5IDI0Ljc5NzggMTMuNzExOSAyNC43NTcyIDEzLjcyMzUgMjQuNjc2QzEzLjcyOTMgMjQuNjIzOCAxMy43NDA5IDI0LjU0MjcgMTMuNzUyNSAyNC40OTYzQzEzLjc2NDEgMjQuNDQ0MSAxMy43ODE1IDI0LjM2MjkgMTMuNzk4OSAyNC4zMTA3QzEzLjgxMDUgMjQuMjY0NCAxMy44MzM3IDI0LjE4OSAxMy44NTExIDI0LjE0ODRDMTMuODYyNyAyNC4xMDc4IDEzLjg5MTcgMjQuMDM4MiAxMy45MDkxIDIzLjk5NzdDMTMuOTI2NSAyMy45NTcxIDEzLjk1NTUgMjMuOTA0OSAxMy45NjcxIDIzLjg4MTdDMTMuOTc4NyAyMy44NTg1IDE0LjAwNzcgMjMuODEyMSAxNC4wMTkzIDIzLjc4MzFDMTQuMDM2NyAyMy43NTQxIDE0LjA3MTYgMjMuNjk2MiAxNC4xMDA2IDIzLjY1NTZDMTQuMTI5NiAyMy42MTUgMTQuMTcwMiAyMy41NTEyIDE0LjE5OTIgMjMuNTE2NEMxNC4yMjgyIDIzLjQ4MTYgMTQuMjY4OCAyMy40Mjk1IDE0LjI5NzggMjMuNDAwNUMxNC4zMjEgMjMuMzcxNSAxNC4zODQ4IDIzLjMwMTkgMTQuNDM3MSAyMy4yNTU1QzE0LjQ4OTMgMjMuMjAzMyAxNC41NzA1IDIzLjEzMzggMTQuNjExMSAyMy4wOTlDMTQuNjU3NSAyMy4wNTg0IDE0LjcyMTMgMjMuMDEyIDE0Ljc1MDQgMjIuOTk0NkMxNC43ODUyIDIyLjk3MTQgMTQuODMxNiAyMi45MzY2IDE0Ljg2MDYgMjIuOTE5MkMxNC44ODk2IDIyLjkwMTggMTQuOTY1IDIyLjg2MTMgMTUuMDIzIDIyLjgzMjNDMTUuMDg2OCAyMi43OTc1IDE1LjE2ODEgMjIuNzYyNyAxNS4yMDI5IDIyLjc1MTFDMTUuMjM3NyAyMi43MzM3IDE1LjMwMTUgMjIuNzEwNSAxNS4zNDIxIDIyLjY5ODlDMTUuMzg4NSAyMi42ODE1IDE1LjQ1MjQgMjIuNjY0MSAxNS40OTMgMjIuNjUyNUMxNS41MzM2IDIyLjY0NjcgMTUuNTk3NCAyMi42MjkzIDE1LjY0MzggMjIuNjIzNUMxNS42ODQ0IDIyLjYxMTkgMTUuNzQ4MiAyMi42MDAzIDE1Ljc4ODggMjIuNjAwM0MxNS44Mjk1IDIyLjU5NDYgMTUuOTEwNyAyMi41ODg4IDE1Ljk2ODcgMjIuNTgzSDE2LjE4OTJDMTYuMjQ3MiAyMi41ODg4IDE2LjMzNDIgMjIuNTk0NiAxNi4zNjkgMjIuNjAwM0MxNi40MDk2IDIyLjYwMDMgMTYuNDczNCAyMi42MTE5IDE2LjUxOTkgMjIuNjIzNUMxNi41NjA1IDIyLjYyOTMgMTYuNjMwMSAyMi42NDY3IDE2LjY3NjUgMjIuNjU4M0MxNi43MTcxIDIyLjY2OTkgMTYuNzk4MyAyMi42OTMxIDE2Ljg0NDcgMjIuNzEwNUMxNi44OTEyIDIyLjcyMjEgMTYuOTY2NiAyMi43NTExIDE3LjAwMTQgMjIuNzY4NUMxNy4wNDIgMjIuNzg1OSAxNy4xMTE2IDIyLjgyMDcgMTcuMTYzOCAyMi44NDM5QzE3LjIxNjEgMjIuODcyOSAxNy4yOTE1IDIyLjkxMzQgMTcuMzI2MyAyMi45MzY2TDE3LjQ0ODEgMjMuMDE3OEMxNy40NzcxIDIzLjA0MSAxNy41MjkzIDIzLjA3NTggMTcuNTU4NCAyMy4wOTlDMTcuNTg3NCAyMy4xMjIyIDE3LjY0NTQgMjMuMTgwMSAxNy42OTc2IDIzLjIyNjVDMTcuNzQ0IDIzLjI2NzEgMTcuNzk2MiAyMy4zMTkzIDE3Ljg0MjYgMjMuMzcxNUwyMC42MDQyIDIxLjc3N0MyMi4xMzAxIDIwLjg5NTggMjMuMzcxNiAyMC4xNzY4IDIzLjM3MTYgMjAuMTc2OFoiIGZpbGw9IndoaXRlIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "DeepL",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        }
+      ]
+    },
+    {
+      "id": 509,
+      "icon": "file:marketstack.svg",
+      "name": "n8n-nodes-base.marketstack",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.marketstack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/marketstack/"
+              }
+            ]
+          },
+          "categories": [
+            "Analytics",
+            "Finance & Accounting"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Marketstack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM5LjQ2MTUgNDBDMzkuNDYxNSAzOS43NDM2IDM5LjUyNTcgMzkuNTUxMyAzOS41MjU3IDM5LjQyMzFDMzkuNTI1NyAzOC4zMzMzIDM5LjUyNTcgMzcuMTc5NSAzOS41MjU3IDM2LjA4OTdDMzkuNTI1NyAyNC4yOTQ5IDM5LjUyNTcgMTIuNDM1OSAzOS41MjU3IDAuNjQxMDI1QzM5LjUyNTcgMCAzOS41MjU3IDAgMzguODg0NyAwQzM0LjE0MTEgMCAyOS4zOTc0IDAgMjQuNjUzOCAwQzI0LjIwNTEgMCAyNC4wNzY5IDAuMTI4MjIxIDI0LjA3NjkgMC41NzY5MzhDMjQuMDc2OSAyLjgyMDUzIDI0LjA3NjkgNC45OTk5OSAyNC4wNzY5IDcuMjQzNThDMjQuMDc2OSA3LjY5MjMgMjQuMjY5MiA3LjgyMDUyIDI0LjY1MzggNy44MjA1MkMyNi44MzMzIDcuODIwNTIgMjkuMDEyOCA3LjgyMDUyIDMxLjEyODIgNy44MjA1MkMzMS43NjkyIDcuODIwNTIgMzEuNzY5MiA3LjgyMDUyIDMxLjc2OTIgOC40NjE1NEMzMS43NjkyIDEyLjgyMDUgMzEuNzY5MiAxNy4xNzk1IDMxLjc2OTIgMjEuNTM4NEMzMS43NjkyIDI2LjQxMDIgMzEuNzY5MiAzMS4yMTc5IDMxLjc2OTIgMzYuMDg5N0MzMS43NjkyIDM2LjQxMDIgMzEuNzY5MyAzNi42NjY3IDMyLjE1MzkgMzYuODU5QzM0LjA3NyAzNy42OTIzIDM2IDM4LjU4OTcgMzcuODU5IDM5LjQyMzFDMzguMzcxOCAzOS41NTEzIDM4Ljg4NDYgMzkuNzQzNiAzOS40NjE1IDQwWk0yNy45ODcyIDI1LjcwNTFDMjcuOTg3MiAyMS4xNTM4IDI3Ljk4NzIgMTYuNjAyNSAyNy45ODcyIDEyLjA1MTNDMjcuOTg3MiAxMS40NzQzIDI3Ljk4NzEgMTEuNDc0NCAyNy40MTAyIDExLjQ3NDRDMjIuNjAyNSAxMS40NzQ0IDE3Ljg1OSAxMS40NzQ0IDEzLjA1MTMgMTEuNDc0NEMxMi42MDI2IDExLjQ3NDQgMTIuNDc0MyAxMS42MDI2IDEyLjQ3NDMgMTIuMDUxM0MxMi40NzQzIDE0LjI5NDkgMTIuNDc0MyAxNi40NzQ0IDEyLjQ3NDMgMTguNzE3OUMxMi40NzQzIDE5LjE2NjcgMTIuNjY2NyAxOS4yOTQ4IDEzLjA1MTMgMTkuMjk0OEMxNS4xNjY3IDE5LjI5NDggMTcuMjgyIDE5LjI5NDggMTkuMzk3NCAxOS4yOTQ4QzIwLjIzMDcgMTkuMjk0OCAyMC4yMzA4IDE5LjE2NjcgMjAuMjMwOCAyMC4xMjgyQzIwLjIzMDggMjUuNDQ4NyAyMC4yMzA4IDMwLjcwNTEgMjAuMjMwOCAzNi4wMjU2QzIwLjIzMDggMzYuNDc0NCAyMC4zNTg5IDM2LjczMDggMjAuODA3NiAzNi44NTlDMjEuNzY5MiAzNy4yNDM2IDIyLjY2NjcgMzcuNjkyMyAyMy42MjgyIDM4LjE0MUMyNC45NzQ0IDM4LjcxNzkgMjYuMjU2NCAzOS4yOTQ4IDI3LjYwMjYgMzkuOTM1OUMyNy45MjMxIDQwLjA2NDEgMjguMDUxMiA0MCAyOC4wNTEyIDM5LjY3OTVDMjguMDUxMiAzOS41NTEzIDI4LjA1MTIgMzkuNDIzMSAyOC4wNTEyIDM5LjI5NDhDMjcuOTg3MSAzNC42Nzk1IDI3Ljk4NzIgMzAuMTkyMyAyNy45ODcyIDI1LjcwNTFaTTE2LjQ0ODggMzEuNTM4NUMxNi40NDg4IDI4LjkxMDMgMTYuNDQ4OCAyNi4yMTc5IDE2LjQ0ODggMjMuNTg5N0MxNi40NDg4IDIzLjIwNTEgMTYuMzIwNSAyMy4wMTI4IDE1Ljg3MTggMjMuMDEyOEMxMS4xMjgyIDIzLjAxMjggNi4zMjA0NSAyMy4wMTI4IDEuNTc2ODYgMjMuMDEyOEMwLjk5OTkzNyAyMy4wMTI4IDEgMjMuMDEyOCAxIDIzLjU4OTdDMSAyNy4wNTEzIDEgMzAuNTc2OSAxIDM0LjAzODRDMSAzNC40ODcxIDEuMTI4MjQgMzQuNjc5NSAxLjUxMjg1IDM0LjgwNzdDMi45MjMxMSAzNS4yNTY0IDQuMjY5MjYgMzUuNzY5MiA1LjY3OTUyIDM2LjI4MkM5LjA3Njk1IDM3LjQzNTkgMTIuNDc0MyAzOC42NTM4IDE1Ljg3MTggMzkuODA3N0MxNi40NDg3IDQwIDE2LjQ0ODggNDAgMTYuNDQ4OCAzOS4zNTlDMTYuNDQ4OCAzNi43OTQ5IDE2LjQ0ODggMzQuMTY2NyAxNi40NDg4IDMxLjUzODVaIiBmaWxsPSIjMDMyNzNEIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Marketstack",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 8,
+          "name": "Finance & Accounting"
+        },
+        {
+          "id": 10,
+          "name": "Analytics"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 44,
+      "name": "Crypto Trading"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}

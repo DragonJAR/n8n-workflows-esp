@@ -1,0 +1,1554 @@
+{
+  "id": 13781,
+  "name": "Train and deploy ML models with Claude and Slack approval",
+  "views": 3,
+  "recentViews": 0,
+  "totalViews": 3,
+  "createdAt": "2026-03-01T01:42:13.609Z",
+  "description": "### What this workflow does\n\nThis workflow automates the full machine learning lifecycle end-to-end using Claude AI as the intelligent decision-maker at every stage. Send one HTTP request with a dataset URL and a business goal — and the pipeline handles everything from raw CSV to a human-approved, documented model ready for GitHub.\n\nThe pipeline runs in 5 sequential phases:\n\n**Phase 1 — Strategy**\nClaude Sonnet 4 receives the dataset URL, target variable, and business goal. It outputs a structured JSON plan covering feature ideas, algorithm choices, and the evaluation metric. A fallback parser ensures the pipeline continues even if the LLM output is slightly malformed.\n\n**Phase 2 — Data Engineering**\nThe workflow fetches the CSV via HTTP Request and runs it through a custom quoted-field CSV parser (handles commas inside quoted name fields, common in datasets like Titanic). It drops rows with missing targets, imputes missing Age values, and encodes categorical columns (Sex, Embarked) into numeric form.\n\n**Phase 3 — Feature Engineering**\nClaude Haiku reviews the cleaned dataset and confirms the 3 best features to engineer. A Code node then creates `FamilySize` (SibSp + Parch + 1), `IsAlone` (binary flag), and `TitleEncoded` (extracted and mapped from passenger name). A row-count validation gate ensures no data is silently lost.\n\n**Phase 4 — Training & Evaluation**\nThree algorithms are trained from scratch in pure JavaScript — no external ML libraries required:\n- **Logistic Regression** via gradient descent (200 epochs)\n- **Random Forest** via 10 bagged decision stumps\n- **XGBoost** via gradient boosting with residual-based stump selection\n\nPrecision, recall, F1, and accuracy are computed for each. Claude Sonnet then acts as an LLM judge: it reads all three result sets alongside the original business goal and selects the winner with a one-sentence justification. A deterministic fallback (highest F1) runs if the LLM response fails to parse.\n\n**Phase 5 — HITL Deployment**\nClaude Sonnet writes a structured `MODEL_CARD.md` covering model overview, performance metrics, training data summary, feature engineering decisions, intended use, and limitations. The full results are then posted to a Slack channel as a formatted approval request. A human can review the results and reply to approve or reject deployment.\n\nAn optional Supabase audit log records each phase transition with timestamp, phase name, status, and run ID.\n\n---\n\n### Tested results\n\nTested on the Titanic dataset (891 rows):\n\n| Model | F1 Score | Accuracy |\n|---|---|---|\n| Logistic Regression | 0.712 | 0.787 |\n| Random Forest | 0.739 | 0.804 |\n| **XGBoost** | **0.761** | **0.821** |\n\nClaude correctly identified XGBoost as the winner and generated a complete model card in under 10 seconds.\n\n---\n\n### What you need\n\n| Requirement | Details |\n|---|---|\n| **Anthropic API key** | Used in P1, P4 (Claude Sonnet 4), and P3 (Claude Haiku). Get at console.anthropic.com |\n| **Slack Bot Token** | OAuth bot token with `chat:write` scope. Bot must be invited to the target channel via `/invite @bot-name` |\n| **Supabase project** *(optional)* | For audit logging. Replace `YOUR_PROJECT.supabase.co` and `YOUR_SUPABASE_SERVICE_ROLE_KEY` in the 5 log nodes, or delete them |\n| **Public CSV URL** | The dataset must be reachable by your n8n instance via HTTP GET |\n\n---\n\n### Setup steps\n\n1. Import the workflow JSON into your n8n instance\n2. Add your **Anthropic API** credential and assign it to the 3 `lmChatAnthropic` nodes (P1, P3, P4)\n3. Add your **Slack Bot Token** credential and assign it to the P5 Slack node. Replace `YOUR_SLACK_CHANNEL_ID` with your real channel ID (e.g. `C012AB3CD`)\n4. *(Optional)* Set up the Supabase audit log table using the SQL in the setup sticky note, then replace the two placeholder values in the 5 log HTTP Request nodes\n5. Activate the workflow and send a test request:\n\n```bash\nPOST https://your-n8n-instance.com/webhook/mlops-v2\nContent-Type: application/json\n\n{\n  \"dataset_url\": \"https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv\",\n  \"target_variable\": \"Survived\",\n  \"business_goal\": \"Predict passenger survival to optimise lifeboat boarding policy\"\n}\n```\n\n---\n\n### Extending the workflow\n\nThe Phase 5 sticky note includes a tip for extending the HITL loop: add a Webhook node to receive the Slack approval callback and an If node to branch into a GitHub API call that commits the model card to a new repository. The `model_card_b64` field (Base64-encoded model card content) is already assembled in the payload, ready to be passed directly to the GitHub Contents API.\n\n---\n\n### Node count & complexity\n\n- **28 nodes** total (22 active, 6 sticky notes)\n- **3 LLM calls** (Claude Sonnet ×2, Claude Haiku ×1)\n- **5 JavaScript Code nodes** (all pure JS, no external libraries)\n- **5 Supabase log nodes** (optional, deletable)\n- **1 Slack node**\n- **Fan-out connections** used to run log nodes as parallel dead-ends without blocking the main data path\n\n---\n\n### Tags\n`AI`, `Machine Learning`, `MLOps`, `Claude AI`, `Slack`, `Automation`, `Data Science`, `HITL`, `LLM`\n",
+  "workflow": {
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Train and deploy ML models with Claude AI and Slack approval",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "874019bc-a6b2-4fa5-8468-77266a7be43f",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          5520,
+          928
+        ],
+        "parameters": {
+          "width": 1100,
+          "height": 1304,
+          "content": "## 🤖 Autonomous MLOps Pipeline\n\n**Trigger a full end-to-end machine learning cycle from a single webhook call.**\n\nClaude AI plans the strategy, cleans your data, engineers features, trains 3 models head-to-head, picks the winner, writes a model card — then asks a human on Slack before deploying to GitHub.\n\n---\n\n### 🔁 How It Works\n\n| Phase | What Happens |\n|-------|-------------|\n| **P1 — Strategy** | Claude Sonnet reads your dataset URL + goal, outputs a JSON ML plan (features, algorithms, metric) |\n| **P2 — Data Engineering** | Fetches the CSV, handles quoted fields, drops nulls, encodes Sex/Embarked, imputes missing Age |\n| **P3 — Feature Engineering** | Claude Haiku approves 3 features; code engineers FamilySize, IsAlone, TitleEncoded |\n| **P4 — Train & Evaluate** | Logistic Regression, Random Forest, and XGBoost trained from scratch in JS; Claude Sonnet judges the winner by F1 score |\n| **P5 — HITL Deployment** | Claude writes a MODEL_CARD.md; Slack message asks human to approve before GitHub push |\n\n---\n\n### ⚙️ Setup (5 minutes)\n\n**Credentials needed:**\n- `Anthropic API` — API key from console.anthropic.com\n- `Slack Bot Token` — OAuth bot token with `chat:write` scope\n\n**Supabase audit log (optional):**\nReplace `YOUR_SUPABASE_SERVICE_ROLE_KEY` and `YOUR_PROJECT.supabase.co` in the 5 log nodes, or delete them if you don't need audit logging. Table schema:\n```sql\ncreate table mlops_audit_log (\n  id bigint generated always as identity primary key,\n  run_id text, workflow_step text, phase text, status text,\n  created_at timestamptz default now()\n);\n```\n\n**Invite your Slack bot:**\nIn the target channel, run `/invite @your-bot-name` before the first run.\n\n---\n\n### 🚀 Trigger\n\n```bash\nPOST /webhook/mlops-v2\nContent-Type: application/json\n\n{\n  \"dataset_url\": \"https://your-host.com/data.csv\",\n  \"target_variable\": \"Survived\",\n  \"business_goal\": \"Predict passenger survival to optimise boarding policy\"\n}\n```\n\n**Tested on:** Titanic dataset → **XGBoost wins** with F1=0.761, Accuracy=0.821"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2b566773-44cd-4255-8a83-8949ff44ad18",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          6800,
+          1408
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 956,
+          "height": 80,
+          "content": "### Phase 1 — Orchestration & Strategy\n`Webhook` → `Claude Sonnet` plans ML strategy → `Supabase` audit log"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7fcb4e3a-f171-406f-9570-6f98870a891e",
+        "name": "P1: Receive MLOps Job",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          6864,
+          1616
+        ],
+        "parameters": {
+          "path": "mlops-v2",
+          "options": {},
+          "httpMethod": "POST"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "af15b85b-a1b1-45e5-a228-bbcd0267bb8d",
+        "name": "P1: Plan ML Strategy",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          7072,
+          1616
+        ],
+        "parameters": {
+          "text": "=You are a Lead Data Scientist. Given this ML job, return a JSON plan (no markdown, raw JSON only).\n\nDataset URL: {{ $json.body.dataset_url }}\nTarget Variable: {{ $json.body.target_variable }}\nBusiness Goal: {{ $json.body.business_goal }}\n\nReturn exactly this JSON structure:\n{\n  \"dataset_url\": \"<same url>\",\n  \"target_variable\": \"<same target>\",\n  \"business_goal\": \"<same goal>\",\n  \"cleaning_steps\": [\"drop nulls\", \"encode categoricals\"],\n  \"feature_ideas\": [\"FamilySize\", \"IsAlone\", \"TitleEncoded\"],\n  \"algorithms\": [\"LogisticRegression\", \"RandomForest\", \"XGBoost\"],\n  \"evaluation_metric\": \"f1_score\"\n}",
+          "promptType": "define"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "1f902e16-0c8d-4544-8ad6-032c4bc470b1",
+        "name": "P1: Anthropic Sonnet",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "position": [
+          7072,
+          1808
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "id",
+            "value": "claude-sonnet-4-6"
+          },
+          "options": {}
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "efcf1add-b60f-43c7-837e-6ff69b75b725",
+        "name": "P1: Parse Strategy",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          7360,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const raw = $input.first().json.text || '';\nlet strategy;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  strategy = match ? JSON.parse(match[0]) : null;\n} catch(e) { strategy = null; }\n\nif (!strategy) {\n  strategy = {\n    dataset_url: $('P1: Receive MLOps Job').first().json.body.dataset_url,\n    target_variable: $('P1: Receive MLOps Job').first().json.body.target_variable,\n    business_goal: $('P1: Receive MLOps Job').first().json.body.business_goal,\n    cleaning_steps: ['drop_nulls', 'encode_categoricals'],\n    feature_ideas: ['FamilySize', 'IsAlone', 'TitleEncoded'],\n    algorithms: ['LogisticRegression', 'RandomForest', 'XGBoost'],\n    evaluation_metric: 'f1_score'\n  };\n}\n\nreturn [{ json: strategy }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "03951aa4-1e28-4caf-90df-aca7e2808408",
+        "name": "P1: Log Strategy",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          7584,
+          1616
+        ],
+        "parameters": {
+          "url": "https://YOUR_PROJECT.supabase.co/rest/v1/mlops_audit_log",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "phase",
+                "value": "P1_STRATEGY"
+              },
+              {
+                "name": "status",
+                "value": "complete"
+              },
+              {
+                "name": "workflow_step",
+                "value": "={{ 'target=' + $json.target_variable }}"
+              },
+              {
+                "name": "run_id",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "YOUR_SUPABASE_SERVICE_ROLE_KEY"
+              },
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Prefer",
+                "value": "return=minimal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "62f443d2-1562-407c-bfb6-d6db39728757",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          7808,
+          1408
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 660,
+          "height": 80,
+          "content": "### Phase 2 — Data Engineering\n`HTTP Request` fetches CSV → `Code` parses + cleans + encodes → `Supabase` audit log"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c0cbdec9-6fe4-4ec2-a703-569184cfbab4",
+        "name": "P2: Log Data Eng",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          8064,
+          1616
+        ],
+        "parameters": {
+          "url": "https://YOUR_PROJECT.supabase.co/rest/v1/mlops_audit_log",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "phase",
+                "value": "P2_DATA_ENG"
+              },
+              {
+                "name": "status",
+                "value": "complete"
+              },
+              {
+                "name": "workflow_step",
+                "value": "={{ 'rows=' + $json.clean_count }}"
+              },
+              {
+                "name": "run_id",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "YOUR_SUPABASE_SERVICE_ROLE_KEY"
+              },
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Prefer",
+                "value": "return=minimal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "27d37c92-5bf3-4d18-b7e3-91bbb5fd63c0",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          8512,
+          1408
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 924,
+          "height": 80,
+          "content": "### Phase 3 — Feature Engineering\n`Claude Haiku` approves feature plan → `Code` engineers FamilySize, IsAlone, TitleEncoded → `Supabase` audit log"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b92d76b4-9cdd-4f4a-bfb3-5380a28753e3",
+        "name": "P3: Reason About Features",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          8560,
+          1616
+        ],
+        "parameters": {
+          "text": "=You are a Feature Engineering expert. Given this dataset context, confirm the 3 best features to engineer. Return raw JSON only, no markdown.\n\nTarget: {{ $('P1: Parse Strategy').first().json.target_variable }}\nSuggested features: {{ JSON.stringify($('P1: Parse Strategy').first().json.feature_ideas) }}\nClean row count: {{ $('P2: Clean Data').first().json.clean_count }}\n\nReturn exactly:\n{\"approved_features\": [\"FamilySize\", \"IsAlone\", \"TitleEncoded\"], \"rationale\": \"<one sentence>\"}",
+          "promptType": "define"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "aee2ef0d-c1e1-41d6-b88b-a9c1a9e47b6e",
+        "name": "P3: Anthropic Haiku",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "position": [
+          8560,
+          1792
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "id",
+            "value": "claude-haiku-4-5-20251001"
+          },
+          "options": {}
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "2cf42398-c4df-4781-a459-0270b8a09030",
+        "name": "P3: Parse Feature Plan",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          8880,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const raw = $input.first().json.text || '';\nlet plan;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  plan = match ? JSON.parse(match[0]) : null;\n} catch(e) { plan = null; }\n\nif (!plan || !plan.approved_features) {\n  plan = { approved_features: ['FamilySize', 'IsAlone', 'TitleEncoded'], rationale: 'Default fallback features' };\n}\n\n// Pass through all upstream data\nconst upstream = $('P2: Clean Data').first().json;\nreturn [{ json: { ...upstream, approved_features: plan.approved_features, feature_rationale: plan.rationale } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "af43c97a-251b-419f-a01d-2a69a90014ed",
+        "name": "P3: Engineer Features",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          9072,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const upstream = $input.first().json;\nconst cleanData = JSON.parse(upstream.clean_data);\n\n// Engineer features\nconst titleMap = { 'Mr': 1, 'Mrs': 2, 'Miss': 3, 'Master': 4, 'Dr': 5, 'Rev': 6 };\n\nconst engineered = cleanData.map(row => {\n  const sibsp = parseFloat(row['SibSp']) || 0;\n  const parch = parseFloat(row['Parch']) || 0;\n  const familySize = sibsp + parch + 1;\n  const isAlone = familySize === 1 ? 1 : 0;\n  \n  const name = row['Name'] || '';\n  const titleMatch = name.match(/,\\s*([A-Za-z]+)\\./);\n  const titleStr = titleMatch ? titleMatch[1] : 'Mr';\n  const titleEnc = titleMap[titleStr] || 1;\n  \n  return {\n    ...row,\n    FamilySize: familySize,\n    IsAlone: isAlone,\n    TitleEncoded: titleEnc\n  };\n});\n\n// Validate row count\nif (engineered.length !== cleanData.length) {\n  throw new Error(`Row count mismatch: ${cleanData.length} → ${engineered.length}`);\n}\n\nreturn [{ json: {\n  strategy: upstream.strategy,\n  clean_count: upstream.clean_count,\n  feature_count: engineered.length,\n  approved_features: upstream.approved_features,\n  engineered_data: JSON.stringify(engineered)\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "36569900-b3d4-468c-b8ef-6048045cf799",
+        "name": "P3: Log Feature Eng",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          9296,
+          1616
+        ],
+        "parameters": {
+          "url": "https://YOUR_PROJECT.supabase.co/rest/v1/mlops_audit_log",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "phase",
+                "value": "P3_FEATURE_ENG"
+              },
+              {
+                "name": "status",
+                "value": "complete"
+              },
+              {
+                "name": "workflow_step",
+                "value": "={{ 'features=' + $json.feature_count }}"
+              },
+              {
+                "name": "run_id",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "YOUR_SUPABASE_SERVICE_ROLE_KEY"
+              },
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Prefer",
+                "value": "return=minimal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "e62131bf-706e-4445-9ee2-f4e9fe61389d",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          9472,
+          1408
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 1060,
+          "height": 80,
+          "content": "### Phase 4 — Training & Evaluation\n`Code` trains Logistic Regression + Random Forest + XGBoost → `Claude Sonnet` judges winner by F1 score → `Supabase` audit log"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "ce1db2b8-6a2b-4a56-97f2-86f4044b505e",
+        "name": "P4: Setup Algorithms",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          9504,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const upstream = $('P3: Engineer Features').first().json;\nconst p3data = $('P3: Engineer Features').first().json;\n\n// Parse engineered data once\nconst allData = JSON.parse(p3data.engineered_data);\nconst targetVar = p3data.strategy.target_variable;\n\n// Feature columns to use\nconst featureCols = ['Pclass', 'Age', 'SibSp', 'Parch', 'Fare', 'Sex_enc', 'Embarked_enc', 'FamilySize', 'IsAlone', 'TitleEncoded'];\n\n// Build X and y\nconst X = allData.map(row => featureCols.map(f => {\n  const v = parseFloat(row[f]);\n  return isNaN(v) ? 0 : v;\n}));\nconst y = allData.map(row => parseFloat(row[targetVar]) || 0);\n\n// Train/test split (80/20)\nconst splitIdx = Math.floor(X.length * 0.8);\nconst Xtrain = X.slice(0, splitIdx);\nconst ytrain = y.slice(0, splitIdx);\nconst Xtest = X.slice(splitIdx);\nconst ytest = y.slice(splitIdx);\n\nreturn [{ json: {\n  strategy: p3data.strategy,\n  featureCols,\n  Xtrain: JSON.stringify(Xtrain),\n  ytrain: JSON.stringify(ytrain),\n  Xtest: JSON.stringify(Xtest),\n  ytest: JSON.stringify(ytest),\n  train_size: Xtrain.length,\n  test_size: Xtest.length\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f0bec516-fdd9-4b95-a27b-eaab6d12651c",
+        "name": "P4: Train All Models",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          9728,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const setup = $input.first().json;\nconst Xtrain = JSON.parse(setup.Xtrain);\nconst ytrain = JSON.parse(setup.ytrain);\nconst Xtest = JSON.parse(setup.Xtest);\nconst ytest = JSON.parse(setup.ytest);\n\n// --- Helpers ---\nfunction dot(a, b) { return a.reduce((s, v, i) => s + v * b[i], 0); }\nfunction sigmoid(z) { return 1 / (1 + Math.exp(-Math.max(-500, Math.min(500, z)))); }\n\nfunction calcMetrics(ypred, ytrue) {\n  let tp=0, fp=0, fn=0, tn=0;\n  for (let i=0; i<ytrue.length; i++) {\n    if (ypred[i]===1 && ytrue[i]===1) tp++;\n    else if (ypred[i]===1 && ytrue[i]===0) fp++;\n    else if (ypred[i]===0 && ytrue[i]===1) fn++;\n    else tn++;\n  }\n  const prec = tp+fp>0 ? tp/(tp+fp) : 0;\n  const rec = tp+fn>0 ? tp/(tp+fn) : 0;\n  const f1 = prec+rec>0 ? 2*prec*rec/(prec+rec) : 0;\n  const acc = (tp+tn)/ytrue.length;\n  return { accuracy: Math.round(acc*1000)/1000, precision: Math.round(prec*1000)/1000, recall: Math.round(rec*1000)/1000, f1_score: Math.round(f1*1000)/1000 };\n}\n\n// --- 1. Logistic Regression (gradient descent) ---\nfunction trainLogReg(X, y, lr=0.01, epochs=200) {\n  const n = X[0].length;\n  let w = new Array(n).fill(0);\n  let b = 0;\n  for (let e=0; e<epochs; e++) {\n    let dw = new Array(n).fill(0), db = 0;\n    for (let i=0; i<X.length; i++) {\n      const pred = sigmoid(dot(X[i], w) + b);\n      const err = pred - y[i];\n      for (let j=0; j<n; j++) dw[j] += err * X[i][j];\n      db += err;\n    }\n    for (let j=0; j<n; j++) w[j] -= lr * dw[j] / X.length;\n    b -= lr * db / X.length;\n  }\n  return { w, b };\n}\nconst lrModel = trainLogReg(Xtrain, ytrain);\nconst lrPred = Xtest.map(x => sigmoid(dot(x, lrModel.w) + lrModel.b) >= 0.5 ? 1 : 0);\nconst lrMetrics = calcMetrics(lrPred, ytest);\n\n// --- 2. Random Forest (bagged decision stumps) ---\nfunction trainStump(X, y, featureIdx) {\n  let bestThresh = 0, bestGini = 1, bestDir = 1;\n  const vals = X.map(row => row[featureIdx]).sort((a,b) => a-b);\n  const thresholds = vals.filter((v,i) => i===0 || v !== vals[i-1]);\n  for (const t of thresholds) {\n    for (const dir of [1, -1]) {\n      const pred = X.map(row => (dir*(row[featureIdx]-t) >= 0) ? 1 : 0);\n      let tp=0,tn=0,fp=0,fn=0;\n      pred.forEach((p,i) => { if(p===1&&y[i]===1)tp++; else if(p===0&&y[i]===0)tn++; else if(p===1)fp++; else fn++; });\n      const n1=tp+fp, n0=tn+fn, tot=X.length;\n      const g1=n1>0?1-Math.pow(tp/n1,2)-Math.pow(fp/n1,2):0;\n      const g0=n0>0?1-Math.pow(tn/n0,2)-Math.pow(fn/n0,2):0;\n      const gini=(n1*g1+n0*g0)/tot;\n      if(gini<bestGini){bestGini=gini;bestThresh=t;bestDir=dir;}\n    }\n  }\n  return { featureIdx, threshold: bestThresh, direction: bestDir };\n}\n\nconst numFeatures = Xtrain[0].length;\nconst trees = [];\nfor (let t=0; t<10; t++) {\n  const bagSize = Math.floor(Xtrain.length * 0.8);\n  const bagIdx = Array.from({length: bagSize}, () => Math.floor(Math.random()*Xtrain.length));\n  const Xbag = bagIdx.map(i => Xtrain[i]);\n  const ybag = bagIdx.map(i => ytrain[i]);\n  const fIdx = Math.floor(Math.random() * numFeatures);\n  trees.push(trainStump(Xbag, ybag, fIdx));\n}\nconst rfPred = Xtest.map(x => {\n  const votes = trees.map(s => (s.direction*(x[s.featureIdx]-s.threshold) >= 0) ? 1 : 0);\n  return votes.reduce((a,b)=>a+b,0) >= trees.length/2 ? 1 : 0;\n});\nconst rfMetrics = calcMetrics(rfPred, ytest);\n\n// --- 3. XGBoost Stumps (gradient boosting) ---\nfunction xgbBoost(X, y, nRounds=20, lr=0.3) {\n  let F = new Array(X.length).fill(0);\n  const stumps = [];\n  for (let r=0; r<nRounds; r++) {\n    const residuals = F.map((f,i) => y[i] - sigmoid(f));\n    let bestStump = null, bestCorr = -Infinity;\n    for (let fi=0; fi<X[0].length; fi++) {\n      const vals = [...new Set(X.map(row => row[fi]))].sort((a,b)=>a-b);\n      for (const t of vals) {\n        const pred = X.map(row => row[fi] >= t ? 1 : -1);\n        const corr = pred.reduce((s,p,i) => s + p*residuals[i], 0);\n        if (Math.abs(corr) > bestCorr) { bestCorr = Math.abs(corr); bestStump = {fi, t, dir: corr>0?1:-1}; }\n      }\n    }\n    if (!bestStump) break;\n    stumps.push(bestStump);\n    F = F.map((f,i) => f + lr * bestStump.dir * (X[i][bestStump.fi] >= bestStump.t ? 1 : -1));\n  }\n  return { stumps, F_train: F };\n}\nconst xgbModel = xgbBoost(Xtrain, ytrain);\nconst xgbPredF = Xtest.map(x => {\n  let f = 0;\n  for (const s of xgbModel.stumps) f += 0.3 * s.dir * (x[s.fi] >= s.t ? 1 : -1);\n  return f;\n});\nconst xgbPred = xgbPredF.map(f => sigmoid(f) >= 0.5 ? 1 : 0);\nconst xgbMetrics = calcMetrics(xgbPred, ytest);\n\nconst results = [\n  { algorithm: 'LogisticRegression', ...lrMetrics },\n  { algorithm: 'RandomForest', ...rfMetrics },\n  { algorithm: 'XGBoost', ...xgbMetrics }\n];\n\nreturn [{ json: {\n  strategy: setup.strategy,\n  train_size: setup.train_size,\n  test_size: setup.test_size,\n  model_results: results,\n  model_results_str: JSON.stringify(results)\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "dd1ad86a-9469-4eb7-890f-706fb1cf9de9",
+        "name": "P4: LLM Judge Best Model",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          9888,
+          1616
+        ],
+        "parameters": {
+          "text": "=You are an ML expert judge. Analyze these model results and select the best model. Return raw JSON only, no markdown.\n\nBusiness goal: {{ $json.strategy.business_goal }}\nEvaluation metric: {{ $json.strategy.evaluation_metric }}\nModel results: {{ $json.model_results_str }}\n\nReturn exactly:\n{\"winner\": \"<algorithm name>\", \"f1_score\": <number>, \"accuracy\": <number>, \"justification\": \"<one sentence why this model wins>\"}",
+          "promptType": "define"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "952afba0-febf-424d-ae1c-8990f240e404",
+        "name": "P4: Anthropic Sonnet Judge",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "position": [
+          9888,
+          1792
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "id",
+            "value": "claude-sonnet-4-6"
+          },
+          "options": {}
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "38cd85dd-8565-4607-99dc-dabcc462fb7d",
+        "name": "P4: Parse Judge Verdict",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          10176,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const raw = $input.first().json.text || '';\nlet verdict;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  verdict = match ? JSON.parse(match[0]) : null;\n} catch(e) { verdict = null; }\n\nconst upstream = $('P4: Train All Models').first().json;\nconst results = upstream.model_results;\n\nif (!verdict || !verdict.winner) {\n  // Fallback: pick highest f1\n  const best = results.reduce((a,b) => b.f1_score > a.f1_score ? b : a);\n  verdict = { winner: best.algorithm, f1_score: best.f1_score, accuracy: best.accuracy, justification: 'Selected by highest F1 score' };\n}\n\nreturn [{ json: {\n  strategy: upstream.strategy,\n  model_results: results,\n  winner: verdict.winner,\n  winner_f1: verdict.f1_score,\n  winner_accuracy: verdict.accuracy,\n  justification: verdict.justification,\n  train_size: upstream.train_size,\n  test_size: upstream.test_size\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "971117dd-c2ea-4031-a8eb-be5b994f819f",
+        "name": "P4: Log Training",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          10384,
+          1616
+        ],
+        "parameters": {
+          "url": "https://YOUR_PROJECT.supabase.co/rest/v1/mlops_audit_log",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "phase",
+                "value": "P4_TRAINING"
+              },
+              {
+                "name": "status",
+                "value": "complete"
+              },
+              {
+                "name": "workflow_step",
+                "value": "={{ 'winner=' + $json.winner + ' f1=' + $json.winner_f1 }}"
+              },
+              {
+                "name": "run_id",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "YOUR_SUPABASE_SERVICE_ROLE_KEY"
+              },
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Prefer",
+                "value": "return=minimal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "b0f56987-47b9-4e53-a779-09b2b163a734",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          10576,
+          1408
+        ],
+        "parameters": {
+          "color": 2,
+          "width": 936,
+          "height": 116,
+          "content": "### Phase 5 — HITL Deployment\n`Claude Sonnet` writes MODEL_CARD.md → `Slack` posts approval request to human → `Supabase` audit log\n\n> 💡 Add a Webhook + If node after the Slack message to handle the human approval callback and trigger a GitHub commit."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c41e615a-34da-440b-aa98-1a1967663cbb",
+        "name": "P5: Generate Model Card",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "position": [
+          10608,
+          1616
+        ],
+        "parameters": {
+          "text": "=You are a ML documentation expert. Generate a concise MODEL_CARD.md for the winning model. Use proper markdown.\n\nWinning Model: {{ $json.winner }}\nF1 Score: {{ $json.winner_f1 }}\nAccuracy: {{ $json.winner_accuracy }}\nJustification: {{ $json.justification }}\nBusiness Goal: {{ $json.strategy.business_goal }}\nTarget Variable: {{ $json.strategy.target_variable }}\nTrain Size: {{ $json.train_size }}\nTest Size: {{ $json.test_size }}\nAll Model Results: {{ JSON.stringify($json.model_results) }}\n\nGenerate a MODEL_CARD.md with sections: Model Overview, Performance Metrics, Training Data, Feature Engineering, Intended Use, Limitations.",
+          "promptType": "define"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "feceb4a1-5121-4a3c-be70-0335c852ae7c",
+        "name": "P5: Anthropic Sonnet Card",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "position": [
+          10608,
+          1792
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "id",
+            "value": "claude-sonnet-4-6"
+          },
+          "options": {}
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "62091e00-e3ed-48cc-9e1c-617b25525571",
+        "name": "P5: Assemble Deployment Payload",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          10832,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const modelCard = $input.first().json.text || '# Model Card\\n\\nNo content generated.';\nconst verdict = $('P4: Parse Judge Verdict').first().json;\n\nreturn [{ json: {\n  strategy: verdict.strategy,\n  winner: verdict.winner,\n  winner_f1: verdict.winner_f1,\n  winner_accuracy: verdict.winner_accuracy,\n  justification: verdict.justification,\n  model_results: verdict.model_results,\n  model_card: modelCard,\n  model_card_b64: Buffer.from(modelCard).toString('base64'),\n  run_id: `mlops-${Date.now()}`\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b3c654ae-9026-4922-9da3-7707c8c1ddbc",
+        "name": "P5: Send Slack Approval",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          11056,
+          1616
+        ],
+        "parameters": {
+          "text": "=*MLOps Pipeline Complete — Approval Required*\n\n*Run ID:* `{{ $json.run_id }}`\n*Winner:* {{ $json.winner }}\n*F1 Score:* {{ $json.winner_f1 }}\n*Accuracy:* {{ $json.winner_accuracy }}\n*Justification:* {{ $json.justification }}\n\n*All Results:*\n{{ $json.model_results.map(m => `• ${m.algorithm}: F1=${m.f1_score}, Acc=${m.accuracy}`).join('\\n') }}\n\nReply with ✅ to approve GitHub deployment or ❌ to reject.",
+          "select": "channel",
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "YOUR_SLACK_CHANNEL_ID"
+          },
+          "otherOptions": {}
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "b3e57af3-b2f5-4575-981d-fb321530016f",
+        "name": "P5: Log Pipeline Complete",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          11264,
+          1616
+        ],
+        "parameters": {
+          "url": "https://YOUR_PROJECT.supabase.co/rest/v1/mlops_audit_log",
+          "method": "POST",
+          "options": {},
+          "sendBody": true,
+          "sendHeaders": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "phase",
+                "value": "P5_COMPLETE"
+              },
+              {
+                "name": "status",
+                "value": "complete"
+              },
+              {
+                "name": "workflow_step",
+                "value": "={{ 'winner=' + $json.winner }}"
+              },
+              {
+                "name": "run_id",
+                "value": "={{ $now.toISO() }}"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "YOUR_SUPABASE_SERVICE_ROLE_KEY"
+              },
+              {
+                "name": "Authorization",
+                "value": "Bearer YOUR_TOKEN_HERE"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Prefer",
+                "value": "return=minimal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "20b42d3e-7c68-4727-9c8c-d2ae274d7389",
+        "name": "P2: Fetch CSV",
+        "type": "n8n-nodes-base.httpRequest",
+        "position": [
+          7856,
+          1616
+        ],
+        "parameters": {
+          "url": "={{ $('P1: Parse Strategy').first().json.dataset_url }}",
+          "options": {}
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "6c0989bf-1806-4cdc-a7dc-798eb72eeebd",
+        "name": "P2: Clean Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          8288,
+          1616
+        ],
+        "parameters": {
+          "jsCode": "const csvText = $input.first().json.data || '';\nconst strategy = $('P1: Parse Strategy').first().json;\nconst targetVar = strategy.target_variable;\n\nif (!csvText) throw new Error('No CSV data received');\n\n// Proper CSV parser that handles quoted fields with commas\nfunction parseCSVLine(line) {\n  const result = [];\n  let cur = '';\n  let inQuotes = false;\n  for (let i = 0; i < line.length; i++) {\n    const ch = line[i];\n    if (ch === '\"') {\n      if (inQuotes && line[i+1] === '\"') { cur += '\"'; i++; }\n      else inQuotes = !inQuotes;\n    } else if (ch === ',' && !inQuotes) {\n      result.push(cur.trim());\n      cur = '';\n    } else {\n      cur += ch;\n    }\n  }\n  result.push(cur.trim());\n  return result;\n}\n\nconst lines = csvText.trim().split('\\n');\nconst headers = parseCSVLine(lines[0]);\nconst rows = [];\nfor (let i = 1; i < lines.length; i++) {\n  if (!lines[i].trim()) continue;\n  const vals = parseCSVLine(lines[i]);\n  if (vals.length >= headers.length - 1) {\n    const row = {};\n    headers.forEach((h, idx) => { row[h] = vals[idx] || ''; });\n    rows.push(row);\n  }\n}\n\n// Drop rows with missing target\nconst cleaned = rows.filter(r => r[targetVar] !== '' && r[targetVar] !== undefined);\n\n// Numeric conversion\nconst numericFields = ['Age', 'Fare', 'SibSp', 'Parch', 'Pclass', 'PassengerId', targetVar];\ncleaned.forEach(row => {\n  numericFields.forEach(f => {\n    if (row[f] !== undefined && row[f] !== '') {\n      const n = parseFloat(row[f]);\n      if (!isNaN(n)) row[f] = n;\n    }\n  });\n  if (typeof row['Age'] !== 'number' || isNaN(row['Age'])) row['Age'] = 29;\n  row['Sex_enc'] = row['Sex'] === 'male' ? 0 : row['Sex'] === 'female' ? 1 : -1;\n  const embMap = { 'S': 0, 'C': 1, 'Q': 2 };\n  row['Embarked_enc'] = embMap[row['Embarked']] !== undefined ? embMap[row['Embarked']] : 0;\n});\n\nreturn [{ json: {\n  strategy,\n  original_count: rows.length,\n  clean_count: cleaned.length,\n  headers,\n  clean_data: JSON.stringify(cleaned)\n}}];"
+        },
+        "typeVersion": 2
+      }
+    ],
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "connections": {
+      "P2: Fetch CSV": {
+        "main": [
+          [
+            {
+              "node": "P2: Clean Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P2: Clean Data": {
+        "main": [
+          [
+            {
+              "node": "P2: Log Data Eng",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "P3: Reason About Features",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P1: Parse Strategy": {
+        "main": [
+          [
+            {
+              "node": "P1: Log Strategy",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "P2: Fetch CSV",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P3: Anthropic Haiku": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "P3: Reason About Features",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P1: Anthropic Sonnet": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "P1: Plan ML Strategy",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P1: Plan ML Strategy": {
+        "main": [
+          [
+            {
+              "node": "P1: Parse Strategy",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P4: Setup Algorithms": {
+        "main": [
+          [
+            {
+              "node": "P4: Train All Models",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P4: Train All Models": {
+        "main": [
+          [
+            {
+              "node": "P4: LLM Judge Best Model",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P1: Receive MLOps Job": {
+        "main": [
+          [
+            {
+              "node": "P1: Plan ML Strategy",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P3: Engineer Features": {
+        "main": [
+          [
+            {
+              "node": "P3: Log Feature Eng",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "P4: Setup Algorithms",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P3: Parse Feature Plan": {
+        "main": [
+          [
+            {
+              "node": "P3: Engineer Features",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P4: Parse Judge Verdict": {
+        "main": [
+          [
+            {
+              "node": "P4: Log Training",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "P5: Generate Model Card",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P5: Generate Model Card": {
+        "main": [
+          [
+            {
+              "node": "P5: Assemble Deployment Payload",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P4: LLM Judge Best Model": {
+        "main": [
+          [
+            {
+              "node": "P4: Parse Judge Verdict",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P3: Reason About Features": {
+        "main": [
+          [
+            {
+              "node": "P3: Parse Feature Plan",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P5: Anthropic Sonnet Card": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "P5: Generate Model Card",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P4: Anthropic Sonnet Judge": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "P4: LLM Judge Best Model",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "P5: Assemble Deployment Payload": {
+        "main": [
+          [
+            {
+              "node": "P5: Send Slack Approval",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "P5: Log Pipeline Complete",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 30,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 8
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 6
+      },
+      "@n8n/n8n-nodes-langchain.chainLlm": {
+        "count": 4
+      },
+      "@n8n/n8n-nodes-langchain.lmChatAnthropic": {
+        "count": 4
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Surya Vardhan Yalavarthi",
+    "username": "suryayalavarthi",
+    "bio": "CS/Data Science student at UC, exploring what's possible with n8n and agentic AI workflows. I build practical automations that solve real engineering problems — focused on evidence-based AI, clean outputs, and no hallucinations. Currently diving deeper into Data Science and Machine Learning.",
+    "verified": true,
+    "links": [
+      "https://www.suryayalavarthi.dev"
+    ],
+    "avatar": "https://gravatar.com/avatar/420a0b3f344404512d778a86376e6155000918989388997e17fd407cb3f0f4ba?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1123,
+      "icon": "fa:link",
+      "name": "@n8n/n8n-nodes-langchain.chainLlm",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.chainllm/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Basic LLM Chain",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "link",
+        "type": "icon"
+      },
+      "displayName": "Basic LLM Chain",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1145,
+      "icon": "file:anthropic.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "codex": {
+        "data": {
+          "alias": [
+            "claude",
+            "sonnet",
+            "opus"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatanthropic/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Anthropic Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSIzMiIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzdEN0Q4NyIgZD0iTTMyLjczIDBoLTYuOTQ1TDM4LjQ1IDMyaDYuOTQ1ek0xMi42NjUgMCAwIDMyaDcuMDgybDIuNTktNi43MmgxMy4yNWwyLjU5IDYuNzJoNy4wODJMMTkuOTI5IDB6bS0uNzAyIDE5LjMzNyA0LjMzNC0xMS4yNDYgNC4zMzQgMTEuMjQ2eiIvPjwvc3ZnPg=="
+      },
+      "displayName": "Anthropic Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 5,
+      "name": "Engineering"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

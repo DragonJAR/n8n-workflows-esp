@@ -1,0 +1,2157 @@
+{
+  "id": 13875,
+  "name": "Analyze contract risk from PDFs with OpenAI, Supabase and Slack alerts",
+  "views": 112,
+  "recentViews": 4,
+  "totalViews": 112,
+  "createdAt": "2026-03-04T23:22:01.148Z",
+  "description": "## Who it's for\n\nLegal, Procurement, and Compliance teams at mid-size companies. ESN and agencies selling AI-powered contract review as a service.\n\n## How it works\n\nUpload a contract PDF through a rich form (with metadata: contract type, counterparty, department, submitter). The workflow first checks Supabase for duplicates to avoid re-analyzing the same contract. Then it runs a **two-pass AI analysis**: Pass 1 classifies the contract (type, parties, dates, jurisdiction), Pass 2 performs deep risk analysis (clause-by-clause risk levels, missing clauses, obligations, negotiation points, compliance flags). Results are scored 0–100 with risk levels (CRITICAL / HIGH / MEDIUM / LOW). A structured report is generated as both **Slack Block Kit** (rich formatting) and **HTML email**. High-risk contracts trigger a Slack alert with full blocks and an email report to the submitter. Low-risk contracts get a summary Slack notification. All analyses are stored in Supabase with full metadata for audit. An Error Trigger sends admin notifications to a dedicated Slack channel.\n\n## How to set up\n\n1. Run the SQL from the \"Supabase Schema\" sticky note in Supabase SQL Editor.\n2. Set environment variables: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`.\n3. Add credentials in n8n: **OpenAI** (Header Auth), **Supabase**, **Slack**, **Gmail** (optional).\n4. Configure the **Config** node: RISK_THRESHOLD, SLACK_CHANNEL, ADMIN_SLACK_CHANNEL, AI_MODEL, ALERT_EMAIL, ENABLE_EMAIL, CONTRACT_LANG.\n5. Activate the workflow and share the Form URL with your team.",
+  "workflow": {
+    "meta": {
+      "instanceId": "4fb03e8a794c9a4ffa717f54989f44bb958e64f57e605ef61bad499ca54d20f3",
+      "templateCredsSetupCompleted": true
+    },
+    "nodes": [
+      {
+        "id": "8a78e62f-28c0-4d24-9a33-521acd836974",
+        "name": "Overview",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2032,
+          1552
+        ],
+        "parameters": {
+          "color": 5,
+          "width": 560,
+          "height": 520,
+          "content": "## Enterprise AI Contract Intelligence - Pro\n\n**Who it's for:** Legal, Procurement, Compliance teams. ESN/agencies.\n\n**What it does:**\n1. Upload contract PDF via form (with metadata: type, department, counterparty)\n2. Deduplication check against Supabase\n3. AI Pass 1 - Classification (parties, dates, jurisdiction, contract type)\n4. AI Pass 2 - Deep risk analysis (clauses, red flags, obligations, recommendations)\n5. Build structured report (Slack Blocks + HTML email)\n6. Store in Supabase with full metadata\n7. Slack Block Kit alert (high risk) or summary (low risk)\n8. Gmail HTML report to submitter (configurable)\n9. Error handling with admin Slack channel\n\n**Setup:** Run the SQL in the \"Supabase Schema\" sticky. Add credentials: OpenAI (Header Auth), Supabase, Slack, Gmail. Configure the Config node."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "54d26b31-109f-4508-aaeb-0ecbd3bea3d6",
+        "name": "Supabase Schema",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2032,
+          896
+        ],
+        "parameters": {
+          "color": 6,
+          "width": 564,
+          "height": 620,
+          "content": "**Supabase Schema** — Run in Supabase SQL Editor before use:\n\n```sql\nCREATE TABLE IF NOT EXISTS contract_analyses (\n  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,\n  filename TEXT NOT NULL,\n  contract_type TEXT,\n  jurisdiction TEXT,\n  submitter_name TEXT,\n  submitter_email TEXT,\n  department TEXT,\n  counterparty TEXT,\n  raw_text_preview TEXT,\n  parties JSONB,\n  key_clauses JSONB,\n  overall_risk_score INT DEFAULT 0,\n  risk_level TEXT DEFAULT 'unknown',\n  executive_summary TEXT,\n  top_risks JSONB,\n  recommendations JSONB,\n  classification JSONB,\n  status TEXT DEFAULT 'analyzed'\n    CHECK (status IN ('analyzed','flagged','archived','reviewing')),\n  analyzed_at TIMESTAMPTZ DEFAULT NOW(),\n  created_at TIMESTAMPTZ DEFAULT NOW()\n);\nCREATE INDEX IF NOT EXISTS idx_ca_score\n  ON contract_analyses(overall_risk_score DESC);\nCREATE INDEX IF NOT EXISTS idx_ca_status\n  ON contract_analyses(status);\nCREATE INDEX IF NOT EXISTS idx_ca_type\n  ON contract_analyses(contract_type);\nCREATE INDEX IF NOT EXISTS idx_ca_created\n  ON contract_analyses(created_at DESC);\nCREATE INDEX IF NOT EXISTS idx_ca_filename\n  ON contract_analyses(filename);\n```"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "87dfd4af-c94e-4d18-b51f-0b3c56cf7072",
+        "name": "Step 1 Ingest",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2640,
+          1552
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 140,
+          "content": "**Step 1 - Ingest**\n\nForm upload with metadata (contract type, submitter, department, counterparty) or Manual test with sample data. Config node centralizes all settings."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "e63d0723-0341-43a0-b15b-f48d78178052",
+        "name": "Step 2 Deduplicate",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2976,
+          1552
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 140,
+          "content": "**Step 2 - Deduplicate**\n\nQuery Supabase for existing analysis with the same filename. If found, skip analysis and show previous result. Avoids wasting AI tokens on re-uploads."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f658564e-c7a3-4808-a59e-0815adbcceba",
+        "name": "Step 3 Extract",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3312,
+          1552
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 300,
+          "height": 140,
+          "content": "**Step 3 - Extract & Prepare**\n\nExtract text from PDF binary, normalize, truncate to 12k chars, merge with form metadata and config for downstream AI calls."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "a8abaca7-fffe-4268-a7fd-4b8f54fd3086",
+        "name": "Step 4 AI Analysis",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3696,
+          1552
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 340,
+          "content": "**Step 4 - AI Two-Pass Analysis**\n\nPass 1: Quick classification (type, parties, dates, jurisdiction, ~300 tokens).\nPass 2: Deep risk analysis (clauses, obligations, red flags, recommendations, ~2000 tokens).\nSplit for cost efficiency and structured output."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "aa16c460-b7aa-4b7f-9a75-fd05b74287c9",
+        "name": "Step 5 Report Alert",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          4144,
+          1552
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 360,
+          "content": "**Step 5 - Report, Store & Alert**\n\nBuild Report generates Slack Block Kit JSON + HTML email body.\nSupabase insert stores full analysis with metadata.\nHigh risk → Slack Blocks alert + Gmail HTML report.\nLow risk → Slack summary notification.\nForm Ending shows completion to user."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "cb0e27e8-f26e-436d-a474-f10c699dccb1",
+        "name": "Error Handling Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          4832,
+          1552
+        ],
+        "parameters": {
+          "color": 2,
+          "width": 320,
+          "height": 120,
+          "content": "**Error Handling**\n\nError Trigger catches any workflow failure and sends a notification to the admin Slack channel (#n8n-errors). Includes workflow name, error message, and timestamp."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2dc1a40d-d75a-43c6-a19f-ac60f5b6a88a",
+        "name": "Upload Contract",
+        "type": "n8n-nodes-base.formTrigger",
+        "position": [
+          2736,
+          1856
+        ],
+        "webhookId": "52d4bc80-fdfc-4c9d-9f4c-a341fa64dea5",
+        "parameters": {
+          "options": {},
+          "formTitle": "Contract AI Analysis — Upload & Analyze",
+          "formFields": {
+            "values": [
+              {
+                "fieldType": "file",
+                "fieldLabel": "Contract PDF",
+                "requiredField": true,
+                "acceptFileTypes": ".pdf,.docx"
+              },
+              {
+                "fieldType": "dropdown",
+                "fieldLabel": "Contract Type",
+                "fieldOptions": {
+                  "values": [
+                    {
+                      "option": "NDA"
+                    },
+                    {
+                      "option": "MSA"
+                    },
+                    {
+                      "option": "SOW / Statement of Work"
+                    },
+                    {
+                      "option": "Employment"
+                    },
+                    {
+                      "option": "SaaS / License"
+                    },
+                    {
+                      "option": "Consulting"
+                    },
+                    {
+                      "option": "Partnership"
+                    },
+                    {
+                      "option": "Other"
+                    }
+                  ]
+                },
+                "requiredField": true
+              },
+              {
+                "fieldLabel": "Contract Name",
+                "placeholder": "e.g. NDA - Acme Corp Q1 2025",
+                "requiredField": true
+              },
+              {
+                "fieldLabel": "Counterparty Name",
+                "placeholder": "e.g. Acme Corporation",
+                "requiredField": true
+              },
+              {
+                "fieldLabel": "Your Name",
+                "placeholder": "e.g. John Doe",
+                "requiredField": true
+              },
+              {
+                "fieldType": "email",
+                "fieldLabel": "Your Email",
+                "placeholder": "user@example.com",
+                "requiredField": true
+              },
+              {
+                "fieldType": "dropdown",
+                "fieldLabel": "Department",
+                "fieldOptions": {
+                  "values": [
+                    {
+                      "option": "Legal"
+                    },
+                    {
+                      "option": "Procurement"
+                    },
+                    {
+                      "option": "Finance"
+                    },
+                    {
+                      "option": "Sales"
+                    },
+                    {
+                      "option": "Engineering"
+                    },
+                    {
+                      "option": "HR"
+                    },
+                    {
+                      "option": "Operations"
+                    },
+                    {
+                      "option": "Other"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "formDescription": "Upload a contract PDF for AI-powered analysis. The system will extract key clauses, assess risk, and provide actionable recommendations."
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "536c0506-43b9-4869-9e66-182864bf5d63",
+        "name": "Manual Test",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          2736,
+          2160
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "5d3ff4a9-4d75-4f35-b767-84c8f7f680f7",
+        "name": "Config",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          2736,
+          2000
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "1",
+                "name": "RISK_THRESHOLD",
+                "type": "number",
+                "value": 70
+              },
+              {
+                "id": "2",
+                "name": "SLACK_CHANNEL",
+                "type": "string",
+                "value": "#legal-alerts"
+              },
+              {
+                "id": "3",
+                "name": "ADMIN_SLACK_CHANNEL",
+                "type": "string",
+                "value": "#n8n-errors"
+              },
+              {
+                "id": "4",
+                "name": "AI_MODEL",
+                "type": "string",
+                "value": "gpt-4o-mini"
+              },
+              {
+                "id": "5",
+                "name": "ALERT_EMAIL",
+                "type": "string",
+                "value": "user@example.com"
+              },
+              {
+                "id": "6",
+                "name": "ENABLE_EMAIL",
+                "type": "boolean",
+                "value": true
+              },
+              {
+                "id": "7",
+                "name": "CONTRACT_LANG",
+                "type": "string",
+                "value": "en"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "5003aa1e-ea7e-46c0-8e1c-0a3844f2c25c",
+        "name": "Check Duplicate",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          3040,
+          2000
+        ],
+        "parameters": {
+          "url": "={{ $env.SUPABASE_URL }}/rest/v1/contract_analyses",
+          "options": {
+            "response": {
+              "response": {}
+            }
+          },
+          "sendQuery": true,
+          "sendHeaders": true,
+          "authentication": "predefinedCredentialType",
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "filename",
+                "value": "=eq.{{ $json.filename ?? $json['Contract Name'] ?? 'unknown' }}"
+              },
+              {
+                "name": "select",
+                "value": "id,filename,overall_risk_score,status,analyzed_at"
+              },
+              {
+                "name": "limit",
+                "value": "1"
+              }
+            ]
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "={{ $env.SUPABASE_SERVICE_KEY }}"
+              },
+              {
+                "name": "Prefer",
+                "value": "return=representation"
+              }
+            ]
+          },
+          "nodeCredentialType": "openAiApi"
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "n8n free OpenAI API credits"
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "a0749143-735f-4443-b85f-6748c8a36c7d",
+        "name": "Already Exists?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          3264,
+          2000
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "caseSensitive": true
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "1",
+                "operator": {
+                  "type": "number",
+                  "operation": "gt"
+                },
+                "leftValue": "={{ Array.isArray($json) ? $json.length : 0 }}",
+                "rightValue": 0
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d6f15504-861a-48c9-b078-4158d17bb5d7",
+        "name": "Already Analyzed",
+        "type": "n8n-nodes-base.form",
+        "position": [
+          3472,
+          1920
+        ],
+        "webhookId": "b3a1c005-abe5-42d2-a8a7-2262e267f2f7",
+        "parameters": {
+          "options": {},
+          "operation": "completion",
+          "completionTitle": "Already Analyzed",
+          "completionMessage": "This contract has already been analyzed. Check Supabase for the existing report."
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "1a67b439-5764-4fce-a3ef-5f4f28f70211",
+        "name": "Has File?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          3472,
+          2096
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "caseSensitive": true
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "1",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ ($binary || {}).data !== undefined }}",
+                "rightValue": true
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "3352c639-8fbe-40c9-ae9b-30faa9c8b083",
+        "name": "Extract PDF Text",
+        "type": "n8n-nodes-base.extractFromFile",
+        "position": [
+          3696,
+          2016
+        ],
+        "parameters": {
+          "options": {},
+          "operation": "pdf"
+        },
+        "typeVersion": 1.1
+      },
+      {
+        "id": "9b475384-b8d7-480a-a249-607a16d68cfb",
+        "name": "Sample Data",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          3696,
+          2192
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "1",
+                "name": "contractText",
+                "type": "string",
+                "value": "SAMPLE CONTRACT FOR TESTING\n\nThis Master Service Agreement (MSA) is entered into as of January 15, 2025, by and between:\n\nParty A: TechCorp International Ltd., a company incorporated under the laws of France, with registered office at 42 Avenue des Champs-Élysées, 75008 Paris (\"Client\")\n\nParty B: CloudVendor Solutions Inc., a Delaware corporation, with principal office at 100 Market Street, San Francisco, CA 94105 (\"Vendor\")\n\n1. TERM: This Agreement shall commence on the Effective Date and continue for a period of thirty-six (36) months, automatically renewing for successive 12-month periods unless terminated.\n\n2. TERMINATION: Either party may terminate with 30 days written notice. Client may terminate for convenience with 15 days notice. Early termination fee: 50% of remaining contract value.\n\n3. LIABILITY: Vendor's total aggregate liability shall not exceed the fees paid in the 12 months preceding the claim. EXCLUSION: This cap does NOT apply to breaches of confidentiality, IP infringement, or gross negligence.\n\n4. INDEMNIFICATION: Vendor shall indemnify, defend, and hold harmless Client against all third-party claims arising from: (a) IP infringement, (b) data breaches caused by Vendor negligence, (c) violation of applicable law. Client indemnifies Vendor against claims arising from Client's misuse of services.\n\n5. INTELLECTUAL PROPERTY: All pre-existing IP remains with original owner. Work product created specifically for Client shall be owned by Client upon full payment. Vendor retains license to use general methodologies and tools.\n\n6. CONFIDENTIALITY: 5-year obligation post-termination. Covers all non-public business and technical information. Standard exceptions apply (public domain, independent development, legal compulsion).\n\n7. DATA PROTECTION: Vendor shall comply with GDPR and applicable data protection laws. DPA attached as Annex B. Sub-processors require prior written consent.\n\n8. WARRANTY: Vendor warrants services will be performed in a professional manner consistent with industry standards. 30-day cure period for material defects.\n\n9. GOVERNING LAW: This Agreement shall be governed by French law. Disputes shall be resolved by the Commercial Court of Paris.\n\n10. FORCE MAJEURE: Neither party liable for delays due to events beyond reasonable control, provided affected party notifies within 5 business days."
+              },
+              {
+                "id": "2",
+                "name": "filename",
+                "type": "string",
+                "value": "sample-msa-techcorp.pdf"
+              },
+              {
+                "id": "3",
+                "name": "Contract Type",
+                "type": "string",
+                "value": "MSA"
+              },
+              {
+                "id": "4",
+                "name": "Counterparty Name",
+                "type": "string",
+                "value": "CloudVendor Solutions Inc."
+              },
+              {
+                "id": "5",
+                "name": "Your Name",
+                "type": "string",
+                "value": "Ahmed Test"
+              },
+              {
+                "id": "6",
+                "name": "Your Email",
+                "type": "string",
+                "value": "user@example.com"
+              },
+              {
+                "id": "7",
+                "name": "Department",
+                "type": "string",
+                "value": "Legal"
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "06ff5e07-5631-4d13-998f-976be80288b5",
+        "name": "Prepare Text",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3920,
+          2096
+        ],
+        "parameters": {
+          "jsCode": "const item = $input.first();\nconst raw = item.json?.contractText ?? item.json?.text ?? item.json?.data ?? '';\nconst pages = item.json?.pages;\nlet fullText = raw;\nif (Array.isArray(pages)) fullText = pages.map(p => p?.text ?? p).filter(Boolean).join('\\n\\n');\nif (!fullText) {\n  const found = Object.values(item.json).find(v => typeof v === 'string' && v.length > 100);\n  if (found) fullText = found;\n}\n\nconst config = $('Config').first()?.json ?? {};\nconst formData = item.json;\nconst contractText = String(fullText).slice(0, 12000);\nconst contractTextShort = contractText.substring(0, 4000);\n\nreturn { json: {\n  ...config,\n  contractText,\n  contractTextSafe: JSON.stringify(contractText).slice(1, -1),\n  contractTextShortSafe: JSON.stringify(contractTextShort).slice(1, -1),\n  charCount: String(fullText).length,\n  filename: formData['Contract Name'] ?? formData.filename ?? 'contract.pdf',\n  contract_type: formData['Contract Type'] ?? 'Other',\n  counterparty: formData['Counterparty Name'] ?? '',\n  submitter_name: formData['Your Name'] ?? '',\n  submitter_email: formData['Your Email'] ?? '',\n  department: formData['Department'] ?? ''\n} };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b6bc0ed1-4325-4d2a-8a81-ebf730dc9fac",
+        "name": "Parse Classification",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4384,
+          2096
+        ],
+        "parameters": {
+          "jsCode": "const resp = $input.first().json;\nconst raw = resp.choices?.[0]?.message?.content ?? '{}';\nlet classification = {};\ntry {\n  classification = JSON.parse(raw.replace(/```json?/g,'').replace(/```/g,'').trim());\n} catch(e) {\n  classification = { contract_type: 'Unknown', parties: [], jurisdiction: 'Unknown' };\n}\nconst prev = $('Prepare Text').first()?.json ?? {};\nreturn { json: { ...prev, classification } };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "eebe98e1-641f-4930-ae9a-0005ea1b1ed2",
+        "name": "Parse Risk Analysis",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4816,
+          2096
+        ],
+        "parameters": {
+          "jsCode": "const resp = $input.first().json;\nconst raw = resp.choices?.[0]?.message?.content ?? '{}';\nlet analysis = {};\ntry {\n  analysis = JSON.parse(raw.replace(/```json?/g,'').replace(/```/g,'').trim());\n} catch(e) {\n  analysis = { overall_risk_score: 50, risk_level: 'MEDIUM', executive_summary: 'AI parse error — manual review recommended', key_clauses: [], top_risks: ['Parse error'] };\n}\n\nconst prev = $('Parse Classification').first()?.json ?? {};\nconst score = Math.min(100, Math.max(0, analysis.overall_risk_score ?? 50));\nlet riskLevel = analysis.risk_level ?? 'MEDIUM';\nif (score >= 85) riskLevel = 'CRITICAL';\nelse if (score >= 70) riskLevel = 'HIGH';\nelse if (score >= 40) riskLevel = 'MEDIUM';\nelse riskLevel = 'LOW';\n\nreturn { json: {\n  ...prev,\n  ...analysis,\n  overall_risk_score: score,\n  risk_level: riskLevel,\n  key_clauses: analysis.key_clauses ?? [],\n  top_risks: analysis.top_risks ?? [],\n  missing_clauses: analysis.missing_clauses ?? [],\n  obligations: analysis.obligations ?? [],\n  negotiation_points: analysis.negotiation_points ?? [],\n  compliance_flags: analysis.compliance_flags ?? [],\n  raw_text_preview: (prev.contractText || '').slice(0, 500),\n  status: score >= (prev.RISK_THRESHOLD ?? 70) ? 'flagged' : 'analyzed'\n} };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "db2f0f88-2472-4d28-97e2-a6ab518c7996",
+        "name": "Build Report",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          5040,
+          2096
+        ],
+        "parameters": {
+          "jsCode": "const d = $input.first().json;\nconst score = d.overall_risk_score;\nconst level = d.risk_level;\nconst clauses = (d.key_clauses || []).slice(0, 5);\nconst topRisks = (d.top_risks || []).slice(0, 5);\nconst missing = (d.missing_clauses || []).slice(0, 3);\nconst negotiations = (d.negotiation_points || []).slice(0, 3);\nconst compliance = (d.compliance_flags || []).slice(0, 3);\n\nconst emoji = level === 'CRITICAL' ? '🔴' : level === 'HIGH' ? '🟠' : level === 'MEDIUM' ? '🟡' : '🟢';\nconst color = level === 'CRITICAL' ? '#dc2626' : level === 'HIGH' ? '#ea580c' : level === 'MEDIUM' ? '#ca8a04' : '#16a34a';\n\nconst slackBlocks = [\n  { type: 'header', text: { type: 'plain_text', text: `${emoji} Contract Analysis: ${d.filename}` } },\n  { type: 'section', text: { type: 'mrkdwn', text: `*Risk Score:* ${score}/100 — *${level}*\\n*Type:* ${d.classification?.contract_type ?? d.contract_type ?? 'N/A'} | *Jurisdiction:* ${d.classification?.jurisdiction ?? 'N/A'}\\n*Parties:* ${(d.classification?.parties ?? []).map(p => `${p.name} (${p.role})`).join(', ') || 'N/A'}\\n*Counterparty:* ${d.counterparty || 'N/A'} | *Submitted by:* ${d.submitter_name || 'N/A'} (${d.department || 'N/A'})` } },\n  { type: 'divider' },\n  { type: 'section', text: { type: 'mrkdwn', text: `*Executive Summary*\\n${d.executive_summary || 'N/A'}` } }\n];\n\nif (topRisks.length > 0) {\n  slackBlocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Top Risks*\\n${topRisks.map((r, i) => `${i+1}. ${r}`).join('\\n')}` } });\n}\nif (clauses.length > 0) {\n  slackBlocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Key Clauses*\\n${clauses.map(c => `• *${c.clause_type}* [${(c.risk_level || '').toUpperCase()}]: ${c.risk_explanation || c.excerpt || ''}`).join('\\n')}` } });\n}\nif (missing.length > 0) {\n  slackBlocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Missing Clauses*\\n${missing.map(m => `⚠️ ${m}`).join('\\n')}` } });\n}\nif (negotiations.length > 0) {\n  slackBlocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Negotiation Points*\\n${negotiations.map(n => `💡 ${n}`).join('\\n')}` } });\n}\n\nslackBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `Analyzed at ${new Date().toISOString()} | Contract Intelligence Pro` }] });\n\nconst clauseRows = clauses.map(c => {\n  const bg = c.risk_level === 'critical' ? '#fecaca' : c.risk_level === 'high' ? '#fed7aa' : c.risk_level === 'medium' ? '#fef08a' : '#bbf7d0';\n  return `<tr style=\"background:${bg}\"><td style=\"padding:8px;border:1px solid #e5e7eb\">${c.clause_type}</td><td style=\"padding:8px;border:1px solid #e5e7eb\">${(c.risk_level||'').toUpperCase()}</td><td style=\"padding:8px;border:1px solid #e5e7eb\">${c.risk_explanation || ''}</td><td style=\"padding:8px;border:1px solid #e5e7eb\">${c.recommendation || ''}</td></tr>`;\n}).join('');\n\nconst emailHtml = `\n<div style=\"font-family:Arial,sans-serif;max-width:700px;margin:0 auto\">\n  <div style=\"background:${color};color:white;padding:20px;border-radius:8px 8px 0 0\">\n    <h1 style=\"margin:0;font-size:22px\">${emoji} Contract Analysis Report</h1>\n    <p style=\"margin:8px 0 0;font-size:16px\">${d.filename} — Risk Score: ${score}/100 (${level})</p>\n  </div>\n  <div style=\"padding:20px;background:#f9fafb;border:1px solid #e5e7eb\">\n    <table style=\"width:100%;border-collapse:collapse;margin-bottom:16px\">\n      <tr><td style=\"padding:6px 12px;font-weight:bold;width:140px\">Contract Type</td><td style=\"padding:6px 12px\">${d.classification?.contract_type ?? d.contract_type ?? 'N/A'}</td></tr>\n      <tr><td style=\"padding:6px 12px;font-weight:bold\">Counterparty</td><td style=\"padding:6px 12px\">${d.counterparty || 'N/A'}</td></tr>\n      <tr><td style=\"padding:6px 12px;font-weight:bold\">Jurisdiction</td><td style=\"padding:6px 12px\">${d.classification?.jurisdiction ?? 'N/A'}</td></tr>\n      <tr><td style=\"padding:6px 12px;font-weight:bold\">Submitted by</td><td style=\"padding:6px 12px\">${d.submitter_name || 'N/A'} (${d.department || 'N/A'})</td></tr>\n      <tr><td style=\"padding:6px 12px;font-weight:bold\">Parties</td><td style=\"padding:6px 12px\">${(d.classification?.parties ?? []).map(p => `${p.name} (${p.role})`).join(', ') || 'N/A'}</td></tr>\n    </table>\n    <h2 style=\"color:#1f2937;font-size:16px;margin:16px 0 8px\">Executive Summary</h2>\n    <p style=\"color:#4b5563;line-height:1.6\">${d.executive_summary || 'N/A'}</p>\n    ${topRisks.length > 0 ? `<h2 style=\"color:#1f2937;font-size:16px;margin:16px 0 8px\">Top Risks</h2><ul style=\"color:#4b5563\">${topRisks.map(r => `<li>${r}</li>`).join('')}</ul>` : ''}\n    ${clauses.length > 0 ? `<h2 style=\"color:#1f2937;font-size:16px;margin:16px 0 8px\">Key Clauses</h2><table style=\"width:100%;border-collapse:collapse\"><tr style=\"background:#f3f4f6\"><th style=\"padding:8px;border:1px solid #e5e7eb;text-align:left\">Clause</th><th style=\"padding:8px;border:1px solid #e5e7eb;text-align:left\">Risk</th><th style=\"padding:8px;border:1px solid #e5e7eb;text-align:left\">Explanation</th><th style=\"padding:8px;border:1px solid #e5e7eb;text-align:left\">Recommendation</th></tr>${clauseRows}</table>` : ''}\n    ${missing.length > 0 ? `<h2 style=\"color:#1f2937;font-size:16px;margin:16px 0 8px\">Missing Clauses</h2><ul style=\"color:#dc2626\">${missing.map(m => `<li>${m}</li>`).join('')}</ul>` : ''}\n    ${negotiations.length > 0 ? `<h2 style=\"color:#1f2937;font-size:16px;margin:16px 0 8px\">Negotiation Points</h2><ul style=\"color:#2563eb\">${negotiations.map(n => `<li>${n}</li>`).join('')}</ul>` : ''}\n    ${compliance.length > 0 ? `<h2 style=\"color:#1f2937;font-size:16px;margin:16px 0 8px\">Compliance Flags</h2><ul style=\"color:#9333ea\">${compliance.map(c => `<li>${c}</li>`).join('')}</ul>` : ''}\n  </div>\n  <div style=\"padding:12px 20px;background:#f3f4f6;border-radius:0 0 8px 8px;text-align:center;color:#9ca3af;font-size:12px\">\n    Contract Intelligence Pro — Analyzed ${new Date().toISOString().split('T')[0]}\n  </div>\n</div>`;\n\nreturn { json: { ...d, slackBlocks: JSON.stringify(slackBlocks), emailHtml, emailSubject: `${emoji} [${level}] Contract Analysis: ${d.filename} — Score ${score}/100` } };"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7f7d0872-3bb8-4480-b748-96722b07ca77",
+        "name": "Supabase Insert",
+        "type": "n8n-nodes-base.supabase",
+        "position": [
+          5264,
+          2096
+        ],
+        "parameters": {
+          "tableId": "contract_analyses"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "607470fa-deb2-4e4d-9a14-80494cf17b61",
+        "name": "High Risk?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          5472,
+          2096
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "caseSensitive": true
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "1",
+                "operator": {
+                  "type": "number",
+                  "operation": "gte"
+                },
+                "leftValue": "={{ $json.overall_risk_score }}",
+                "rightValue": "={{ $json.RISK_THRESHOLD ?? 70 }}"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "c745489a-3292-424d-9d66-c9d10dd9c8cd",
+        "name": "Form Ending",
+        "type": "n8n-nodes-base.form",
+        "position": [
+          6144,
+          2096
+        ],
+        "webhookId": "9486f099-68cc-4f15-8269-b573d592f220",
+        "parameters": {
+          "options": {},
+          "operation": "completion",
+          "completionTitle": "={{ 'Analysis Complete — ' + ($json.risk_level ?? 'N/A') }}",
+          "completionMessage": "={{ 'Contract: ' + ($json.filename ?? 'N/A') + '\\nRisk Score: ' + ($json.overall_risk_score ?? 'N/A') + '/100 (' + ($json.risk_level ?? 'N/A') + ')\\nType: ' + ($json.classification?.contract_type ?? $json.contract_type ?? 'N/A') + '\\n\\n' + ($json.executive_summary ?? '') + '\\n\\nFull report stored in Supabase.' + ($json.ENABLE_EMAIL ? ' Email report sent to ' + ($json.submitter_email || $json.ALERT_EMAIL || '') + '.' : '') }}"
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "45f67023-11d0-4198-a0dd-4172751ce974",
+        "name": "Error Trigger",
+        "type": "n8n-nodes-base.errorTrigger",
+        "position": [
+          4944,
+          2352
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "a10dab0a-9abd-4fa9-9ea5-8cb4ab4811fd",
+        "name": "Slack Admin — Error",
+        "type": "n8n-nodes-base.slack",
+        "onError": "continueRegularOutput",
+        "position": [
+          5184,
+          2352
+        ],
+        "webhookId": "eda55fff-0045-4681-a629-8b8cb9e04469",
+        "parameters": {
+          "operation": "create"
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "4fcde5ae-05c7-4c05-ab89-72169fbe7c5a",
+        "name": "AI Pass 1 - Classify",
+        "type": "n8n-nodes-base.httpRequest",
+        "maxTries": 2,
+        "position": [
+          4160,
+          2096
+        ],
+        "parameters": {
+          "url": "https://api.openai.com/v1/chat/completions",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"model\": \"{{ $json.AI_MODEL ?? 'gpt-4o-mini' }}\",\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a legal document classifier. Extract metadata from the contract. Reply ONLY with valid JSON. Language: {{ $json.CONTRACT_LANG ?? 'en' }}.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Classify this contract and return JSON with EXACTLY these fields: { \\\"contract_type\\\": \\\"NDA|MSA|SOW|Employment|SaaS|Consulting|Partnership|Other\\\", \\\"parties\\\": [{\\\"name\\\": string, \\\"role\\\": \\\"client|vendor|employer|employee|partner|other\\\"}], \\\"effective_date\\\": \\\"ISO date or unknown\\\", \\\"expiration_date\\\": \\\"ISO date or unknown\\\", \\\"auto_renewal\\\": boolean, \\\"jurisdiction\\\": \\\"country/region\\\", \\\"governing_law\\\": string, \\\"language\\\": string, \\\"estimated_value\\\": \\\"amount or unknown\\\" }. Submitted as: {{ $json.contract_type }}. Counterparty: {{ $json.counterparty }}.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"{{ $json.contractTextShortSafe }}\"\n    }\n  ],\n  \"temperature\": 0.1,\n  \"max_tokens\": 500\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "openAiApi"
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "n8n free OpenAI API credits"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 4.2,
+        "waitBetweenTries": 3000
+      },
+      {
+        "id": "97fb58ef-4cc7-4d7d-b0f1-80a915064880",
+        "name": "AI Pass 2 - Deep Risk",
+        "type": "n8n-nodes-base.httpRequest",
+        "maxTries": 2,
+        "position": [
+          4592,
+          2096
+        ],
+        "parameters": {
+          "url": "https://api.openai.com/v1/chat/completions",
+          "method": "POST",
+          "options": {},
+          "jsonBody": "={\n  \"model\": \"{{ $json.AI_MODEL ?? 'gpt-4o-mini' }}\",\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a senior legal risk analyst specializing in contract review. Perform a thorough clause-by-clause risk assessment. Reply ONLY with valid JSON. Language: {{ $json.CONTRACT_LANG ?? 'en' }}.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Perform a deep risk analysis of this {{ $json.classification.contract_type ?? 'contract' }} between {{ ($json.classification.parties ?? []).map(p => p.name).join(' and ') || 'the parties' }}. Jurisdiction: {{ $json.classification.jurisdiction ?? 'Unknown' }}.\\n\\nReturn JSON with EXACTLY these fields:\\n{\\n  \\\"key_clauses\\\": [{ \\\"clause_type\\\": string, \\\"excerpt\\\": \\\"verbatim quote max 100 chars\\\", \\\"risk_level\\\": \\\"critical|high|medium|low\\\", \\\"risk_explanation\\\": string, \\\"recommendation\\\": string, \\\"negotiation_leverage\\\": \\\"strong|moderate|weak\\\" }],\\n  \\\"overall_risk_score\\\": 0-100,\\n  \\\"risk_level\\\": \\\"CRITICAL|HIGH|MEDIUM|LOW\\\",\\n  \\\"executive_summary\\\": \\\"3-5 sentences\\\",\\n  \\\"top_risks\\\": [\\\"concise risk descriptions\\\"],\\n  \\\"missing_clauses\\\": [\\\"important clauses not found in contract\\\"],\\n  \\\"obligations\\\": [{ \\\"party\\\": string, \\\"obligation\\\": string, \\\"deadline\\\": \\\"string or none\\\" }],\\n  \\\"negotiation_points\\\": [\\\"specific actionable suggestions\\\"],\\n  \\\"compliance_flags\\\": [\\\"GDPR/regulatory concerns\\\"]\\n}\\n\\nFocus areas: indemnification, liability caps, termination penalties, IP ownership, data protection, warranty, non-compete, auto-renewal, governing law, force majeure.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"{{ $json.contractTextSafe }}\"\n    }\n  ],\n  \"temperature\": 0.15,\n  \"max_tokens\": 2500\n}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "openAiApi"
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "n8n free OpenAI API credits"
+          }
+        },
+        "retryOnFail": true,
+        "typeVersion": 4.2,
+        "waitBetweenTries": 3000
+      },
+      {
+        "id": "3951bc85-a646-4284-93d8-0dd60965d3fd",
+        "name": "Slack Alert - High Risk",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          5696,
+          1904
+        ],
+        "webhookId": "4023d42d-e4cc-4e8d-9b73-952adca6c15c",
+        "parameters": {
+          "operation": "create"
+        },
+        "typeVersion": 2.4
+      },
+      {
+        "id": "06fbd53b-aba8-4de0-b8ea-2df20c8a7a71",
+        "name": "Gmail - Risk Report",
+        "type": "n8n-nodes-base.gmail",
+        "onError": "continueRegularOutput",
+        "position": [
+          5696,
+          2096
+        ],
+        "webhookId": "39a05c7d-0332-443e-b12d-3613effecfb4",
+        "parameters": {
+          "sendTo": "={{ $json.ENABLE_EMAIL ? ($json.submitter_email || $json.ALERT_EMAIL || 'legal@company.com') : '' }}",
+          "message": "={{ $json.emailHtml }}",
+          "options": {},
+          "subject": "={{ $json.emailSubject }}"
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "971832e8-72b7-4794-bf2f-0e1dacf61ad8",
+        "name": "Slack Summary - Low Risk",
+        "type": "n8n-nodes-base.slack",
+        "position": [
+          5696,
+          2304
+        ],
+        "webhookId": "af3ddf7e-66c6-4d71-96c6-f54ecd0e5824",
+        "parameters": {
+          "operation": "create"
+        },
+        "typeVersion": 2.4
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Config": {
+        "main": [
+          [
+            {
+              "node": "Check Duplicate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has File?": {
+        "main": [
+          [
+            {
+              "node": "Extract PDF Text",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Sample Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "High Risk?": {
+        "main": [
+          [
+            {
+              "node": "Slack Alert - High Risk",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Gmail - Risk Report",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Slack Summary - Low Risk",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Manual Test": {
+        "main": [
+          [
+            {
+              "node": "Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sample Data": {
+        "main": [
+          [
+            {
+              "node": "Prepare Text",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Report": {
+        "main": [
+          [
+            {
+              "node": "Supabase Insert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Text": {
+        "main": [
+          [
+            {
+              "node": "AI Pass 1 - Classify",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Error Trigger": {
+        "main": [
+          [
+            {
+              "node": "Slack Admin — Error",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Already Exists?": {
+        "main": [
+          [
+            {
+              "node": "Already Analyzed",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Has File?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Duplicate": {
+        "main": [
+          [
+            {
+              "node": "Already Exists?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Supabase Insert": {
+        "main": [
+          [
+            {
+              "node": "High Risk?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload Contract": {
+        "main": [
+          [
+            {
+              "node": "Config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract PDF Text": {
+        "main": [
+          [
+            {
+              "node": "Prepare Text",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Risk Analysis": {
+        "main": [
+          [
+            {
+              "node": "Build Report",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Pass 1 - Classify": {
+        "main": [
+          [
+            {
+              "node": "Parse Classification",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Classification": {
+        "main": [
+          [
+            {
+              "node": "AI Pass 2 - Deep Risk",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "AI Pass 2 - Deep Risk": {
+        "main": [
+          [
+            {
+              "node": "Parse Risk Analysis",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Slack Alert - High Risk": {
+        "main": [
+          [
+            {
+              "node": "Form Ending",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Slack Summary - Low Risk": {
+        "main": [
+          [
+            {
+              "node": "Form Ending",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 31,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 3
+      },
+      "n8n-nodes-base.set": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 4
+      },
+      "n8n-nodes-base.form": {
+        "count": 2
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 1
+      },
+      "n8n-nodes-base.slack": {
+        "count": 3
+      },
+      "n8n-nodes-base.supabase": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 8
+      },
+      "n8n-nodes-base.formTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "n8n-nodes-base.errorTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.extractFromFile": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "ben daamer",
+    "username": "ahmedbendaamer",
+    "bio": "a tech aficionado with an unquenchable thirst for coding and DevOps. Armed with my keyboard and a cup of coffee, I embark on thrilling adventures ...",
+    "verified": true,
+    "links": [
+      "https://www.linkedin.com/in/ahmed-ben-daamer/?locale=en-US"
+    ],
+    "avatar": "https://gravatar.com/avatar/2c0dd7487752a93937b06338d443b5d1033fbb80bc286d276c62569772900dee?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 12,
+      "icon": "fa:bug",
+      "name": "n8n-nodes-base.errorTrigger",
+      "codex": {
+        "data": {
+          "details": "In n8n, when a workflow execution fails, it can start another workflow. This second workflow can be any arbitrary workflow on your n8n instance. Use the Error Trigger node as your Trigger in the Error workflow.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/creating-error-workflows-in-n8n/",
+                "icon": "🌪",
+                "label": "Creating Error Workflows in n8n"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.errortrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Error Trigger",
+        "color": "#0000FF"
+      },
+      "iconData": {
+        "icon": "bug",
+        "type": "icon"
+      },
+      "displayName": "Error Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 545,
+      "icon": "file:supabase.svg",
+      "name": "n8n-nodes-base.supabase",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.supabase/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/supabase/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Supabase"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDkiIGhlaWdodD0iMTEzIiBmaWxsPSJub25lIj48cGF0aCBmaWxsPSJ1cmwoI2EpIiBkPSJNNjMuNzA4IDExMC4yODRjLTIuODYgMy42MDEtOC42NTggMS42MjgtOC43MjctMi45N2wtMS4wMDctNjcuMjUxaDQ1LjIyYzguMTkgMCAxMi43NTggOS40NiA3LjY2NSAxNS44NzR6Ii8+PHBhdGggZmlsbD0idXJsKCNiKSIgZmlsbC1vcGFjaXR5PSIuMiIgZD0iTTYzLjcwOCAxMTAuMjg0Yy0yLjg2IDMuNjAxLTguNjU4IDEuNjI4LTguNzI3LTIuOTdsLTEuMDA3LTY3LjI1MWg0NS4yMmM4LjE5IDAgMTIuNzU4IDkuNDYgNy42NjUgMTUuODc0eiIvPjxwYXRoIGZpbGw9IiMzRUNGOEUiIGQ9Ik00NS4zMTcgMi4wNzFjMi44Ni0zLjYwMSA4LjY1Ny0xLjYyOCA4LjcyNiAyLjk3bC40NDIgNjcuMjUxSDkuODNjLTguMTkgMC0xMi43NTktOS40Ni03LjY2NS0xNS44NzV6Ii8+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJhIiB4MT0iNTMuOTc0IiB4Mj0iOTQuMTYzIiB5MT0iNTQuOTc0IiB5Mj0iNzEuODI5IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agc3RvcC1jb2xvcj0iIzI0OTM2MSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzNFQ0Y4RSIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJiIiB4MT0iMzYuMTU2IiB4Mj0iNTQuNDg0IiB5MT0iMzAuNTc4IiB5Mj0iNjUuMDgxIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3AvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1vcGFjaXR5PSIwIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PC9zdmc+"
+      },
+      "displayName": "Supabase",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1225,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.formTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "table",
+            "submit",
+            "post"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.formtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Other Trigger Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "On form submission"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form Trigger",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1235,
+      "icon": "file:extractFromFile.svg",
+      "name": "n8n-nodes-base.extractFromFile",
+      "codex": {
+        "data": {
+          "alias": [
+            "CSV",
+            "Spreadsheet",
+            "Excel",
+            "xls",
+            "xlsx",
+            "ods",
+            "tabular",
+            "decode",
+            "decoding",
+            "Move Binary Data",
+            "Binary",
+            "File",
+            "PDF",
+            "JSON",
+            "HTML",
+            "ICS",
+            "iCal",
+            "txt",
+            "Text",
+            "RTF",
+            "XML",
+            "64",
+            "Base64",
+            "Convert"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.extractfromfile/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Files",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Extract from File"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTAuOTM3NSAyQzAuNDE5NzMzIDIgMCAyLjQxOTczIDAgMi45Mzc1VjM3LjMyMjFDMCAzNy44Mzk5IDAuNDE5NzMzIDM4LjI1OTYgMC45Mzc1IDM4LjI1OTZIMjYuMjE1NEMyNi43MzMyIDM4LjI1OTYgMjcuMTUyOSAzNy44Mzk5IDI3LjE1MjkgMzcuMzIyMUwyNy4xNTI5IDMwLjY3MTlMMTYuNzk2OSAzMC42NzE5QzE0Ljg5ODQgMzAuNjcxOSAxMy4zNTk0IDI5LjEzMjkgMTMuMzU5NCAyNy4yMzQ0VjI1LjM1OTRDMTMuMzU5NCAyMy40NjA5IDE0Ljg5ODQgMjEuOTIxOSAxNi43OTY5IDIxLjkyMTlIMjcuMTUyOUwyNy4xNTI5IDE1Ljc4MjFIMTQuMzA4M0MxMy43OTA2IDE1Ljc4MjEgMTMuMzcwOCAxNS4zNjI0IDEzLjM3MDggMTQuODQ0NlYySDAuOTM3NVoiIGZpbGw9IiMzNTNGNkUiLz4KPHBhdGggZD0iTTE2LjAyNzEgMkMxNS45NDA4IDIgMTUuODcwOCAyLjA2OTk2IDE1Ljg3MDggMi4xNTYyNVYxMi44MTM0QzE1Ljg3MDggMTMuMDcyMyAxNi4wODA3IDEzLjI4MjEgMTYuMzM5NiAxMy4yODIxSDI2Ljk5NjdDMjcuMDgzIDEzLjI4MjEgMjcuMTUyOSAxMy4yMTIyIDI3LjE1MjkgMTMuMTI1OUwyNy4xNTI5IDEyLjYxNzFDMjcuMTUyOSAxMi4zNjg4IDI3LjA1NDUgMTIuMTMwNyAyNi44NzkxIDExLjk1NUwxNy4yMjI1IDIuMjc1MzhDMTcuMDQ2NiAyLjA5OTA4IDE2LjgwNzkgMiAxNi41NTg4IDJIMTYuMDI3MVoiIGZpbGw9IiMzNTNGNkUiLz4KPHBhdGggZD0iTTI5Ljc2NDIgMzQuNjUwM0MyOS4wMzQgMzMuOTE2IDI5LjAzNzQgMzIuNzI4OCAyOS43NzE2IDMxLjk5ODZMMzMuNjE5NyAyOC4xNzE5TDE2Ljc5NjkgMjguMTcxOUMxNi4yNzkxIDI4LjE3MTkgMTUuODU5NCAyNy43NTIxIDE1Ljg1OTQgMjcuMjM0NFYyNS4zNTk0QzE1Ljg1OTQgMjQuODQxNiAxNi4yNzkxIDI0LjQyMTkgMTYuNzk2OSAyNC40MjE5TDMzLjU0MTIgMjQuNDIxOUwyOS43NzE2IDIwLjY3MzNDMjkuMDM3NCAxOS45NDMxIDI5LjAzNCAxOC43NTU5IDI5Ljc2NDIgMTguMDIxNkMzMC40OTQ0IDE3LjI4NzQgMzEuNjgxNiAxNy4yODQgMzIuNDE1OSAxOC4wMTQyTDM5LjQ0NzEgMjUuMDA2NEMzOS44MDEgMjUuMzU4MyA0MCAyNS44MzY4IDQwIDI2LjMzNTlDNDAgMjYuODM1IDM5LjgwMSAyNy4zMTM1IDM5LjQ0NzEgMjcuNjY1NUwzMi40MTU5IDM0LjY1NzZDMzEuNjgxNiAzNS4zODc4IDMwLjQ5NDQgMzUuMzg0NSAyOS43NjQyIDM0LjY1MDNaIiBmaWxsPSIjMzUzRjZFIi8+Cjwvc3ZnPgo="
+      },
+      "displayName": "Extract from File",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1274,
+      "icon": "file:form.svg",
+      "name": "n8n-nodes-base.form",
+      "codex": {
+        "data": {
+          "alias": [
+            "_Form",
+            "form",
+            "table",
+            "submit",
+            "post",
+            "page",
+            "step",
+            "stage",
+            "multi"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.form/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Form"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSI0MCIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzAwQjdCQyIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMzQuOTc4IDM3LjczMmExLjU2IDEuNTYgMCAwIDEtMS41NjIgMS41NjNINi4yNmExLjU2IDEuNTYgMCAwIDEtMS41NjMtMS41NjNWOS42MDdjMC0uNDA1LjE1Ny0uNzk0LjQzOC0xLjA4Nmw2LjMwNC02LjUzMXY1LjM0NEg4LjIxM2ExLjE3MiAxLjE3MiAwIDEgMCAwIDIuMzQzaDQuNDNhMS4xNyAxLjE3IDAgMCAwIDEuMTcxLTEuMTcxVi4yMzJoMTkuNjAyYTEuNTYgMS41NiAwIDAgMSAxLjU2MiAxLjU2M3YxMC4zMjdsLTIuODYgMi44Ni04LjI1MiA4LjI3NmE0MTMuMDA2IDQxMy4wMDYgMCAwIDEtMS42NTQgMS42NjJsLS4zMzcuMzM3YTIgMiAwIDAgMC0uNTU3IDEuMDhMMjAuMyAzMS45MjJjLS4xMDguNjM4LS4yMTUgMS4wNzkuMjExIDEuNDE4LjQwMy4zMi45LjE3NCAxLjU0LjA2Nmw1LjQwOC0uOTI4YTIgMiAwIDAgMCAxLjA4LS41NTZsNi40NC02LjQyOXptLTI0LjAzLTIxLjI2NWExLjE4IDEuMTggMCAwIDAgMS4xNzEgMS4xNzJoMTMuMTYzYTEuMTcyIDEuMTcyIDAgMSAwIDAtMi4zNDRIMTIuMTE5YTEuMTcgMS4xNyAwIDAgMC0xLjE3MiAxLjE3Mm03LjI5NCAxNC43NjZhMS4xNyAxLjE3IDAgMCAwLTEuMTcyLTEuMTcySDEyLjEyYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNC45NTFhMS4xNyAxLjE3IDAgMCAwIDEuMTcyLTEuMTcybS44Ni03LjM5MWExLjE3IDEuMTcgMCAwIDAtMS4xNzItMS4xNzJoLTUuODExYTEuMTcyIDEuMTcyIDAgMSAwIDAgMi4zNDNoNS44MWExLjE2NCAxLjE2NCAwIDAgMCAxLjE3My0xLjE3MSIgY2xpcC1ydWxlPSJldmVub2RkIi8+PHBhdGggZmlsbD0iIzAwQjdCQyIgZD0ibTMzLjUzMiAxNi4zOTcgNC4yODktNC4yODkgMy43NTggMy43MSAxLjYxNy0xLjYxNiAyLjI1OCAyLjI1N2MuMjE4LjIxOC4zNC41MTMuMzQzLjgyLS4wMDIuMzExLS4xMjUuNjA4LS4zNDQuODNsLTYuODA0IDYuNzk2YTEuMTMgMS4xMyAwIDAgMS0uODI4LjM0MyAxLjE1IDEuMTUgMCAwIDEtLjgyOC0uMzQzIDEuMTggMS4xOCAwIDAgMSAwLTEuNjU3bDUuOTc2LTUuOTY4LTEuMzEyLTEuMzEzLTEuMzgzIDEuNDE0LTEzLjE0OSAxMy4xMjUtNC42MTcuNzgyLjc4Mi00LjYxNy4zMzYtLjMzNyAyLjU2MiAyLjU1NWExLjEgMS4xIDAgMCAwIC44MjguMzQ0Yy4zMTIuMDA1LjYxMi0uMTIuODI4LS4zNDRhMS4xOCAxLjE4IDAgMCAwIDAtMS42NTZsLTIuNTYyLTIuNTYyek00NC43MzYgMTIuMjRjMCAuNDE0LS4xNjMuODEtLjQ1NCAxLjEwMmwtLjkyMi45MTQtMy44NTItMy44MjguOTMtLjkzYTEuNTYzIDEuNTYzIDAgMCAxIDIuMjAzIDBsMS42NCAxLjY0MWMuMjkxLjI5My40NTUuNjkuNDU1IDEuMTAyIi8+PC9zdmc+"
+      },
+      "displayName": "n8n Form",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 35,
+      "name": "Document Extraction"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

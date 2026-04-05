@@ -1,0 +1,864 @@
+{
+  "id": 10369,
+  "name": "Automate loan document analysis with Mistral OCR and GPT for underwriting decisions",
+  "views": 636,
+  "recentViews": 0,
+  "totalViews": 636,
+  "createdAt": "2025-10-30T20:54:53.471Z",
+  "description": "**LOB Underwriting with AI**\n\nThis template ingests borrower documents from OneDrive, extracts text with OCR, classifies each file (ID, paystub, bank statement, utilities, tax forms, etc.), aggregates everything per borrower, and asks an LLM to produce a clear underwriting summary and decision (plus next steps).\n\n**Good to know**\n\n1. AI and OCR usage consume credits (OpenAI + your OCR provider).\n2. Folder lookups by name can be ambiguous—use a fixed folderId in production.\n3. Scanned image quality drives OCR accuracy; bad scans yield weak text.\n4. This flow handles PII—mask sensitive data in logs and control access.\n5. Start small: batch size and pagination keep costs/memory sane.\n\n**How it works**\n\n1. Import & locate docs: Manual trigger kicks off a OneDrive folder search (e.g., “LOBs”) and lists files inside.\n2. Per-file loop: Download each file → run OCR → classify the document type using filename + extracted text.\n3. Aggregate: Combine per-file results into a borrower payload (make BorrowerName dynamic).\n4. LLM analysis: Feed the payload to an AI Agent (OpenAI model) to extract underwriting-relevant facts and produce a decision + next steps.\n5. Output: Return a human-readable summary (and optionally structured JSON for systems).\n\n**How to use**\n\n1. Start with the Manual Trigger to validate end-to-end on a tiny test folder.\n2. Once stable, swap in a Schedule/Cron or Webhook trigger.\n3. Review the generated underwriting summary; handle only flagged exceptions (unknown/unreadable docs, low confidence).\n\n**Setup steps**\n\n**Connect accounts**\n\n- Add credentials for OneDrive, OCR, and OpenAI.\n\n**Configure inputs**\n\n- In Search a folder, point to your borrower docs (prefer folderId; otherwise tighten the name query).\n- In Get items in a folder, enable pagination if the folder is large.\n- In Split in Batches, set a conservative batch size to control costs.\n\n**Wire the file path**\n\n- Download a file must receive the current file’s id from the folder listing.\n- Make sure the OCR node receives binary input (PDFs/images).\n\n**Classification**\n\n- Update keyword rules to match your region/lenders/utilities/tax forms.\n- Keep a fallback Unknown class and log it for review.\n\n**Combine**\n\n1. Replace the hard-coded BorrowerName with:\n\n  - a Set node field,\n  - a form input, or\n  - parsing from folder/file naming conventions.\n\n**AI Agent**\n\n- Set your OpenAI model/credentials.\n- Ask the model to output JSON first (structured fields) and Markdown second (readable summary).\n- Keep temperature low for consistent, audit-friendly results.\n\n**Optional outputs**\n\n- Persist JSON/Markdown to Notion/Docs/DB or write to storage.\n\n**Customize if needed**\n\n- Doc types: add/remove categories and keywords without touching core logic.\n- Error handling: add IF paths for empty folders, failed downloads, empty OCR, or Unknown class; retry transient API errors.\n- Privacy: redact IDs/account numbers in logs; restrict execution visibility.\n- Scale: add MIME/size filters, duplicate detection, and multi-borrower folder patterns (parent → subfolders).\n",
+  "workflow": {
+    "id": "rVKBWXqaa79EfTVA",
+    "meta": {
+      "instanceId": "db1715da5f21adba44ce4ea3b08abb06cd1771e876f5ad2751fcafd78c5eb9dc",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "UnderwritingLoanAnalysis",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "0d40759f-812a-4972-ba74-e42c8d5aa258",
+        "name": "Search a folder",
+        "type": "n8n-nodes-base.microsoftOneDrive",
+        "position": [
+          624,
+          0
+        ],
+        "parameters": {
+          "query": "<Your Folder Name>",
+          "resource": "folder",
+          "operation": "search"
+        },
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "microsoftOneDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "65de0a29-5e09-41ae-b14c-e83a10eb1be5",
+        "name": "Get items in a folder",
+        "type": "n8n-nodes-base.microsoftOneDrive",
+        "position": [
+          832,
+          0
+        ],
+        "parameters": {
+          "folderId": "={{ $json.id }}",
+          "resource": "folder"
+        },
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "microsoftOneDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "bdfdb814-df76-42ff-8b07-926c7e7d48c2",
+        "name": "Download a file",
+        "type": "n8n-nodes-base.microsoftOneDrive",
+        "position": [
+          1216,
+          80
+        ],
+        "parameters": {
+          "fileId": "={{ $('Get items in a folder').item.json.id }}",
+          "operation": "download"
+        },
+        "credentials": {
+          "microsoftOneDriveOAuth2Api": {
+            "id": "credential-id",
+            "name": "microsoftOneDriveOAuth2Api Credential"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "bcd0718c-df22-41e1-9754-a2298877ae43",
+        "name": "Extract text",
+        "type": "n8n-nodes-base.mistralAi",
+        "position": [
+          1376,
+          80
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "credentials": {
+          "mistralCloudApi": {
+            "id": "credential-id",
+            "name": "mistralCloudApi Credential"
+          }
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6eaee806-a5e6-4c5d-b89a-500bd70cc03d",
+        "name": "Classify the File",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1584,
+          80
+        ],
+        "parameters": {
+          "jsCode": "// get filename from Download node\nconst fileName = ($('Download a file').first().json.name || '').toLowerCase();\n\n// get extracted text from OCR node\nconst text = ($input.first().json.extractedText || '').toLowerCase();\n\nlet type = \"Unknown\";\n\n// --- Rule-based classification ---\n\n// Priority 1: File name clues\nif (fileName.includes(\"passport\")) type = \"Passport\";\nelse if (fileName.includes(\"license\") || fileName.includes(\"dl\")) type = \"Driving License\";\nelse if (fileName.includes(\"mortgage\")) type = \"Mortgage Application\";\nelse if (fileName.includes(\"proof\") && fileName.includes(\"fund\")) type = \"Proof of Funds Letter\";\nelse if (fileName.includes(\"pay\") || fileName.includes(\"paystub\")) type = \"Employee Pay Statement\";\nelse if (fileName.includes(\"t4\")) type = \"T4 Statement\";\nelse if (fileName.includes(\"electric\") || fileName.includes(\"hydro\")) type = \"Electricity Bill\";\nelse if (fileName.includes(\"internet\") || fileName.includes(\"shaw\")) type = \"Internet Bill\";\nelse if (fileName.includes(\"statement\") && fileName.includes(\"account\")) type = \"Account Statement\";\nelse if (fileName.includes(\"bank\")) type = \"Bank Statement\";\n\n// Priority 2: Text-based fallback\nelse if (text.includes(\"gross pay\") || text.includes(\"net pay\")) type = \"Employee Pay Statement\";\nelse if (text.includes(\"bank of montreal\") || text.includes(\"scotiabank\") || text.includes(\"royal bank\")) type = \"Bank Statement\";\nelse if (text.includes(\"proof of funds\")) type = \"Proof of Funds Letter\";\nelse if (text.includes(\"mortgage application\")) type = \"Mortgage Application\";\nelse if (text.includes(\"driver\") && text.includes(\"licence\")) type = \"Driving License\";\nelse if (text.includes(\"internet\") && text.includes(\"usage\")) type = \"Internet Bill\";\nelse if (text.includes(\"hydro\") || text.includes(\"electricity\")) type = \"Electricity Bill\";\nelse if (text.includes(\"t4\") && text.includes(\"income\")) type = \"T4 Statement\";\n\nreturn [{\n  json: {\n    FileName: $('Download a file').first().json.name,\n    DocumentType: type,\n    ExtractedText: $input.first().json.extractedText\n  }\n}];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "15d653cd-af01-43a1-ac1d-1497774745dd",
+        "name": "Combine the Data",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1248,
+          -256
+        ],
+        "parameters": {
+          "jsCode": "// Gather all items coming from the \"Done\" output of the Loop Over Items node\nconst docs = $input.all().map(item => ({\n  FileName: item.json.FileName || null,\n  DocumentType: item.json.DocumentType || \"Unknown\",\n  ExtractedText: item.json.ExtractedText || \"\"\n}));\n\nreturn [{\n  json: {\n    BorrowerName: \"Kenneth Smith\", // replace with dynamic value if available\n    Documents: docs\n  }\n}];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "fa0b2bc5-2038-4b94-8650-5908298c64dc",
+        "name": "AI Agent",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "position": [
+          1392,
+          -256
+        ],
+        "parameters": {
+          "text": "=You will receive an array of documents belonging to a single mortgage applicant.\n\nEach document object includes:\n- FileName  \n- DocumentType  \n- ExtractedText (the OCR text from the original file)\n\nAnalyze the full dataset, identify document types, extract key financial information, and produce an underwriting summary and decision as described in the system prompt.\n\nBorrower Documents:\n{{ JSON.stringify($json.Documents, null, 2) }}\n",
+          "options": {
+            "systemMessage": "=You are a senior mortgage underwriter at a Canadian financial institution.\n\nYou will analyze a borrower’s full document set to determine mortgage eligibility, loan feasibility, and documentation completeness.\n\nYour analysis must include:\n\n### 1. Identity Verification\nConfirm borrower identity, address, and citizenship using ID documents (Passport, Driver’s License, Utility Bills).\n\n### 2. Employment & Income Verification\nValidate employment details, employer name, job title, tenure, and consistency of pay across pay statements, T4s, and tax filings.\n\n### 3. Asset & Liability Review\nSummarize checking, savings, and investment balances.  \nIdentify recurring debts or monthly obligations (utilities, rent, phone, insurance, etc.).  \nCalculate Debt-to-Income (DTI) ratio.\n\n### 4. Property & Loan Analysis\nIf a mortgage application or loan-related document is present, extract:\n- Lender name and officer\n- Loan amount and term\n- Interest rate type (fixed / variable)\n- Loan purpose (purchase / refinance)\n- Down payment and percentage\n- Property value and address\n- Property type and use (primary, investment, secondary)\n- Amortization structure\n- Derived Loan-to-Value (LTV = loan amount ÷ property value)\nThen evaluate:\n- Whether the borrower’s verified assets can support the required down payment.\n- Whether DTI and LTV fall within standard underwriting thresholds.\n- Any property or loan risks (e.g., old property, low down payment, non-owner-occupied use).\n\n### 5. Document Consistency\nIdentify missing, inconsistent, or outdated documents (expired IDs, missing pay stubs, missing credit report).\n\n### 6. Decision\nProvide a professional underwriter-style decision with justification:\n- **Decision:** Approve / Approve with conditions / Decline / Escalate\n- **Rationale:** Clear bullet points explaining the reasoning.\n- **Next Steps:** Requested documents or verifications before final approval.\n\n### Output Format\nReturn your analysis as Markdown:\n\n#### Step 1: Identity Verification\n#### Step 2: Employment & Income\n#### Step 3: Assets & Liabilities\n#### Step 4: Property & Loan Analysis\n#### Step 5: Document Consistency\n#### Step 6: Final Decision\n#### Decision Summary (bullet points)\n"
+          },
+          "promptType": "define"
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "1be14652-9fa5-473b-afc8-901a0ec4ed07",
+        "name": "OpenAI Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "position": [
+          1392,
+          -112
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "<Your LLM Model Name>"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "e5fe5cff-e538-4032-8df5-1246099618d1",
+        "name": "When clicking ‘Execute workflow’",
+        "type": "n8n-nodes-base.manualTrigger",
+        "position": [
+          432,
+          0
+        ],
+        "parameters": {},
+        "typeVersion": 1
+      },
+      {
+        "id": "30b481ed-670c-4303-a0da-7362e94fa2d4",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          176
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 816,
+          "content": "**Solution: \n\ntrigger the run, grab files from a known OneDrive folder, loop in batches, OCR each file, classify it with simple filename+text rules, aggregate into a borrower payload, then have the LLM return JSON first and a brief Markdown decision. Add filters/retries, bucket unknown/unreadable docs, log counts/costs, and keep PII out of logs.**"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "9ea5459a-21f6-4e75-830b-b4b38400f089",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          -224
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 816,
+          "content": "**Problem Statement**\n\nUnderwriters receive borrower documents in mixed formats and naming conventions (IDs, paystubs, bank statements, utility bills, tax forms). Manually opening, reading, and sorting these files is slow and error-prone. Two big pain points: 1) reliably extracting text from scans, and 2) consistently identifying document types to assemble a complete borrower picture. This leads to missed docs, inconsistent decisions, weak audit trails, and high turnaround time—especially when multiple borrowers are involved."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4d426895-0b7f-4ea1-a38f-5188801f586a",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -480,
+          -32
+        ],
+        "parameters": {
+          "color": 4,
+          "width": 816,
+          "height": 176,
+          "content": "***Constraints***\n\nFiles live in OneDrive folders with variable naming.\nQuality of scans varies; OCR can fail or return partial text.\nDocument classification needs to be understandable and easily adjustable.\nPII must not leak through logs or exports.\nCosts (OCR + LLM tokens) rise with folder size and page counts.\nYou need a deterministic path when AI isn’t confident (fallbacks, flags)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "844083c1-ce99-4ab3-98b7-7a6523d88109",
+        "name": "Loop Over Items",
+        "type": "n8n-nodes-base.splitInBatches",
+        "disabled": true,
+        "position": [
+          1040,
+          0
+        ],
+        "parameters": {
+          "options": {}
+        },
+        "typeVersion": 3
+      },
+      {
+        "id": "40f0d23a-aae0-4450-959e-3b98032659c2",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          368,
+          -144
+        ],
+        "parameters": {
+          "width": 208,
+          "height": 112,
+          "content": "Entry trigger used for local testing and manual runs; it simply starts the pipeline and hands off to the OneDrive folder search."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "781728d1-9f06-4e95-adfc-ae2095771027",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          624,
+          -144
+        ],
+        "parameters": {
+          "width": 320,
+          "height": 112,
+          "content": "Finds the target borrower documents container in OneDrive and outputs the folder id that downstream nodes use, Takes the found folder id and lists the files inside so the loop can process each item"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "8425b303-96cc-4ff9-ba20-a386a300519d",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          992,
+          288
+        ],
+        "parameters": {
+          "width": 768,
+          "height": 256,
+          "content": "**Loop Over** : Drives per-file processing: for each listed file it routes to download/OCR/classify, and when the last item is done it forwards the collected results to the combiner. \n\n**Download a file (OneDrive)**: Fetches the actual file binary (plus metadata) for the current item so OCR can read its contents.\n\n**Extract text (Mistral AI)**: Runs OCR on the downloaded file and emits the extracted text that classification and later analysis depend on.\n\n**Classify the File (Code)**: Uses filename clues and OCR text to assign a document type (e.g., Passport, Paystub, Bank Statement, Utility Bill, T4, Proof of Funds, Mortgage Application, or Unknown) and forwards a compact record per file."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "f55f83eb-f7b7-4982-99c1-ec21f573793c",
+        "name": "Sticky Note6",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1200,
+          -432
+        ],
+        "parameters": {
+          "width": 560,
+          "content": "**Combine the Data (Code)**: Aggregates all per-file records into a single borrower payload with BorrowerName and a Documents[] array ready for underwriting analysis. \n**AI Agent (@n8n/n8n-nodes-langchain.agent)**: Consumes the consolidated Documents[], applies an underwriting-oriented system prompt, and produces the decision-focused analysis for the borrower. Provides the language model (gpt-4.1-mini) that the AI Agent uses to generate the underwriting summary and decision.\n"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "b3d81169-9b6f-4530-b765-1ab386b90e4a",
+    "connections": {
+      "Extract text": {
+        "main": [
+          [
+            {
+              "node": "Classify the File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Download a file": {
+        "main": [
+          [
+            {
+              "node": "Extract text",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Loop Over Items": {
+        "main": [
+          [
+            {
+              "node": "Combine the Data",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Download a file",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Search a folder": {
+        "main": [
+          [
+            {
+              "node": "Get items in a folder",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Combine the Data": {
+        "main": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Classify the File": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "OpenAI Chat Model": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "AI Agent",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get items in a folder": {
+        "main": [
+          [
+            {
+              "node": "Loop Over Items",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "When clicking ‘Execute workflow’": {
+        "main": [
+          [
+            {
+              "node": "Search a folder",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 17,
+    "nodeTypes": {
+      "n8n-nodes-base.code": {
+        "count": 2
+      },
+      "n8n-nodes-base.mistralAi": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 7
+      },
+      "n8n-nodes-base.manualTrigger": {
+        "count": 1
+      },
+      "n8n-nodes-base.splitInBatches": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.microsoftOneDrive": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.lmChatOpenAi": {
+        "count": 1
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Vinay Gangidi",
+    "username": "vgangidi",
+    "bio": "Vinay Gangidi is a senior technology leader specializing in n8n-based automation and AI-driven workflow orchestration. He builds intelligent, self-hosted workflows using n8n, LLM-powered agents, Python, and Azure AI to eliminate manual work across GTM, product development, finance, legal, business operations, HR, revenue operations, and compliance, with a strong focus on governance and real business impact.",
+    "verified": false,
+    "links": [
+      "https://www.linkedin.com/in/vinaygangidi/"
+    ],
+    "avatar": "https://gravatar.com/avatar/fc2df6ad79687df3c369c3c37f36b54b771e79dc512ecce6d7097d059f54275e?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 39,
+      "icon": "fa:sync",
+      "name": "n8n-nodes-base.splitInBatches",
+      "codex": {
+        "data": {
+          "alias": [
+            "Loop",
+            "Concatenate",
+            "Batch",
+            "Split",
+            "Split In Batches"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.splitinbatches/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"organization\"]",
+      "defaults": {
+        "name": "Loop Over Items",
+        "color": "#007755"
+      },
+      "iconData": {
+        "icon": "sync",
+        "type": "icon"
+      },
+      "displayName": "Loop Over Items (Split in Batches)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 323,
+      "icon": "file:oneDrive.svg",
+      "name": "n8n-nodes-base.microsoftOneDrive",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.microsoftonedrive/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/microsoft/"
+              }
+            ]
+          },
+          "categories": [
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Microsoft OneDrive"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgODEgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBzdHJva2U9Im5vbmUiPjxwYXRoIGZpbGw9IiMwOTRhYjIiIGQ9Ik02LjY2NyAwUTAgMCAwIDYuNjY3djY2LjY2N1EwIDgwIDYuNjY3IDgwaDY2LjY2N1E4MCA4MCA4MCA3My4zMzNWNi42NjdRODAgMCA3My4zMzMgMHoiLz48cGF0aCBkPSJNNjAuMjU2IDQyLjAyM2MyLjg3LjQwNSA0Ljk2NSAyLjk3NSA0LjgzMiA1LjkyOSAwIDIuNTk0LTEuNDIxIDUuNjU1LTQuODMyIDUuNjU1SDMyLjU3NGMtNS4zMDYgMC03LjIzMi0zLjcwNi03LjIzMi03LjUyNCAwLTYuNDQ0IDYuOTc5LTYuNjIxIDYuOTc5LTYuNjIxcy41NjktNi45OTIgNi42NjQtOC40MWMzLjgwNi0xLjExMyA3Ljg3NS40NzcgOS45OCAzLjg5OWE4LjIgOC4yIDAgMCAxIDcuMDU4LS4yNThjMi44MTIgMS4yNTcgNC41MTggNC4yMTIgNC4yMzIgNy4zM3oiLz48cGF0aCBmaWxsPSIjZjlmOWY5IiBkPSJNMjMuNTgzIDQ1LjYwNWMwLTcuMDgyIDcuNDEyLTguMTM5IDcuNDEyLTguMTM5LjcwNy00LjEwOCAzLjY5OS03LjQzNSA3LjY4Mi04LjU0IDQuMDIxLTEuMjg2IDguNDA0LjE4OSAxMC44NTYgMy42NTNhNi4zIDYuMyAwIDAgMSAzLjYzNS0uNzM3Yy0uNTEzLTQuMTc3LTMuMjQ3LTcuNzM2LTcuMTI2LTkuMjc3LTUuMTQxLTIuMTUzLTExLjA1OC4wMjYtMTMuNjE4IDUuMDE1YTguNCA4LjQgMCAwIDAtOC4xMjYtLjE2Yy0zLjE4MSAxLjc2My01LjAwMiA1LjI4Mi00LjYxOSA4LjkyNC0zLjY3NS4zMjMtNi40MzggMy41MjMtNi4yNTQgNy4yNDIuMTE0IDMuODE3IDMuMTM5IDYuODkyIDYuOTIgNy4wMzRoNC42NWE5LjEgOS4xIDAgMCAxLTEuNDEzLTUuMDE1eiIvPjxwYXRoIGZpbGwtb3BhY2l0eT0iLjE5IiBkPSJtLjg0IDIuNjkgNzcuNzUzIDc1LjgxNkE0LjQgNC40IDAgMCAwIDgwIDc1LjI3OVY0LjM5OEE0LjM5IDQuMzkgMCAwIDAgNzUuNjEyIDBINC44ODVBNC4zOSA0LjM5IDAgMCAwIC44NCAyLjY5Ii8+PC9nPjwvc3ltYm9sPjwvc3ZnPg=="
+      },
+      "displayName": "Microsoft OneDrive",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 838,
+      "icon": "fa:mouse-pointer",
+      "name": "n8n-nodes-base.manualTrigger",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.manualworkflowtrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "When clicking ‘Execute workflow’",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "mouse-pointer",
+        "type": "icon"
+      },
+      "displayName": "Manual Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1153,
+      "icon": "file:openAiLight.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatopenai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg0IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NyAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MiA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSIjN0Q3RDg3Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "OpenAI Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1307,
+      "icon": "file:mistralAi.svg",
+      "name": "n8n-nodes-base.mistralAi",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.mistralai/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/mistral/"
+              }
+            ]
+          },
+          "categories": [
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Mistral AI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9Im5vIj8+CjxzdmcKICAgd2lkdGg9IjIxNiIKICAgaGVpZ2h0PSIyMTYiCiAgIHZlcnNpb249IjEuMSIKICAgaWQ9InN2ZzQxIgogICBzb2RpcG9kaTpkb2NuYW1lPSJtaXN0cmFsLnN2ZyIKICAgaW5rc2NhcGU6dmVyc2lvbj0iMS4zLjIgKDA5MWUyMGVmMGYsIDIwMjMtMTEtMjUsIGN1c3RvbSkiCiAgIHhtbG5zOmlua3NjYXBlPSJodHRwOi8vd3d3Lmlua3NjYXBlLm9yZy9uYW1lc3BhY2VzL2lua3NjYXBlIgogICB4bWxuczpzb2RpcG9kaT0iaHR0cDovL3NvZGlwb2RpLnNvdXJjZWZvcmdlLm5ldC9EVEQvc29kaXBvZGktMC5kdGQiCiAgIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIgogICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciCiAgIHhtbG5zOnN2Zz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogIDxzb2RpcG9kaTpuYW1lZHZpZXcKICAgICBpZD0ibmFtZWR2aWV3NDEiCiAgICAgcGFnZWNvbG9yPSIjZmZmZmZmIgogICAgIGJvcmRlcmNvbG9yPSIjMDAwMDAwIgogICAgIGJvcmRlcm9wYWNpdHk9IjAuMjUiCiAgICAgaW5rc2NhcGU6c2hvd3BhZ2VzaGFkb3c9IjIiCiAgICAgaW5rc2NhcGU6cGFnZW9wYWNpdHk9IjAuMCIKICAgICBpbmtzY2FwZTpwYWdlY2hlY2tlcmJvYXJkPSIwIgogICAgIGlua3NjYXBlOmRlc2tjb2xvcj0iI2QxZDFkMSIKICAgICBpbmtzY2FwZTp6b29tPSIxLjkzNjQ4OCIKICAgICBpbmtzY2FwZTpjeD0iMTk3Ljc4MDcyIgogICAgIGlua3NjYXBlOmN5PSI3OS4wMDkwMSIKICAgICBpbmtzY2FwZTp3aW5kb3ctd2lkdGg9IjE5MjAiCiAgICAgaW5rc2NhcGU6d2luZG93LWhlaWdodD0iMTAxNyIKICAgICBpbmtzY2FwZTp3aW5kb3cteD0iMCIKICAgICBpbmtzY2FwZTp3aW5kb3cteT0iMCIKICAgICBpbmtzY2FwZTp3aW5kb3ctbWF4aW1pemVkPSIxIgogICAgIGlua3NjYXBlOmN1cnJlbnQtbGF5ZXI9InN2ZzQxIiAvPgogIDxzdHlsZQogICAgIGlkPSJzdHlsZTEiPjwhW0NEQVRBWy5Je2ZpbGw6I2ZmNzAwMH0uSntmaWxsOiNmZjQ5MDB9Lkt7ZmlsbDojZmZhMzAwfS5Me2ZpbGw6IzFjMWMxYiBpY2MtY29sb3IoYWRvYmUtcmdiLTE5OTgsIDAuMTMyOTk1NjEsIDAuMTMyOTk1NjEsIDAuMTI4OTk3OCl9XV0+PC9zdHlsZT4KICA8ZGVmcwogICAgIGlkPSJkZWZzMTAiPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iQSI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTIwNi4yNTEsLTE0MC4xMzkpIgogICAgICAgICBpZD0icGF0aDEiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iQiI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTI0Ny40MzYsLTEwNC44NjUpIgogICAgICAgICBpZD0icGF0aDIiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iQyI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTI4NS45MzgsLTEwMi4wODkpIgogICAgICAgICBpZD0icGF0aDMiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iRCI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTMzNy43NjksLTEzMS44NzcpIgogICAgICAgICBpZD0icGF0aDQiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iRSI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTM3Ny4yNDcsLTEzMi4zMTkpIgogICAgICAgICBpZD0icGF0aDUiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iRiI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTQxOC4xMDcsLTExNC42MzQpIgogICAgICAgICBpZD0icGF0aDYiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iRyI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTQ1MC4wMjMsLTE0MC4xMzkpIgogICAgICAgICBpZD0icGF0aDciIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPGNsaXBQYXRoCiAgICAgICBpZD0iSCI+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMCwxODQuMjUyIEggNDgxLjg5IFYgMCBIIDAgWiIKICAgICAgICAgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTIxNy42OTQsLTQ0Ljc5NCkiCiAgICAgICAgIGlkPSJwYXRoOCIgLz4KICAgIDwvY2xpcFBhdGg+CiAgICA8Y2xpcFBhdGgKICAgICAgIGlkPSJJIj4KICAgICAgPHBhdGgKICAgICAgICAgZD0iTSAwLDE4NC4yNTIgSCA0ODEuODkgViAwIEggMCBaIgogICAgICAgICB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMjQ3LjQzNiwtMzUuMDI1KSIKICAgICAgICAgaWQ9InBhdGg5IiAvPgogICAgPC9jbGlwUGF0aD4KICAgIDxjbGlwUGF0aAogICAgICAgaWQ9IkoiPgogICAgICA8cGF0aAogICAgICAgICBkPSJNIDAsMTg0LjI1MiBIIDQ4MS44OSBWIDAgSCAwIFoiCiAgICAgICAgIGlkPSJwYXRoMTAiIC8+CiAgICA8L2NsaXBQYXRoPgogICAgPHBhdGgKICAgICAgIGlkPSJLIgogICAgICAgZD0ibSAxNzMuOTg3LDEzNC4zNjIgaCAtMzcuNzk1IGwgOS42MzMsLTM3Ljc3NiBoIDM3Ljc5NiB6IiAvPgogIDwvZGVmcz4KICA8ZwogICAgIHRyYW5zZm9ybT0ibWF0cml4KDEsMCwwLjI1NDUzNSwxLC01MS4zNjI3OTIsLTcuNDcyNTAwNykiCiAgICAgaWQ9ImczMiI+CiAgICA8ZwogICAgICAgY2xhc3M9IkwiCiAgICAgICBpZD0iZzIyIj4KICAgICAgPHBhdGgKICAgICAgICAgZD0iTSA5OC4zOTcsMTM0LjM2MiBIIDYwLjYwMiBsIDkuNjMzLC0zNy43NzYgaCAzNy43OTYgeiIKICAgICAgICAgaWQ9InBhdGgxMSIgLz4KICAgICAgPHBhdGgKICAgICAgICAgZD0iTSAxMjYuNTU4LDE3Mi4xMzggSCA4OC43NjMgbCA5LjYzMywtMzcuNzc2IGggMzcuNzk2IHoiCiAgICAgICAgIGlkPSJwYXRoMTIiIC8+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMTM2LjE5MiwxMzQuMzYyIEggOTguMzk3IGwgOS42MzMsLTM3Ljc3NiBoIDM3Ljc5NiB6IgogICAgICAgICBpZD0icGF0aDEzIiAvPgogICAgICA8dXNlCiAgICAgICAgIHhsaW5rOmhyZWY9IiNLIgogICAgICAgICBpZD0idXNlMTMiIC8+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gMTA4LjAzMSw5Ni41ODUgSCA3MC4yMzYgbCA5LjYzMywtMzcuNzc2IGggMzcuNzk2IHoiCiAgICAgICAgIGlkPSJwYXRoMTQiIC8+CiAgICAgIDx1c2UKICAgICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICAgIHg9IjkuNjMzOTk5OCIKICAgICAgICAgeT0iLTM3Ljc3NyIKICAgICAgICAgaWQ9InVzZTE0IiAvPgogICAgICA8cGF0aAogICAgICAgICBkPSJNIDYwLjYwMiwxMzQuMzYyIEggMjIuODA3IEwgMzIuNDQsOTYuNTg2IGggMzcuNzk2IHoiCiAgICAgICAgIGlkPSJwYXRoMTUiIC8+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gNzAuMjM2LDk2LjU4NSBIIDMyLjQ0MSBMIDQyLjA3NCw1OC44MDkgSCA3OS44NyBaIgogICAgICAgICBpZD0icGF0aDE2IiAvPgogICAgICA8cGF0aAogICAgICAgICBkPSJNIDc5Ljg3LDU4LjgwOSBIIDQyLjA3NSBsIDkuNjMzLC0zNy43NzYgaCAzNy43OTYgeiIKICAgICAgICAgaWQ9InBhdGgxNyIgLz4KICAgICAgPHVzZQogICAgICAgICB4bGluazpocmVmPSIjSyIKICAgICAgICAgeD0iNTcuMDYzIgogICAgICAgICB5PSItNzUuNTUzMDAxIgogICAgICAgICBpZD0idXNlMTciIC8+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gNTAuOTY4LDE3Mi4xMzggSCAxMy4xNzMgbCA5LjYzMywtMzcuNzc2IGggMzcuNzk2IHoiCiAgICAgICAgIGlkPSJwYXRoMTgiIC8+CiAgICAgIDxwYXRoCiAgICAgICAgIGQ9Ik0gNDEuMzM0LDIwOS45MTUgSCAzLjUzOSBsIDkuNjMzLC0zNy43NzYgaCAzNy43OTYgeiIKICAgICAgICAgaWQ9InBhdGgxOSIgLz4KICAgICAgPHVzZQogICAgICAgICB4bGluazpocmVmPSIjSyIKICAgICAgICAgeD0iMzcuNzk0OTk4IgogICAgICAgICBpZD0idXNlMTkiIC8+CiAgICAgIDx1c2UKICAgICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICAgIHg9IjQ3LjQyOTAwMSIKICAgICAgICAgeT0iLTM3Ljc3NyIKICAgICAgICAgaWQ9InVzZTIwIiAvPgogICAgICA8dXNlCiAgICAgICAgIHhsaW5rOmhyZWY9IiNLIgogICAgICAgICB4PSIyOC4xNjA5OTkiCiAgICAgICAgIHk9IjM3Ljc3NjAwMSIKICAgICAgICAgaWQ9InVzZTIxIiAvPgogICAgICA8dXNlCiAgICAgICAgIHhsaW5rOmhyZWY9IiNLIgogICAgICAgICB4PSIxOC41MjciCiAgICAgICAgIHk9Ijc1LjU1MzAwMSIKICAgICAgICAgaWQ9InVzZTIyIiAvPgogICAgPC9nPgogICAgPHBhdGgKICAgICAgIGQ9Ik0gMTE0LjExNSwxMzQuMzU5IEggNzYuMzIxIGwgOS42MzMsLTM3Ljc3NiBoIDM3Ljc5NiB6IgogICAgICAgY2xhc3M9IkkiCiAgICAgICBpZD0icGF0aDIyIiAvPgogICAgPHVzZQogICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICB4PSItMzEuNzA5OTk5IgogICAgICAgeT0iMzcuNzcyOTk5IgogICAgICAgY2xhc3M9IkoiCiAgICAgICBpZD0idXNlMjMiIC8+CiAgICA8ZwogICAgICAgY2xhc3M9IkkiCiAgICAgICBpZD0iZzI1Ij4KICAgICAgPHVzZQogICAgICAgICB4bGluazpocmVmPSIjSyIKICAgICAgICAgeD0iLTIyLjA3NiIKICAgICAgICAgeT0iLTAuMDAzIgogICAgICAgICBpZD0idXNlMjQiIC8+CiAgICAgIDx1c2UKICAgICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICAgIHg9IjE1LjcxOSIKICAgICAgICAgeT0iLTAuMDAzIgogICAgICAgICBpZD0idXNlMjUiIC8+CiAgICA8L2c+CiAgICA8ZwogICAgICAgY2xhc3M9IksiCiAgICAgICBpZD0iZzI2Ij4KICAgICAgPHBhdGgKICAgICAgICAgZD0iTSAxMjMuNzQ5LDk2LjU4MiBIIDg1Ljk1NSBsIDkuNjMzLC0zNy43NzYgaCAzNy43OTYgeiIKICAgICAgICAgaWQ9InBhdGgyNSIgLz4KICAgICAgPHVzZQogICAgICAgICB4bGluazpocmVmPSIjSyIKICAgICAgICAgeD0iMjUuMzUzMDAxIgogICAgICAgICB5PSItMzcuNzc5OTk5IgogICAgICAgICBpZD0idXNlMjYiIC8+CiAgICA8L2c+CiAgICA8cGF0aAogICAgICAgZD0iTSA3Ni4zMiwxMzQuMzU5IEggMzguNTI2IGwgOS42MzMsLTM3Ljc3NiBoIDM3Ljc5NiB6IgogICAgICAgY2xhc3M9IkkiCiAgICAgICBpZD0icGF0aDI2IiAvPgogICAgPHBhdGgKICAgICAgIGQ9Ik0gODUuOTU0LDk2LjU4MiBIIDQ4LjE2IGwgOS42MzMsLTM3Ljc3NiBoIDM3Ljc5NiB6IgogICAgICAgY2xhc3M9IksiCiAgICAgICBpZD0icGF0aDI3IiAvPgogICAgPGcKICAgICAgIGZpbGw9IiNmZmNlMDAiCiAgICAgICBpZD0iZzI4Ij4KICAgICAgPHBhdGgKICAgICAgICAgZD0iTSA5NS41ODgsNTguODA2IEggNTcuNzk0IEwgNjcuNDI3LDIxLjAzIGggMzcuNzk2IHoiCiAgICAgICAgIGlkPSJwYXRoMjgiIC8+CiAgICAgIDx1c2UKICAgICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICAgIHg9IjcyLjc4MTk5OCIKICAgICAgICAgeT0iLTc1LjU1NiIKICAgICAgICAgaWQ9InVzZTI4IiAvPgogICAgPC9nPgogICAgPHBhdGgKICAgICAgIGQ9Ik0gNjYuNjg2LDE3Mi4xMzUgSCAyOC44OTIgbCA5LjYzMywtMzcuNzc2IGggMzcuNzk2IHoiCiAgICAgICBjbGFzcz0iSiIKICAgICAgIGlkPSJwYXRoMjkiIC8+CiAgICA8cGF0aAogICAgICAgZD0iTSA1Ny4wNTIsMjA5LjkxMiBIIDE5LjI1OCBsIDkuNjMzLC0zNy43NzYgaCAzNy43OTYgeiIKICAgICAgIGZpbGw9IiNmZjAxMDciCiAgICAgICBpZD0icGF0aDMwIiAvPgogICAgPHVzZQogICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICB4PSI1My41MTQiCiAgICAgICB5PSItMC4wMDMiCiAgICAgICBjbGFzcz0iSSIKICAgICAgIGlkPSJ1c2UzMCIgLz4KICAgIDxwYXRoCiAgICAgICBkPSJNIDIzNy4xMzUsOTYuNTgyIEggMTk5LjM0IGwgOS42MzMsLTM3Ljc3NiBoIDM3Ljc5NiB6IgogICAgICAgY2xhc3M9IksiCiAgICAgICBpZD0icGF0aDMxIiAvPgogICAgPHVzZQogICAgICAgeGxpbms6aHJlZj0iI0siCiAgICAgICB4PSI0My44ODAwMDEiCiAgICAgICB5PSIzNy43NzI5OTkiCiAgICAgICBjbGFzcz0iSiIKICAgICAgIGlkPSJ1c2UzMSIgLz4KICAgIDx1c2UKICAgICAgIHhsaW5rOmhyZWY9IiNLIgogICAgICAgeD0iMzQuMjQ1OTk4IgogICAgICAgeT0iNzUuNTUwMDAzIgogICAgICAgZmlsbD0iI2ZmMDEwNyIKICAgICAgIGlkPSJ1c2UzMiIgLz4KICA8L2c+Cjwvc3ZnPgo="
+      },
+      "displayName": "Mistral AI",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 35,
+      "name": "Document Extraction"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

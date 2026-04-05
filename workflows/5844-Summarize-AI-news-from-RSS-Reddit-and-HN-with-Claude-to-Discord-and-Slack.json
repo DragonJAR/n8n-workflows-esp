@@ -1,0 +1,2102 @@
+{
+  "id": 13527,
+  "name": "Summarize AI news from RSS, Reddit and HN with Claude to Discord and Slack",
+  "views": 313,
+  "recentViews": 3,
+  "totalViews": 313,
+  "createdAt": "2026-02-19T23:28:15.262Z",
+  "description": "**This n8n template builds an automated daily news digest powered by Claude AI.** \n\nIt monitors RSS feeds, Reddit, and Hacker News, extracts full article text, analyzes each piece with AI, and delivers a polished briefing to Discord and Slack.\n\nStop drowning in newsletters -- Claude reads everything and surfaces only what matters, scored and ranked by importance.\n\n**Good to know**\n* Estimated cost is $0.03-0.10 per daily run using Claude Haiku + Sonnet. See [Anthropic pricing](https://www.anthropic.com/pricing) for current rates.\n* Works without a database out of the box. Optionally enable PostgreSQL for article history and cross-day deduplication.\n\n**How it works**\n* Schedule trigger fires daily and fetches articles from 10 configurable sources (RSS, Atom, Reddit JSON, Hacker News API)\n* Articles are deduplicated by URL hash and fuzzy title matching\n* Jina Reader extracts full article text for deeper analysis\n* Claude Haiku scores each article 1-10 for importance, assigns categories, and writes a \"why it matters\" summary\n* Claude Sonnet compiles the top articles into a structured digest with lead story, top stories, quick hits, and trend detection\n* Formatted output is delivered to Discord (rich embeds) and Slack (Block Kit)\n\n**How to use**\n* Add your Anthropic API key as an n8n credential and set your Discord webhook URL in the config node -- that's the minimum to get running\n* Edit the feed list in \"Build feed source list\" to add your own sources\n\n**Requirements**\n* Anthropic API key ([setup guide](https://nxsi.io/guides/claude-api-setup))\n* Discord webhook URL ([setup guide](https://nxsi.io/guides/discord-webhook)) and/or Slack credential\n\n**Customizing this workflow**\n* Swap feed sources for any topic -- finance, gaming, research papers, industry news\n* Adjust topic importance weights to prioritize what you care about\n* Modify the Claude system prompt to change the digest's tone and style",
+  "workflow": {
+    "id": "naUjq0csvOzATYan",
+    "meta": {
+      "instanceId": "fcc09c267524c7883fb2ea9bebe8d5af97bd1018d108a487ee168526f71cc449",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Summarize RSS feeds into a daily AI news digest with Claude and deliver to Discord",
+    "tags": [],
+    "nodes": [
+      {
+        "id": "15d9d02a-f5b2-41c3-a02f-718d31cf3fe4",
+        "name": "Initialize run timestamp",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1168,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var now = new Date();\nvar hex = function() { return Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0'); };\nvar runId = hex() + hex() + '-' + hex() + '-' + hex() + '-' + hex() + '-' + hex() + hex() + hex();\nreturn [{ json: { runDate: now.toISOString().split('T')[0], startedAt: now.toISOString(), runId: runId } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "00e58581-a2bb-489d-8064-6c3ff13d6c91",
+        "name": "Create run record",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          1456,
+          784
+        ],
+        "parameters": {
+          "query": "={{ $(\"⚙️ Configure digest settings\").first().json.use_postgres ? \"INSERT INTO digest_runs (run_date) VALUES ('\" + $json.runDate + \"') RETURNING id, run_date, started_at\" : \"SELECT '\" + $json.runId + \"' AS id, '\" + $json.runDate + \"' AS run_date, NOW() AS started_at\" }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "032psGVSbEPse0XO",
+            "name": "nxsi-postgres"
+          }
+        },
+        "typeVersion": 2.5,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "b59ce09a-69aa-4468-afb9-e00b66510ab1",
+        "name": "Build feed source list",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          1728,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var items = $input.all();\nvar runId = items[0].json.id;\nvar feeds = [\n  { url: 'https://hn.algolia.com/api/v1/search_by_date?tags=story&query=AI+LLM+GPT+Claude&numericFilters=points>20', name: 'Hacker News — AI', category: 'ai-models', feedType: 'hn_api' },\n  { url: 'https://techcrunch.com/category/artificial-intelligence/feed/', name: 'TechCrunch AI', category: 'ai-tools', feedType: 'rss' },\n  { url: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml', name: 'The Verge AI', category: 'ai-research', feedType: 'rss' },\n  { url: 'https://feeds.arstechnica.com/arstechnica/index', name: 'Ars Technica', category: 'tech-general', feedType: 'rss' },\n  { url: 'https://simonwillison.net/atom/everything/', name: 'Simon Willison', category: 'ai-tools', feedType: 'atom' },\n  { url: 'https://www.technologyreview.com/feed/', name: 'MIT Technology Review', category: 'ai-research', feedType: 'rss' },\n  { url: 'https://www.reddit.com/r/LocalLLaMA/.json?limit=25&sort=hot', name: 'r/LocalLLaMA', category: 'ai-models', feedType: 'reddit' },\n  { url: 'https://www.reddit.com/r/selfhosted/.json?limit=25&sort=hot', name: 'r/selfhosted', category: 'open-source', feedType: 'reddit' },\n  { url: 'https://www.anthropic.com/rss.xml', name: 'Anthropic Blog', category: 'ai-models', feedType: 'rss' },\n  { url: 'https://openai.com/blog/rss.xml', name: 'OpenAI Blog', category: 'ai-models', feedType: 'rss' }\n];\nvar result = [];\nfor (var i = 0; i < feeds.length; i++) {\n  feeds[i].runId = runId;\n  result.push({ json: feeds[i] });\n}\nreturn result;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "b757855c-1658-41dd-b7ea-fc741ca2de47",
+        "name": "Fetch feed content",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          2000,
+          784
+        ],
+        "parameters": {
+          "url": "={{ $json.url }}",
+          "options": {
+            "timeout": 15000,
+            "response": {
+              "response": {
+                "responseFormat": "text"
+              }
+            }
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "AI-News-Digest/1.0"
+              }
+            ]
+          }
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "d19d6bfb-14ff-4906-8b23-74e7e79dd3ff",
+        "name": "Parse articles from feeds",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2288,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var httpResults = $input.all();\nvar feedMeta = $('Build feed source list').all();\nvar articles = [];\nvar now = Date.now();\nvar lookbackHours = $('⚙️ Configure digest settings').first().json.feed_lookback_hours || 24;\nvar oneDayAgo = now - (lookbackHours * 60 * 60 * 1000);\nvar errors = [];\nvar runId = feedMeta[0].json.runId;\n\nfor (var i = 0; i < httpResults.length; i++) {\n  var response = httpResults[i].json;\n  var feed = feedMeta[i].json;\n  var feedName = feed.name;\n  var feedCategory = feed.category;\n  var feedType = feed.feedType;\n\n  try {\n    var body = '';\n    if (typeof response === 'string') {\n      body = response;\n    } else if (response.data && typeof response.data === 'string') {\n      body = response.data;\n    } else {\n      body = JSON.stringify(response);\n    }\n\n    if (feedType === 'hn_api') {\n      var hnData = typeof response === 'object' && response.hits ? response : JSON.parse(body);\n      var hits = hnData.hits || [];\n      for (var h = 0; h < hits.length; h++) {\n        var hit = hits[h];\n        var hitDate = new Date(hit.created_at).getTime();\n        if (hitDate < oneDayAgo) continue;\n        if (!hit.url) continue;\n        articles.push({ json: {\n          title: hit.title || '', url: hit.url, source: feedName,\n          category: feedCategory, publishedAt: hit.created_at,\n          socialScore: (hit.points || 0) + (hit.num_comments || 0) * 2,\n          excerpt: '', runId: runId\n        }});\n      }\n    } else if (feedType === 'reddit') {\n      var rd = typeof response === 'object' && response.data ? response : JSON.parse(body);\n      var children = (rd.data && rd.data.children) || [];\n      for (var r = 0; r < children.length; r++) {\n        var post = children[r].data;\n        if (!post) continue;\n        var postDate = (post.created_utc || 0) * 1000;\n        if (postDate < oneDayAgo) continue;\n        var postUrl = post.url_overridden_by_dest || post.url || '';\n        if (postUrl.indexOf('reddit.com') !== -1) postUrl = 'https://www.reddit.com' + post.permalink;\n        articles.push({ json: {\n          title: post.title || '', url: postUrl, source: feedName,\n          category: feedCategory,\n          publishedAt: new Date(postDate).toISOString(),\n          socialScore: (post.score || 0) + (post.num_comments || 0) * 2,\n          excerpt: (post.selftext || '').substring(0, 300), runId: runId\n        }});\n      }\n    } else if (feedType === 'atom') {\n      var entryRegex = /<entry[\\s\\S]*?<\\/entry>/gi;\n      var entries = body.match(entryRegex) || [];\n      for (var a = 0; a < entries.length; a++) {\n        var entry = entries[a];\n        var tM = entry.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i);\n        var lM = entry.match(/<link[^>]*href=[\"']([^\"']+)[\"'][^>]*>/i);\n        var pM = entry.match(/<published[^>]*>([\\s\\S]*?)<\\/published>/i) || entry.match(/<updated[^>]*>([\\s\\S]*?)<\\/updated>/i);\n        var sM = entry.match(/<summary[^>]*>([\\s\\S]*?)<\\/summary>/i) || entry.match(/<content[^>]*>([\\s\\S]*?)<\\/content>/i);\n        var pubDate = pM ? new Date(pM[1].trim()).getTime() : 0;\n        if (pubDate && pubDate < oneDayAgo) continue;\n        var eTitle = tM ? tM[1].replace(/<[^>]+>/g, '').trim() : '';\n        var eUrl = lM ? lM[1] : '';\n        if (!eUrl || !eTitle) continue;\n        articles.push({ json: {\n          title: eTitle, url: eUrl, source: feedName,\n          category: feedCategory,\n          publishedAt: pM ? pM[1].trim() : '',\n          socialScore: 0,\n          excerpt: sM ? sM[1].replace(/<[^>]+>/g, '').trim().substring(0, 300) : '',\n          runId: runId\n        }});\n      }\n    } else {\n      var itemRegex = /<item[\\s\\S]*?<\\/item>/gi;\n      var rssItems = body.match(itemRegex) || [];\n      for (var j = 0; j < rssItems.length; j++) {\n        var item = rssItems[j];\n        var tR = item.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i);\n        var lR = item.match(/<link[^>]*>([\\s\\S]*?)<\\/link>/i);\n        var pR = item.match(/<pubDate[^>]*>([\\s\\S]*?)<\\/pubDate>/i);\n        var dR = item.match(/<description[^>]*>([\\s\\S]*?)<\\/description>/i);\n        var rssDate = pR ? new Date(pR[1].trim()).getTime() : 0;\n        if (rssDate && rssDate < oneDayAgo) continue;\n        var rT = tR ? tR[1].replace(/<!\\[CDATA\\[|\\]\\]>/g, '').replace(/<[^>]+>/g, '').trim() : '';\n        var rL = lR ? lR[1].replace(/<!\\[CDATA\\[|\\]\\]>/g, '').trim() : '';\n        if (!rL || !rT) continue;\n        articles.push({ json: {\n          title: rT, url: rL, source: feedName,\n          category: feedCategory,\n          publishedAt: pR ? pR[1].trim() : '',\n          socialScore: 0,\n          excerpt: dR ? dR[1].replace(/<!\\[CDATA\\[|\\]\\]>/g, '').replace(/<[^>]+>/g, '').trim().substring(0, 300) : '',\n          runId: runId\n        }});\n      }\n    }\n  } catch (e) {\n    errors.push({ feed: feedName, error: e.message });\n  }\n}\n\narticles.sort(function(a, b) { return (b.json.socialScore || 0) - (a.json.socialScore || 0); });\n\nif (articles.length === 0) {\n  return [{ json: { url: '', _noArticles: true, articleCount: 0, runId: runId, errors: errors } }];\n}\nif (errors.length > 0) articles[0].json._feedErrors = errors;\nreturn articles;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "2a4aeb63-b347-49cd-a976-76ddee8fd72b",
+        "name": "Any articles found?",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          2560,
+          784
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "loose"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "afb369bf",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEmpty"
+                },
+                "leftValue": "={{ $json.url }}",
+                "rightValue": ""
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "a33cf456-8543-4018-97a4-68a1fa8a71c8",
+        "name": "Mark run as empty",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          2848,
+          576
+        ],
+        "parameters": {
+          "query": "={{ $(\"⚙️ Configure digest settings\").first().json.use_postgres ? \"UPDATE digest_runs SET status = 'no_articles', completed_at = NOW(), duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::int WHERE id = '\" + $('Create run record').first().json.id + \"'\" : \"SELECT 1\" }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "032psGVSbEPse0XO",
+            "name": "nxsi-postgres"
+          }
+        },
+        "typeVersion": 2.5,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "a4996912-f948-4cb7-8fe6-59ee3f33671f",
+        "name": "Deduplicate by URL and title",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          2848,
+          784
+        ],
+        "parameters": {
+          "jsCode": "function djb2(str) {\n  var hash = 5381;\n  for (var i = 0; i < str.length; i++) {\n    hash = ((hash << 5) + hash) + str.charCodeAt(i);\n    hash = hash & hash;\n  }\n  return Math.abs(hash).toString(16).padStart(8, '0');\n}\n\nfunction levenshtein(a, b) {\n  if (a.length === 0) return b.length;\n  if (b.length === 0) return a.length;\n  var matrix = [];\n  for (var i = 0; i <= b.length; i++) matrix[i] = [i];\n  for (var j = 0; j <= a.length; j++) matrix[0][j] = j;\n  for (var i = 1; i <= b.length; i++) {\n    for (var j = 1; j <= a.length; j++) {\n      if (b.charAt(i - 1) === a.charAt(j - 1)) {\n        matrix[i][j] = matrix[i - 1][j - 1];\n      } else {\n        matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);\n      }\n    }\n  }\n  return matrix[b.length][a.length];\n}\n\nfunction normalizeTitle(title) {\n  return title.toLowerCase().replace(/[^a-z0-9\\s]/g, '').replace(/\\s+/g, ' ').trim();\n}\n\nvar allItems = $input.all();\nvar seen = {};\nvar seenTitles = [];\nvar unique = [];\nvar runId = allItems[0].json.runId;\n\nfor (var i = 0; i < allItems.length; i++) {\n  var article = allItems[i].json;\n  if (!article.url) continue;\n  var urlHash = djb2(article.url);\n  var normTitle = normalizeTitle(article.title || '');\n\n  if (seen[urlHash]) continue;\n\n  var isDupe = false;\n  for (var j = 0; j < seenTitles.length; j++) {\n    var maxLen = Math.max(normTitle.length, seenTitles[j].length);\n    if (maxLen === 0) continue;\n    var dist = levenshtein(normTitle, seenTitles[j]);\n    if (dist / maxLen < 0.2) { isDupe = true; break; }\n  }\n  if (isDupe) continue;\n\n  seen[urlHash] = true;\n  seenTitles.push(normTitle);\n  article.urlHash = urlHash;\n  article.titleNormalized = normTitle;\n  unique.push(article);\n}\n\nvar hashListSql = unique.map(function(a) { return \"'\" + a.urlHash + \"'\"; }).join(',');\nif (!hashListSql) hashListSql = \"''\";\n\nreturn [{ json: { articles: unique, hashListSql: hashListSql, count: unique.length, runId: runId } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "6c6c84cf-6795-4427-bca7-a6b96a72e77c",
+        "name": "Check database for recent duplicates",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          3120,
+          784
+        ],
+        "parameters": {
+          "query": "={{ $(\"⚙️ Configure digest settings\").first().json.use_postgres ? \"SELECT url_hash FROM digest_articles WHERE url_hash IN (\" + $json.hashListSql + \") AND created_at > NOW() - INTERVAL '\" + ($(\"⚙️ Configure digest settings\").first().json.dedup_lookback_days || 7) + \" days'\" : \"SELECT '' AS url_hash WHERE false\" }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "032psGVSbEPse0XO",
+            "name": "nxsi-postgres"
+          }
+        },
+        "typeVersion": 2.5,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "d18869bc-2d20-4236-9dc9-ac0a3d288f07",
+        "name": "Remove already-seen articles",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3408,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var pgResults = $input.all();\nvar knownHashes = {};\nfor (var i = 0; i < pgResults.length; i++) {\n  var hash = pgResults[i].json.url_hash;\n  if (hash) knownHashes[hash] = true;\n}\nvar dedupData = $('Deduplicate by URL and title').first().json;\nvar articles = dedupData.articles;\nvar fresh = [];\nfor (var i = 0; i < articles.length; i++) {\n  if (!knownHashes[articles[i].urlHash]) fresh.push(articles[i]);\n}\nreturn [{ json: { articles: fresh, count: fresh.length, runId: dedupData.runId } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "eac5f273-fd2f-4695-aa5e-6c226d538fc7",
+        "name": "Select top articles for extraction",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          3680,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var data = $input.first().json;\nvar articles = data.articles;\narticles.sort(function(a, b) { return (b.socialScore || 0) - (a.socialScore || 0); });\nvar maxArticles = $('⚙️ Configure digest settings').first().json.max_extract_articles || 25;\nvar selected = articles.slice(0, maxArticles);\nvar result = [];\nfor (var i = 0; i < selected.length; i++) {\n  result.push({ json: selected[i] });\n}\nif (result.length === 0) result.push({ json: { _empty: true, runId: data.runId } });\nreturn result;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d01169be-bcf1-41dd-9b3a-cb1708505e31",
+        "name": "Extract full text via Jina",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          3968,
+          784
+        ],
+        "parameters": {
+          "url": "=https://r.jina.ai/{{ $json.url }}",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            }
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              },
+              {
+                "name": "X-Return-Format",
+                "value": "markdown"
+              }
+            ]
+          }
+        },
+        "retryOnFail": false,
+        "typeVersion": 4.2
+      },
+      {
+        "id": "ef32355d-2617-4692-9506-3e7fce611019",
+        "name": "Assemble extracted content",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4240,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var jinaResults = $input.all();\nvar articleItems = $('Select top articles for extraction').all();\nvar totalJinaTokens = 0;\nvar articles = [];\n\nfor (var i = 0; i < articleItems.length; i++) {\n  var article = articleItems[i].json;\n  if (article._empty) continue;\n  var jina = jinaResults[i] ? jinaResults[i].json : {};\n  var fullText = '';\n  var hasFullText = false;\n\n  if (jina.data && jina.data.content) {\n    fullText = jina.data.content.substring(0, 8000);\n    hasFullText = true;\n    if (jina.data.usage) totalJinaTokens += jina.data.usage.tokens || 0;\n  } else if (jina.content) {\n    fullText = String(jina.content).substring(0, 8000);\n    hasFullText = true;\n  } else {\n    fullText = article.excerpt || '';\n  }\n\n  articles.push({\n    title: article.title, url: article.url, source: article.source,\n    category: article.category, publishedAt: article.publishedAt,\n    socialScore: article.socialScore, urlHash: article.urlHash,\n    titleNormalized: article.titleNormalized,\n    fullText: fullText, hasFullText: hasFullText, runId: article.runId\n  });\n}\n\nreturn [{ json: {\n  articles: articles, jinaTokens: totalJinaTokens,\n  count: articles.length, runId: articles.length > 0 ? articles[0].runId : ''\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f824391b-0d86-4cfc-8b99-cdb1b934a238",
+        "name": "Prepare analysis prompts",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          4528,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var data = $input.first().json;\nvar articles = data.articles;\nvar jinaTokens = data.jinaTokens;\nvar runId = data.runId;\n\nvar result = [];\nfor (var i = 0; i < articles.length; i++) {\n  var a = articles[i];\n  var prompt = 'Analyze this article and return ONLY valid JSON:\\n\\nTITLE: ' + a.title + '\\nSOURCE: ' + a.source + '\\nCATEGORY: ' + a.category + '\\nURL: ' + a.url + '\\n\\nFULL TEXT:\\n' + (a.fullText || '(no text available)').substring(0, 8000) + '\\n\\nReturn this exact JSON structure:\\n{\"summary\":\"2-3 sentence summary\",\"importance\":<integer 1-10>,\"categories\":[\"primary\",\"secondary\"],\"sentiment\":\"positive|negative|neutral|mixed\",\"key_entities\":[\"entity1\",\"entity2\"],\"why_it_matters\":\"One sentence on practical impact\",\"reading_time_min\":<integer>}';\n  result.push({ json: {\n    prompt: prompt, _articleIndex: i, _article: a,\n    _jinaTokens: jinaTokens, _runId: runId, _totalArticles: articles.length\n  }});\n}\nif (result.length === 0) result.push({ json: { prompt: 'Return {\"summary\":\"no articles\",\"importance\":1,\"categories\":[],\"sentiment\":\"neutral\",\"key_entities\":[],\"why_it_matters\":\"none\",\"reading_time_min\":0}', _article: {}, _jinaTokens: 0, _runId: runId, _totalArticles: 0 } });\nreturn result;"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "d6e50e51-2678-4eb1-a4ec-6147c93569e5",
+        "name": "Analyze article with Claude",
+        "type": "@n8n/n8n-nodes-langchain.chainLlm",
+        "onError": "continueRegularOutput",
+        "maxTries": 2,
+        "position": [
+          4800,
+          784
+        ],
+        "parameters": {
+          "text": "={{ $json.prompt }}",
+          "batching": {},
+          "messages": {
+            "messageValues": [
+              {
+                "message": "You are an expert news analyst. You analyze technology articles and output structured JSON assessments.\n\nSCORING GUIDE (importance 1-10):\n10: Industry-reshaping announcement (new major model, regulation, acquisition >$1B)\n8-9: Significant development with broad impact (major product launch, critical vulnerability)\n6-7: Notable development in a specific domain (new tool, interesting research, meaningful open source release)\n4-5: Incremental update or niche development (version bump, minor feature, limited audience)\n1-3: Routine news, announcements, or opinion pieces with no actionable insight\n\nCATEGORIES (use these exact strings):\nai-models, ai-tools, ai-research, ai-agents, security, devops, open-source, cloud, hardware, startups, regulation, programming\n\nRULES:\n- Return ONLY valid JSON. No markdown formatting, no backticks, no explanation.\n- If the article text is missing, score importance lower (max 5) and note \"limited analysis\" in summary.\n- Be ruthlessly honest about importance. Most articles are 4-6. Reserve 8+ for genuinely significant events.\n- The \"why_it_matters\" should be actionable: \"means X for developers\" not \"this is interesting.\""
+              }
+            ]
+          },
+          "promptType": "define"
+        },
+        "retryOnFail": true,
+        "typeVersion": 1.7,
+        "waitBetweenTries": 3000
+      },
+      {
+        "id": "8da6dc3e-8d64-4596-b0a9-199b11a6ccb1",
+        "name": "Score and rank articles",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          5088,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var aiOutputs = $input.all();\nvar batchItems = $('Prepare analysis prompts').all();\nvar topicWeights = {\n  'ai-models': 1.5, 'ai-agents': 1.5, 'ai-tools': 1.3,\n  'ai-research': 1.2, 'security': 1.3, 'open-source': 1.2, 'devops': 1.1\n};\nvar articles = [];\nvar totalInputTokens = 0;\nvar totalOutputTokens = 0;\n\nfor (var i = 0; i < aiOutputs.length; i++) {\n  var aiOut = aiOutputs[i].json;\n  var batch = batchItems[i].json;\n  var article = batch._article;\n\n  if (aiOut.tokenUsageEstimate) {\n    totalInputTokens += aiOut.tokenUsageEstimate.promptTokens || 0;\n    totalOutputTokens += aiOut.tokenUsageEstimate.completionTokens || 0;\n  }\n\n  // Basic LLM Chain: {text: \"...\"}, AI Agent: {output: \"...\"}\n  var responseText = aiOut.text || aiOut.output || '';\n\n  var analysis = null;\n  try {\n    var cleaned = responseText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n    var js = cleaned.indexOf('{');\n    var je = cleaned.lastIndexOf('}');\n    if (js !== -1 && je !== -1) analysis = JSON.parse(cleaned.substring(js, je + 1));\n  } catch (e) {\n    try {\n      var partial = cleaned.substring(cleaned.indexOf('{'));\n      var opens = (partial.match(/\\{/g) || []).length;\n      var closes = (partial.match(/\\}/g) || []).length;\n      while (closes < opens) { partial += '}'; closes++; }\n      analysis = JSON.parse(partial);\n    } catch (e2) {\n      analysis = { summary: 'Analysis failed', importance: 3, categories: [article.category || 'tech-general'], sentiment: 'neutral', key_entities: [], why_it_matters: 'Unable to analyze', reading_time_min: 3 };\n    }\n  }\n\n  if (!analysis) {\n    analysis = { summary: 'Analysis unavailable', importance: 3, categories: [article.category || 'tech-general'], sentiment: 'neutral', key_entities: [], why_it_matters: 'Unable to analyze', reading_time_min: 3 };\n  }\n  var baseScore = analysis.importance || 5;\n  var maxWeight = 1.0;\n  var cats = analysis.categories || [article.category || 'tech-general'];\n  for (var c = 0; c < cats.length; c++) {\n    var w = topicWeights[cats[c]] || 1.0;\n    if (w > maxWeight) maxWeight = w;\n  }\n  var weighted = baseScore * maxWeight;\n  var socialBoost = Math.min((article.socialScore || 0) / 200, 2);\n  weighted += socialBoost;\n\n  articles.push({\n    title: article.title, url: article.url, source: article.source,\n    category: article.category, publishedAt: article.publishedAt,\n    socialScore: article.socialScore, urlHash: article.urlHash,\n    titleNormalized: article.titleNormalized,\n    fullText: article.fullText, hasFullText: article.hasFullText,\n    summary: analysis.summary, importance: analysis.importance,\n    categories: cats, sentiment: analysis.sentiment,\n    keyEntities: analysis.key_entities || [],\n    whyItMatters: analysis.why_it_matters,\n    readingTimeMin: analysis.reading_time_min || 3,\n    weightedScore: Math.round(weighted * 100) / 100\n  });\n}\n\narticles.sort(function(a, b) { return b.weightedScore - a.weightedScore; });\n\n// Fallback: estimate tokens when tokenUsageEstimate unavailable (Basic LLM Chain)\nif (totalInputTokens === 0) {\n  for (var j = 0; j < aiOutputs.length; j++) {\n    var artJ = batchItems[j].json._article;\n    totalInputTokens += Math.ceil(((artJ.fullText || artJ.summary || '').length + 1800) / 4);\n    totalOutputTokens += Math.ceil((aiOutputs[j].json.text || aiOutputs[j].json.output || '').length / 4);\n  }\n}\n\nreturn [{ json: {\n  articles: articles,\n  analysisInputTokens: totalInputTokens,\n  analysisOutputTokens: totalOutputTokens,\n  jinaTokens: batchItems[0].json._jinaTokens,\n  runId: batchItems[0].json._runId,\n  count: articles.length\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "ab298c48-0aa1-494a-a884-67a2c33a4f07",
+        "name": "Select articles for digest",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          5360,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var data = $input.first().json;\nvar articles = data.articles;\nvar maxDigest = $('⚙️ Configure digest settings').first().json.max_digest_articles || 12;\nvar selected = articles.slice(0, maxDigest);\nvar lead = selected.length > 0 ? selected[0] : null;\nvar topStories = selected.slice(1, 5);\nvar quickHits = selected.slice(5);\n\nvar compilationData = '';\nif (lead) {\n  compilationData += 'LEAD STORY:\\nTitle: ' + lead.title + '\\nSource: ' + lead.source + '\\nImportance: ' + lead.importance + '/10\\nSummary: ' + lead.summary + '\\nWhy it matters: ' + lead.whyItMatters + '\\n\\n';\n}\ncompilationData += 'TOP STORIES:\\n';\nfor (var i = 0; i < topStories.length; i++) {\n  var s = topStories[i];\n  compilationData += (i + 1) + '. ' + s.title + ' [' + s.source + ', ' + s.importance + '/10]\\n   ' + s.summary + '\\n   Why: ' + s.whyItMatters + '\\n\\n';\n}\ncompilationData += 'QUICK HITS:\\n';\nfor (var i = 0; i < quickHits.length; i++) {\n  var q = quickHits[i];\n  compilationData += '- ' + q.title + ' [' + q.source + ', ' + q.importance + '/10]: ' + q.summary + '\\n';\n}\n\nvar userPrompt = 'Compile today\\'s AI & tech digest from these analyzed articles. Output ONLY valid JSON.\\n\\n' + compilationData + '\\n\\nReturn this exact JSON structure:\\n{\"subject_line\":\"Email subject (under 60 chars)\",\"lead_analysis\":\"2-3 paragraphs of genuine insight about the lead story\",\"lead_why\":\"Single actionable sentence\",\"top_stories\":[{\"title\":\"...\",\"summary\":\"Exactly 2 sentences\",\"why\":\"Actionable insight\"}],\"quick_hits\":[{\"title\":\"...\",\"one_liner\":\"Key fact, one line\"}],\"trend_note\":\"Trend across stories or empty string\"}';\n\nreturn [{ json: {\n  prompt: userPrompt,\n  _articles: selected, _lead: lead,\n  _topStories: topStories, _quickHits: quickHits,\n  _analysisInputTokens: data.analysisInputTokens,\n  _analysisOutputTokens: data.analysisOutputTokens,\n  _jinaTokens: data.jinaTokens, _runId: data.runId,\n  _allArticles: articles, _articlesFound: articles.length\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "443ea580-1b92-49d9-a27d-136e1f3e914d",
+        "name": "Claude Sonnet (compiler)",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "position": [
+          5344,
+          1040
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "claude-sonnet-4-5-20250929"
+          },
+          "options": {
+            "temperature": 0.4,
+            "maxTokensToSample": 8192
+          }
+        },
+        "credentials": {
+          "anthropicApi": {
+            "id": "5zrxbFzTF9Yr7MNS",
+            "name": "nxsi-anthropic"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "a5f54991-eb5c-4ecf-9782-a6e5612990ee",
+        "name": "Compile digest with Claude",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "maxTries": 3,
+        "position": [
+          5648,
+          784
+        ],
+        "parameters": {
+          "text": "={{ $json.prompt }}",
+          "agent": "conversationalAgent",
+          "options": {
+            "systemMessage": "You compile daily AI & tech news digests. Your output is the final digest that gets sent to Discord, Slack, and email.\n\nVOICE: Professional but approachable. Write like a knowledgeable colleague summarizing what they read today, not a news anchor. Be direct and opinionated about why things matter.\n\nRULES:\n- Lead analysis should have genuine insight, not just restate the headline\n- \"Why it matters\" must be actionable: what should the reader know or do differently\n- Top story summaries: exactly 2 sentences each, no fluff\n- Quick hits: maximum one line each, start with the key fact\n- If you spot a trend across stories, mention it in trend_note\n- Return ONLY valid JSON"
+          },
+          "promptType": "define"
+        },
+        "retryOnFail": true,
+        "typeVersion": 1.7,
+        "waitBetweenTries": 5000
+      },
+      {
+        "id": "33120460-8e96-404c-a3ec-89c7d1e8143c",
+        "name": "Format multi-channel outputs",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          5920,
+          784
+        ],
+        "parameters": {
+          "jsCode": "var compileOut = $input.first().json;\nvar selData = $('Select articles for digest').first().json;\n\nvar responseText = compileOut.output || compileOut.text || '';\nvar digest = null;\ntry {\n  var cleaned = responseText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  var js = cleaned.indexOf('{');\n  var je = cleaned.lastIndexOf('}');\n  if (js !== -1 && je !== -1) digest = JSON.parse(cleaned.substring(js, je + 1));\n} catch (e) {\n  digest = { subject_line: 'AI News Digest', lead_analysis: responseText.substring(0, 500), lead_why: '', top_stories: [], quick_hits: [], trend_note: '' };\n}\nif (!digest) digest = {};\ndigest.subject_line = digest.subject_line || 'AI News Digest';\ndigest.lead_analysis = digest.lead_analysis || '';\ndigest.lead_why = digest.lead_why || '';\ndigest.top_stories = digest.top_stories || [];\ndigest.quick_hits = digest.quick_hits || [];\ndigest.trend_note = digest.trend_note || '';\n\nvar compIn = 0, compOut = 0;\nif (compileOut.tokenUsageEstimate) {\n  compIn = compileOut.tokenUsageEstimate.promptTokens || 0;\n  compOut = compileOut.tokenUsageEstimate.completionTokens || 0;\n}\nvar aIn = selData._analysisInputTokens || 0;\nvar aOut = selData._analysisOutputTokens || 0;\n// Fallback: estimate compilation tokens from content length\nif (compIn === 0 && compOut === 0) {\n  compIn = Math.ceil(((selData.prompt || '').length + 1200) / 4);\n  compOut = Math.ceil(responseText.length / 4);\n}\nvar totalIn = aIn + compIn;\nvar totalOut = aOut + compOut;\nvar haikuCost = (aIn * 1 + aOut * 5) / 1000000;\nvar sonnetCost = (compIn * 3 + compOut * 15) / 1000000;\nvar totalCost = Math.round((haikuCost + sonnetCost) * 1000000) / 1000000;\n\nvar lead = selData._lead;\nvar topStories = digest.top_stories || [];\nvar quickHits = digest.quick_hits || [];\nvar articles = selData._articles || [];\nvar allArticles = selData._allArticles || [];\n\n// === DISCORD EMBEDS ===\nvar embeds = [];\nif (lead) {\n  embeds.push({\n    title: lead.title, url: lead.url,\n    description: (digest.lead_analysis || lead.summary || '').substring(0, 4000),\n    color: lead.importance >= 9 ? 0xFF0000 : lead.importance >= 7 ? 0xFF8C00 : 0x3498DB,\n    fields: [\n      { name: 'Why It Matters', value: digest.lead_why || lead.whyItMatters || 'N/A', inline: false },\n      { name: 'Source', value: lead.source || '', inline: true },\n      { name: 'Score', value: (lead.importance || '?') + '/10', inline: true }\n    ],\n    footer: { text: 'Lead Story' }\n  });\n}\nfor (var i = 0; i < topStories.length && i < 4; i++) {\n  var ts = topStories[i];\n  var ma = articles[i + 1] || {};\n  embeds.push({\n    title: ts.title || ma.title || '', url: ma.url || '',\n    description: (ts.summary || '').substring(0, 2000),\n    color: (ma.importance || 5) >= 7 ? 0xFF8C00 : 0x3498DB,\n    fields: [{ name: 'Why', value: ts.why || 'N/A', inline: false }],\n    footer: { text: (ma.source || '') + ' | ' + (ma.importance || '?') + '/10' }\n  });\n}\nif (quickHits.length > 0) {\n  var qhText = '';\n  for (var i = 0; i < quickHits.length; i++) {\n    var qhArticle = articles[5 + i] || {};\n    var qhUrl = qhArticle.url || '';\n    var qhTitle = quickHits[i].title || qhArticle.title || '';\n    if (qhUrl) {\n      qhText += '\\u2022 [' + qhTitle + '](' + qhUrl + '): ' + (quickHits[i].one_liner || '') + '\\n';\n    } else {\n      qhText += '\\u2022 **' + qhTitle + '**: ' + (quickHits[i].one_liner || '') + '\\n';\n    }\n  }\n  embeds.push({ title: 'Quick Hits', description: qhText.substring(0, 4000), color: 0x95A5A6 });\n}\nembeds.push({\n  description: allArticles.length + ' articles analyzed | ' + articles.length + ' selected | Cost: $' + totalCost.toFixed(4),\n  color: 0x2C3E50, footer: { text: 'AI News Digest | Powered by Claude' }\n});\nembeds = embeds.slice(0, 10);\n\n// === SLACK BLOCKS ===\nvar blocks = [];\nblocks.push({ type: 'header', text: { type: 'plain_text', text: digest.subject_line || 'AI & Tech News Digest', emoji: true } });\nblocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: allArticles.length + ' articles analyzed | ' + articles.length + ' selected | $' + totalCost.toFixed(4) }] });\nblocks.push({ type: 'divider' });\nif (lead) {\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*Lead: <' + lead.url + '|' + lead.title + '>*\\n' + (digest.lead_analysis || lead.summary || '').substring(0, 2900) } });\n  if (digest.lead_why) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: digest.lead_why }] });\n  blocks.push({ type: 'divider' });\n}\nfor (var i = 0; i < topStories.length; i++) {\n  var ts = topStories[i]; var ma = articles[i + 1] || {};\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*<' + (ma.url || '') + '|' + (ts.title || ma.title || '') + '>*\\n' + (ts.summary || '') } });\n  if (ts.why) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: ts.why }] });\n}\nif (quickHits.length > 0) {\n  blocks.push({ type: 'divider' });\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*Quick Hits*' } });\n  var qhLines = '';\n  for (var i = 0; i < quickHits.length; i++) {\n    var qhArticle = articles[5 + i] || {};\n    var qhUrl = qhArticle.url || '';\n    var qhTitle = quickHits[i].title || qhArticle.title || '';\n    if (qhUrl) {\n      qhLines += '\\u2022 <' + qhUrl + '|' + qhTitle + '>: ' + (quickHits[i].one_liner || '') + '\\n';\n    } else {\n      qhLines += '\\u2022 *' + qhTitle + '*: ' + (quickHits[i].one_liner || '') + '\\n';\n    }\n  }\n  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: qhLines.substring(0, 2900) } });\n}\nif (digest.trend_note) {\n  blocks.push({ type: 'divider' });\n  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '*Trend:* ' + digest.trend_note }] });\n}\n\n// === MARKDOWN ===\nvar md = '# ' + (digest.subject_line || 'AI & Tech News Digest') + '\\n\\n';\nif (lead) {\n  md += '## Lead Story\\n\\n**[' + lead.title + '](' + lead.url + ')** — ' + lead.source + ' (' + lead.importance + '/10)\\n\\n';\n  md += (digest.lead_analysis || lead.summary || '') + '\\n\\n';\n  if (digest.lead_why) md += '> ' + digest.lead_why + '\\n\\n';\n}\nif (topStories.length > 0) {\n  md += '## Top Stories\\n\\n';\n  for (var i = 0; i < topStories.length; i++) {\n    var ts = topStories[i]; var ma = articles[i + 1] || {};\n    md += '### [' + (ts.title || ma.title || '') + '](' + (ma.url || '') + ')\\n' + (ts.summary || '') + '\\n';\n    if (ts.why) md += '> ' + ts.why + '\\n';\n    md += '\\n';\n  }\n}\nif (quickHits.length > 0) {\n  md += '## Quick Hits\\n\\n';\n  for (var i = 0; i < quickHits.length; i++) {\n    var qhArticle = articles[5 + i] || {};\n    var qhUrl = qhArticle.url || '';\n    var qhTitle = quickHits[i].title || qhArticle.title || '';\n    if (qhUrl) {\n      md += '- **[' + qhTitle + '](' + qhUrl + ')**: ' + (quickHits[i].one_liner || '') + '\\n';\n    } else {\n      md += '- **' + qhTitle + '**: ' + (quickHits[i].one_liner || '') + '\\n';\n    }\n  }\n  md += '\\n';\n}\nif (digest.trend_note) md += '---\\n\\n**Trend:** ' + digest.trend_note + '\\n\\n';\nmd += '---\\n\\n_' + allArticles.length + ' articles analyzed | ' + articles.length + ' selected | $' + totalCost.toFixed(4) + ' API cost_\\n';\n\n// === SAVE DATA ===\nvar saveArticles = [];\nfor (var i = 0; i < articles.length; i++) {\n  var a = articles[i];\n  saveArticles.push({\n    urlHash: a.urlHash, titleNormalized: a.titleNormalized,\n    url: a.url, title: a.title, source: a.source,\n    publishedAt: a.publishedAt,\n    fullText: a.fullText ? a.fullText.substring(0, 50000) : '',\n    summary: a.summary || '', importance: a.importance || 5,\n    categories: a.categories || [], sentiment: a.sentiment || 'neutral',\n    keyEntities: a.keyEntities || [], whyItMatters: a.whyItMatters || '',\n    readingTimeMin: a.readingTimeMin || 3, includedInDigest: true\n  });\n}\n\nreturn [{ json: {\n  discordEmbeds: embeds, slackBlocks: blocks,\n  markdown: md, subjectLine: digest.subject_line || 'AI & Tech News Digest',\n  costUsd: totalCost, costInputTokens: totalIn, costOutputTokens: totalOut,\n  jinaTokens: selData._jinaTokens || 0, runId: selData._runId,\n  articlesFound: allArticles.length, articlesSelected: articles.length,\n  leadStoryTitle: lead ? lead.title : '', saveArticles: saveArticles,\n  trendNote: digest.trend_note || ''\n}}];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "f7793af1-2496-4fbd-b9fd-9e80f4cae36f",
+        "name": "Send digest to Discord",
+        "type": "n8n-nodes-base.httpRequest",
+        "onError": "continueRegularOutput",
+        "position": [
+          6208,
+          608
+        ],
+        "parameters": {
+          "url": "={{ $('⚙️ Configure digest settings').first().json.discord_webhook_url }}",
+          "method": "POST",
+          "options": {
+            "timeout": 10000
+          },
+          "jsonBody": "={{ JSON.stringify({ embeds: $json.discordEmbeds }) }}",
+          "sendBody": true,
+          "specifyBody": "json"
+        },
+        "typeVersion": 4.2
+      },
+      {
+        "id": "41cf330d-7627-498c-99d0-c1de256afc06",
+        "name": "Send digest to Slack",
+        "type": "n8n-nodes-base.slack",
+        "onError": "continueRegularOutput",
+        "position": [
+          6208,
+          784
+        ],
+        "webhookId": "9a2a4af7-0cf4-44b1-936b-d6e8994bc358",
+        "parameters": {
+          "text": "={{ $json.subjectLine }}",
+          "select": "channel",
+          "blocksUi": "={{ JSON.stringify({ blocks: $json.slackBlocks }) }}",
+          "channelId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('⚙️ Configure digest settings').first().json.slack_channel_id }}"
+          },
+          "messageType": "block",
+          "otherOptions": {
+            "includeLinkToWorkflow": false
+          }
+        },
+        "credentials": {
+          "slackApi": {
+            "id": "LlHrJ3xFhfJjRun1",
+            "name": "nxsi-slack"
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "072a0613-8ada-4707-b056-aafb641431c2",
+        "name": "Build article save query",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          6208,
+          976
+        ],
+        "parameters": {
+          "jsCode": "var data = $input.first().json;\nvar usePg = $('⚙️ Configure digest settings').first().json.use_postgres;\nif (!usePg) {\n  return [{ json: { query: \"SELECT 1\", _runData: data } }];\n}\nvar articles = data.saveArticles || [];\nvar runId = data.runId;\n\nfunction esc(str) {\n  if (str === null || str === undefined) return 'NULL';\n  return \"'\" + String(str).replace(/'/g, \"''\") + \"'\";\n}\n\nif (articles.length === 0) {\n  return [{ json: { query: \"SELECT 'no articles to save'\", _runData: data } }];\n}\n\nvar values = [];\nfor (var i = 0; i < articles.length; i++) {\n  var a = articles[i];\n  values.push('(' +\n    esc(a.urlHash) + ',' + esc(a.titleNormalized) + ',' +\n    esc(a.url) + ',' + esc(a.title) + ',' + esc(a.source) + ',' +\n    (a.publishedAt ? esc(a.publishedAt) : 'NULL') + ',' +\n    esc((a.fullText || '').substring(0, 50000)) + ',' +\n    esc(a.summary) + ',' + (a.importance || 5) + ',' +\n    esc(JSON.stringify(a.categories || [])) + '::jsonb,' +\n    esc(a.sentiment) + ',' +\n    esc(JSON.stringify(a.keyEntities || [])) + '::jsonb,' +\n    esc(a.whyItMatters) + ',' + (a.readingTimeMin || 3) + ',' +\n    esc(runId) + ',' + (a.includedInDigest ? 'true' : 'false') + ')');\n}\n\nvar query = 'INSERT INTO digest_articles (url_hash, title_normalized, url, title, source_name, published_at, full_text, summary, importance_score, categories, sentiment, key_entities, why_it_matters, reading_time_min, digest_id, included_in_digest) VALUES ' + values.join(',') + ' ON CONFLICT (url_hash) DO NOTHING';\n\nreturn [{ json: { query: query, _runData: data } }];"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "7e5072f5-ab02-4009-adc6-2aaf6e14e435",
+        "name": "Save articles to database",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          6480,
+          976
+        ],
+        "parameters": {
+          "query": "={{ $json.query }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "032psGVSbEPse0XO",
+            "name": "nxsi-postgres"
+          }
+        },
+        "typeVersion": 2.5,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "6a5864ab-dcac-48a5-9a40-d88470440c5e",
+        "name": "Mark run as completed",
+        "type": "n8n-nodes-base.postgres",
+        "position": [
+          6736,
+          976
+        ],
+        "parameters": {
+          "query": "={{ $(\"⚙️ Configure digest settings\").first().json.use_postgres ? \"UPDATE digest_runs SET status = 'completed', feeds_checked = 10, articles_found = \" + $('Format multi-channel outputs').first().json.articlesFound + \", articles_after_dedup = \" + $('Format multi-channel outputs').first().json.articlesFound + \", articles_selected = \" + $('Format multi-channel outputs').first().json.articlesSelected + \", lead_story_title = \" + ($('Format multi-channel outputs').first().json.leadStoryTitle ? \"'\" + $('Format multi-channel outputs').first().json.leadStoryTitle.replace(/'/g, \"''\") + \"'\" : \"NULL\") + \", cost_input_tokens = \" + $('Format multi-channel outputs').first().json.costInputTokens + \", cost_output_tokens = \" + $('Format multi-channel outputs').first().json.costOutputTokens + \", cost_usd = \" + $('Format multi-channel outputs').first().json.costUsd + \", jina_tokens_used = \" + $('Format multi-channel outputs').first().json.jinaTokens + \", completed_at = NOW(), duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))::int WHERE id = '\" + $('Format multi-channel outputs').first().json.runId + \"'\" : \"SELECT 1\" }}",
+          "options": {},
+          "operation": "executeQuery"
+        },
+        "credentials": {
+          "postgres": {
+            "id": "032psGVSbEPse0XO",
+            "name": "nxsi-postgres"
+          }
+        },
+        "typeVersion": 2.5,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "5e659dc8-9dff-4e71-aa92-574d6d48f430",
+        "name": "Run daily at 6 AM",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          608,
+          784
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 6 * * *"
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "8fed8e62-681d-4eb2-8373-a1948983d503",
+        "name": "Claude Haiku (analyzer)",
+        "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "position": [
+          5024,
+          1056
+        ],
+        "parameters": {
+          "model": {
+            "__rl": true,
+            "mode": "list",
+            "value": "claude-haiku-4-5-20251001"
+          },
+          "options": {
+            "temperature": 0.2,
+            "maxTokensToSample": 2048
+          }
+        },
+        "credentials": {
+          "anthropicApi": {
+            "id": "5zrxbFzTF9Yr7MNS",
+            "name": "nxsi-anthropic"
+          }
+        },
+        "typeVersion": 1.3
+      },
+      {
+        "id": "ae1b7fe1-3933-4ce8-8471-d7216e61f499",
+        "name": "⚙️ Configure digest settings",
+        "type": "n8n-nodes-base.set",
+        "position": [
+          880,
+          784
+        ],
+        "parameters": {
+          "options": {},
+          "assignments": {
+            "assignments": [
+              {
+                "id": "a1b2c3d4",
+                "name": "discord_webhook_url",
+                "type": "string",
+                "value": "https://discord.com/api/webhooks/YOUR_DISCORD_WEBHOOK_URL"
+              },
+              {
+                "id": "e5f6a7b8",
+                "name": "slack_channel_id",
+                "type": "string",
+                "value": "YOUR_SLACK_CHANNEL_ID"
+              },
+              {
+                "id": "c9d0e1f2",
+                "name": "max_extract_articles",
+                "type": "number",
+                "value": 25
+              },
+              {
+                "id": "a3b4c5d6",
+                "name": "max_digest_articles",
+                "type": "number",
+                "value": 12
+              },
+              {
+                "id": "e7f8a9b0",
+                "name": "dedup_lookback_days",
+                "type": "number",
+                "value": 7
+              },
+              {
+                "id": "c1d2e3f4",
+                "name": "feed_lookback_hours",
+                "type": "number",
+                "value": 24
+              },
+              {
+                "id": "pg_toggle_01",
+                "name": "use_postgres",
+                "type": "boolean",
+                "value": false
+              }
+            ]
+          }
+        },
+        "typeVersion": 3.4
+      },
+      {
+        "id": "3c774194-45a4-4f0a-b443-9585691b78d3",
+        "name": "Overview — AI News Digest",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -48,
+          96
+        ],
+        "parameters": {
+          "width": 560,
+          "height": 880,
+          "content": "# AI News Digest\n\nAutomated daily digest that monitors RSS/API sources, extracts full article text, analyzes each with Claude AI, scores by importance, and delivers a formatted briefing to Discord, Slack, or email.\n\n### How it works\n1. Triggers on a daily schedule (default: 6 AM)\n2. Fetches articles from configurable sources (RSS, Atom, Reddit JSON, Hacker News API)\n3. Deduplicates by URL hash and fuzzy title matching (+ database lookback if Postgres enabled)\n4. Extracts full article text using [Jina Reader API](https://jina.ai/reader/)\n5. Claude Haiku analyzes each article (importance 1-10, categories, sentiment)\n6. Articles are scored with topic weighting and social signal boosting\n7. Claude Sonnet compiles a polished digest (lead story, top stories, quick hits, trend note)\n8. Delivers to Discord (embeds), Slack (blocks), or both\n\n### Quick start\n1. Add your **Anthropic API key** as an n8n credential ([setup guide](https://nxsi.io/guides/claude-api-setup))\n2. Open **⚙️ Configure digest settings** and set your Discord webhook URL\n3. Activate the workflow — that's it!\n\n### Optional: PostgreSQL for history\nSet `use_postgres` to **true** in the config node to enable run tracking, article storage, and cross-day deduplication. Create the tables using the schema in the template description. The workflow runs fine without it.\n\n### Customization\n- Edit the feed list in **Build feed source list** to add/remove sources\n- Adjust topic weights in **Score and rank articles**\n- Change `max_extract_articles` and `max_digest_articles` in the config node\n- Modify the digest tone in the **Compile digest with Claude** system prompt\n- Swap Claude models: Haiku for cheaper runs, Opus for deeper analysis"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "df43ca14-d5df-4610-aa6e-aab8f63c3f46",
+        "name": "Section — Configuration",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          576,
+          528
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 496,
+          "height": 452,
+          "content": "##  Configuration\nAll user settings in one place. Edit this node to set your webhook URLs, channel IDs, processing limits, and the `use_postgres` toggle.\n\n[Discord webhook setup](https://support.discord.com/hc/en-us/articles/228383668) | [Slack webhook guide](https://api.slack.com/messaging/webhooks)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "6ba9dcbd-b802-4050-a610-0d105dc54fa7",
+        "name": "Section — Run Tracking",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1120,
+          528
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 480,
+          "height": 452,
+          "content": "##  Run Tracking\nCreates a timestamped database record to track progress, article counts, and API costs per run.\n\n(Optional)\nPostgreSQL enables run tracking, article history, and cross-day dedup. Set `use_postgres` to **true** in the config node, then create the tables from the template description.\n\nNot required -  the workflow runs fully without a database."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "c8b57b6f-5d75-4e7c-bb74-6fed24b99d28",
+        "name": "Section — Feed Collection",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          1664,
+          528
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 776,
+          "height": 452,
+          "content": "##  Feed Collection\nFetches and parses articles from RSS, Atom, Reddit JSON, and Hacker News API. Handles all feed formats automatically."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4922558c-4424-4bc9-99dd-31474e2b0649",
+        "name": "Section — Deduplication",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          2496,
+          432
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 1080,
+          "height": 548,
+          "content": "##  Deduplication\nThree layers: URL hash matching, fuzzy title comparison (Levenshtein distance), and database lookback to skip recently-covered stories.\n\nDatabase dedup is automatic when Postgres is enabled. Without it, URL hash and title matching still prevent duplicates within each run."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "35dc639a-7bbd-44d4-9bf2-a63963b325a3",
+        "name": "Section — Content Extraction",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          3632,
+          528
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 744,
+          "height": 452,
+          "content": "##  Content Extraction\nPulls full article text via [Jina Reader API](https://jina.ai/reader/) for deeper AI analysis beyond just titles and excerpts. Free tier handles most daily digest volumes."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2da857f5-2fb9-43fe-84d3-b3e002b8227f",
+        "name": "Section — AI Analysis",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          4464,
+          528
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 792,
+          "height": 452,
+          "content": "##  AI Analysis\nClaude Haiku scores each article 1-10 for importance, assigns categories, detects sentiment, and writes a practical \"why it matters\" for each."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "d39a1269-00a8-42c5-a164-14ec88ea9797",
+        "name": "Section — Digest Compilation",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          5312,
+          528
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 728,
+          "height": 452,
+          "content": "##  Digest Compilation\nClaude Sonnet compiles top articles into a structured digest: lead story with analysis, top stories, quick hits, and trend detection."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "4f971704-db51-4830-bb8a-af215aaee8c6",
+        "name": "Section — Delivery and Storage",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          6144,
+          448
+        ],
+        "parameters": {
+          "color": 7,
+          "width": 744,
+          "height": 716,
+          "content": "##  Delivery & Storage\nSends formatted digest to Discord (embeds) and Slack (blocks). When Postgres is enabled, saves all analyzed articles and logs run completion stats.\n\nWithout Postgres, delivery works the same - the database nodes are safely skipped."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "0d60f0c8-aead-4180-b649-5a5b813558ac",
+        "name": "Warning — Anthropic API Cost",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          4992,
+          1008
+        ],
+        "parameters": {
+          "color": 3,
+          "width": 464,
+          "height": 328,
+          "content": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n⚠️ **Requires Anthropic API key**\nAdd your key via n8n Credentials → Anthropic.\n\nQuick setup: [console.anthropic.com](https://console.anthropic.com) → API Keys → Create Key\nFull guide: [nxsi.io/guides/claude-api-setup](https://nxsi.io/guides/claude-api-setup)"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "077bd980-e9fc-464e-a343-94b6f5a97168",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -48,
+          992
+        ],
+        "parameters": {
+          "width": 784,
+          "height": 864,
+          "content": "## Optional: PostgreSQL\n\n  Set `use_postgres` to **true** in the config node to enable run tracking, article storage, and cross-day deduplication. The workflow runs fully without a database -- all five Postgres nodes are safely skipped when disabled.\n\n  If you enable it, create these tables first:\n\n  `CREATE TABLE IF NOT EXISTS digest_runs (\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),`\n    `run_date DATE NOT NULL,`\n    `started_at TIMESTAMPTZ DEFAULT now(),`\n    `completed_at TIMESTAMPTZ,`\n    `articles_found INTEGER DEFAULT 0,`\n    `articles_selected INTEGER DEFAULT 0,`\n    `cost_input_tokens INTEGER DEFAULT 0,`\n    `cost_output_tokens INTEGER DEFAULT 0,`\n    `cost_usd NUMERIC(10,6) DEFAULT 0,`\n    `status VARCHAR(20) DEFAULT 'running'`\n  `);`\n\n  `CREATE TABLE IF NOT EXISTS digest_articles (\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),`\n    `run_id UUID REFERENCES digest_runs(id),`\n    `url_hash VARCHAR(64) NOT NULL,`\n    `title_normalized VARCHAR(500),`\n    `url TEXT,`\n    `title TEXT,`\n    `source VARCHAR(100),`\n    `published_at TIMESTAMPTZ,`\n    `full_text TEXT,`\n    `summary TEXT,`\n    `importance INTEGER,`\n    `categories TEXT[],`\n    `sentiment VARCHAR(20),`\n    `key_entities TEXT[],`\n    `why_it_matters TEXT,`\n    `reading_time_min INTEGER,`\n    `included_in_digest BOOLEAN DEFAULT false,`\n    `created_at TIMESTAMPTZ DEFAULT now()`\n  `);`\n\n  `CREATE INDEX idx_digest_articles_url_hash ON digest_articles(url_hash);`\n  `CREATE INDEX idx_digest_articles_title ON digest_articles(title_normalized);`\n  `CREATE INDEX idx_digest_articles_created ON digest_articles(created_at);`"
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "binaryMode": "separate",
+      "callerPolicy": "workflowsFromSameOwner",
+      "availableInMCP": false,
+      "executionOrder": "v1"
+    },
+    "versionId": "4db1ab82-a1e5-4f1e-a2da-45a80accced2",
+    "connections": {
+      "Create run record": {
+        "main": [
+          [
+            {
+              "node": "Build feed source list",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Run daily at 6 AM": {
+        "main": [
+          [
+            {
+              "node": "⚙️ Configure digest settings",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch feed content": {
+        "main": [
+          [
+            {
+              "node": "Parse articles from feeds",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Any articles found?": {
+        "main": [
+          [
+            {
+              "node": "Deduplicate by URL and title",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Mark run as empty",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build feed source list": {
+        "main": [
+          [
+            {
+              "node": "Fetch feed content",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Claude Haiku (analyzer)": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Analyze article with Claude",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Score and rank articles": {
+        "main": [
+          [
+            {
+              "node": "Select articles for digest",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build article save query": {
+        "main": [
+          [
+            {
+              "node": "Save articles to database",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Claude Sonnet (compiler)": {
+        "ai_languageModel": [
+          [
+            {
+              "node": "Compile digest with Claude",
+              "type": "ai_languageModel",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Initialize run timestamp": {
+        "main": [
+          [
+            {
+              "node": "Create run record",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare analysis prompts": {
+        "main": [
+          [
+            {
+              "node": "Analyze article with Claude",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse articles from feeds": {
+        "main": [
+          [
+            {
+              "node": "Any articles found?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save articles to database": {
+        "main": [
+          [
+            {
+              "node": "Mark run as completed",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Assemble extracted content": {
+        "main": [
+          [
+            {
+              "node": "Prepare analysis prompts",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Compile digest with Claude": {
+        "main": [
+          [
+            {
+              "node": "Format multi-channel outputs",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract full text via Jina": {
+        "main": [
+          [
+            {
+              "node": "Assemble extracted content",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Select articles for digest": {
+        "main": [
+          [
+            {
+              "node": "Compile digest with Claude",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Analyze article with Claude": {
+        "main": [
+          [
+            {
+              "node": "Score and rank articles",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Deduplicate by URL and title": {
+        "main": [
+          [
+            {
+              "node": "Check database for recent duplicates",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format multi-channel outputs": {
+        "main": [
+          [
+            {
+              "node": "Send digest to Discord",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Send digest to Slack",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Build article save query",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Remove already-seen articles": {
+        "main": [
+          [
+            {
+              "node": "Select top articles for extraction",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "⚙️ Configure digest settings": {
+        "main": [
+          [
+            {
+              "node": "Initialize run timestamp",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Select top articles for extraction": {
+        "main": [
+          [
+            {
+              "node": "Extract full text via Jina",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check database for recent duplicates": {
+        "main": [
+          [
+            {
+              "node": "Remove already-seen articles",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 39,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 1
+      },
+      "n8n-nodes-base.set": {
+        "count": 1
+      },
+      "n8n-nodes-base.code": {
+        "count": 12
+      },
+      "n8n-nodes-base.slack": {
+        "count": 1
+      },
+      "n8n-nodes-base.postgres": {
+        "count": 5
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 11
+      },
+      "n8n-nodes-base.httpRequest": {
+        "count": 3
+      },
+      "@n8n/n8n-nodes-langchain.agent": {
+        "count": 1
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.chainLlm": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.lmChatAnthropic": {
+        "count": 2
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "nXsi",
+    "username": "dyllank",
+    "bio": "",
+    "verified": true,
+    "links": [
+      "https://www.nxsi.io"
+    ],
+    "avatar": "https://gravatar.com/avatar/05bc1aa9e985cd6db6b0dd88a651831586b48d677475e826dde0ecde2a899325?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 19,
+      "icon": "file:httprequest.svg",
+      "name": "n8n-nodes-base.httpRequest",
+      "codex": {
+        "data": {
+          "alias": [
+            "API",
+            "Request",
+            "URL",
+            "Build",
+            "cURL"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/world-poetry-day-workflow/",
+                "icon": "📜",
+                "label": "Celebrating World Poetry Day with a daily poem in Telegram"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-designs-with-bannerbear-and-n8n/",
+                "icon": "🎨",
+                "label": "Automate Designs with Bannerbear and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-use-the-http-request-node-the-swiss-army-knife-for-workflow-automation/",
+                "icon": "🧰",
+                "label": "How to use the HTTP Request Node - The Swiss Army Knife for Workflow Automation"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-scheduled-text-affirmations-with-n8n/",
+                "icon": "🤟",
+                "label": "Creating scheduled text affirmations with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "HTTP Request",
+        "color": "#0004F5"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MCAyMEM0MCA4Ljk1MzE0IDMxLjA0NjkgMCAyMCAwQzguOTUzMTQgMCAwIDguOTUzMTQgMCAyMEMwIDMxLjA0NjkgOC45NTMxNCA0MCAyMCA0MEMzMS4wNDY5IDQwIDQwIDMxLjA0NjkgNDAgMjBaTTIwIDM2Ljk0NThDMTguODg1MiAzNi45NDU4IDE3LjEzNzggMzUuOTY3IDE1LjQ5OTggMzIuNjk4NUMxNC43OTY0IDMxLjI5MTggMTQuMTk2MSAyOS41NDMxIDEzLjc1MjYgMjcuNjg0N0gyNi4xODk4QzI1LjgwNDUgMjkuNTQwMyAyNS4yMDQ0IDMxLjI5MDEgMjQuNTAwMiAzMi42OTg1QzIyLjg2MjIgMzUuOTY3IDIxLjExNDggMzYuOTQ1OCAyMCAzNi45NDU4Wk0xMi45MDY0IDIwQzEyLjkwNjQgMjEuNjA5NyAxMy4wMDg3IDIzLjE2NCAxMy4yMDAzIDI0LjYzMDVIMjYuNzk5N0MyNi45OTEzIDIzLjE2NCAyNy4wOTM2IDIxLjYwOTcgMjcuMDkzNiAyMEMyNy4wOTM2IDE4LjM5MDMgMjYuOTkxMyAxNi44MzYgMjYuNzk5NyAxNS4zNjk1SDEzLjIwMDNDMTMuMDA4NyAxNi44MzYgMTIuOTA2NCAxOC4zOTAzIDEyLjkwNjQgMjBaTTIwIDMuMDU0MTlDMjEuMTE0OSAzLjA1NDE5IDIyLjg2MjIgNC4wMzA3OCAyNC41MDAxIDcuMzAwMzlDMjUuMjA2NiA4LjcxNDA4IDI1LjgwNzIgMTAuNDA2NyAyNi4xOTIgMTIuMzE1M0gxMy43NTAxQzE0LjE5MzMgMTAuNDA0NyAxNC43OTQyIDguNzEyNTQgMTUuNDk5OCA3LjMwMDY0QzE3LjEzNzcgNC4wMzA4MyAxOC44ODUxIDMuMDU0MTkgMjAgMy4wNTQxOVpNMzAuMTQ3OCAyMEMzMC4xNDc4IDE4LjQwOTkgMzAuMDU0MyAxNi44NjE3IDI5LjgyMjcgMTUuMzY5NUgzNi4zMDQyQzM2LjcyNTIgMTYuODQyIDM2Ljk0NTggMTguMzk2NCAzNi45NDU4IDIwQzM2Ljk0NTggMjEuNjAzNiAzNi43MjUyIDIzLjE1OCAzNi4zMDQyIDI0LjYzMDVIMjkuODIyN0MzMC4wNTQzIDIzLjEzODMgMzAuMTQ3OCAyMS41OTAxIDMwLjE0NzggMjBaTTI2LjI3NjcgNC4yNTUxMkMyNy42MzY1IDYuMzYwMTkgMjguNzExIDkuMTMyIDI5LjM3NzQgMTIuMzE1M0gzNS4xMDQ2QzMzLjI1MTEgOC42NjggMzAuMTA3IDUuNzgzNDYgMjYuMjc2NyA0LjI1NTEyWk0xMC42MjI2IDEyLjMxNTNINC44OTI5M0M2Ljc1MTQ3IDguNjY3ODQgOS44OTM1MSA1Ljc4MzQxIDEzLjcyMzIgNC4yNTUxM0MxMi4zNjM1IDYuMzYwMjEgMTEuMjg5IDkuMTMyMDEgMTAuNjIyNiAxMi4zMTUzWk0zLjA1NDE5IDIwQzMuMDU0MTkgMjEuNjAzIDMuMjc3NDMgMjMuMTU3NSAzLjY5NDg0IDI0LjYzMDVIMTAuMTIxN0M5Ljk0NjE5IDIzLjE0MiA5Ljg1MjIyIDIxLjU5NDMgOS44NTIyMiAyMEM5Ljg1MjIyIDE4LjQwNTcgOS45NDYxOSAxNi44NTggMTAuMTIxNyAxNS4zNjk1SDMuNjk0ODRDMy4yNzc0MyAxNi44NDI1IDMuMDU0MTkgMTguMzk3IDMuMDU0MTkgMjBaTTI2LjI3NjYgMzUuNzQyN0MyNy42MzY1IDMzLjYzOTMgMjguNzExIDMwLjg2OCAyOS4zNzc0IDI3LjY4NDdIMzUuMTA0NkMzMy4yNTEgMzEuMzMyMiAzMC4xMDY4IDM0LjIxNzkgMjYuMjc2NiAzNS43NDI3Wk0xMy43MjM0IDM1Ljc0MjdDOS44OTM2OSAzNC4yMTc5IDYuNzUxNTUgMzEuMzMyNCA0Ljg5MjkzIDI3LjY4NDdIMTAuNjIyNkMxMS4yODkgMzAuODY4IDEyLjM2MzUgMzMuNjM5MyAxMy43MjM0IDM1Ljc0MjdaIiBmaWxsPSIjM0E0MkU5Ii8+Cjwvc3ZnPgo="
+      },
+      "displayName": "HTTP Request",
+      "typeVersion": 4,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "icon": "file:postgres.svg",
+      "name": "n8n-nodes-base.postgres",
+      "codex": {
+        "data": {
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/love-at-first-sight-ricardos-n8n-journey/",
+                "icon": "❤️",
+                "label": "Love at first sight: Ricardo’s n8n journey"
+              },
+              {
+                "url": "https://n8n.io/blog/why-i-chose-n8n-over-zapier-in-2020/",
+                "icon": "😍",
+                "label": "Why I chose n8n over Zapier in 2020"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-honest-burgers-use-automation-to-save-100k-per-year/",
+                "icon": "🍔",
+                "label": "How Honest Burgers Use Automation to Save $100k per year"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/postgres/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Data & Storage"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Postgres"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgNzkgODEiPjx1c2UgeGxpbms6aHJlZj0iI2EiIHg9Ii41IiB5PSIuNSIvPjxzeW1ib2wgaWQ9ImEiIG92ZXJmbG93PSJ2aXNpYmxlIj48ZyBmaWxsLXJ1bGU9Im5vbnplcm8iIHN0cm9rZT0ibm9uZSI+PHBhdGggZmlsbD0iIzAwMCIgZD0iTTc3LjM5MSA0Ny45MjJjLS40NjYtMS40MTItMS42ODgtMi4zOTYtMy4yNjgtMi42MzItLjc0NS0uMTExLTEuNTk4LS4wNjQtMi42MDguMTQ0LTEuNzYuMzYzLTMuMDY1LjUwMS00LjAxOC41MjggMy41OTYtNi4wNzIgNi41MjEtMTIuOTk3IDguMjA0LTE5LjUxNSAyLjcyMi0xMC41NCAxLjI2OC0xNS4zNDEtLjQzMi0xNy41MTNDNzAuNzcgMy4xODUgNjQuMjA2LjA5NyA1Ni4yODcuMDAyYy00LjIyNC0uMDUyLTcuOTMzLjc4Mi05Ljg2NyAxLjM4MmEzNyAzNyAwIDAgMC01Ljc3LS41MjhjLTMuODA5LS4wNjEtNy4xNzQuNzctMTAuMDUgMi40NzZhNDYgNDYgMCAwIDAtNy4wOTgtMS43ODJDMTYuNTYxLjQxMSAxMC45NjggMS4yOTkgNi44NzYgNC4xOSAxLjkyMiA3LjY4OS0uMzc1IDEzLjc3LjA1IDIyLjI2MmMuMTM1IDIuNjk2IDEuNjQzIDEwLjkgNC4wMTggMTguNjggMS4zNjUgNC40NzIgMi44MiA4LjE4NSA0LjMyNiAxMS4wMzggMi4xMzUgNC4wNDYgNC40MTkgNi40MjggNi45ODQgNy4yODQgMS40MzguNDc5IDQuMDQ5LjgxNCA2Ljc5Ny0xLjQ3M2E2IDYgMCAwIDAgMS40MjkgMS4yM2MuNzgzLjQ5NCAxLjc0Ljg5NyAyLjY5NiAxLjEzNiAzLjQ0Ni44NjIgNi42NzQuNjQ2IDkuNDI3LS41NjFsLjA0MSAxLjM2Mi4wNiAxLjg5OWMuMTYzIDQuMDY0LjQ0IDcuMjIzIDEuMjU5IDkuNDM0LjA0NS4xMjIuMTA1LjMwNy4xNjkuNTAzLjQwOSAxLjI1MSAxLjA5MiAzLjM0NiAyLjgzIDQuOTg3IDEuOCAxLjY5OSAzLjk3OCAyLjIyIDUuOTcyIDIuMjIgMSAwIDEuOTU1LS4xMzEgMi43OTItLjMxMSAyLjk4NC0uNjM5IDYuMzczLTEuNjE0IDguODI0LTUuMTA0IDIuMzE4LTMuMyAzLjQ0NC04LjI3IDMuNjQ4LTE2LjEwMWwuMDc0LS42MzQuMDQ4LS40MTQuNTQ2LjA0OC4xNDEuMDFjMy4wMzkuMTM4IDYuNzU1LS41MDYgOS4wMzctMS41NjYgMS44MDMtLjgzNyA3LjU4Mi0zLjg4OCA2LjIyMS04LjAwNyIvPjxwYXRoIGZpbGw9IiMzMzY3OTEiIGQ9Ik03Mi4xOTUgNDguNzIzYy05LjAzNiAxLjg2NC05LjY1Ny0xLjE5NS05LjY1Ny0xLjE5NSA5LjU0MS0xNC4xNTcgMTMuNTI5LTMyLjEyNyAxMC4wODctMzYuNTI1QzYzLjIzNS0uOTk0IDQ2Ljk4MSA0LjY4IDQ2LjcxIDQuODI3bC0uMDg3LjAxNmMtMS43ODUtLjM3MS0zLjc4My0uNTkxLTYuMDI5LS42MjgtNC4wODktLjA2Ny03LjE5IDEuMDcyLTkuNTQ0IDIuODU3IDAgMC0yOC45OTUtMTEuOTQ1LTI3LjY0NyAxNS4wMjMuMjg3IDUuNzM3IDguMjIzIDQzLjQxIDE3LjY4OSAzMi4wMzEgMy40Ni00LjE2MSA2LjgwMy03LjY3OSA2LjgwMy03LjY3OSAxLjY2IDEuMTAzIDMuNjQ4IDEuNjY2IDUuNzMyIDEuNDYzbC4xNjItLjEzN2E2LjMgNi4zIDAgMCAwIC4wNjUgMS42MmMtMi40MzkgMi43MjUtMS43MjIgMy4yMDMtNi41OTcgNC4yMDYtNC45MzMgMS4wMTctMi4wMzUgMi44MjYtLjE0MyAzLjI5OSAyLjI5NC41NzQgNy42IDEuMzg2IDExLjE4NS0zLjYzM2wtLjE0My41NzNjLjk1Ni43NjUgMS42MjYgNC45NzggMS41MTQgOC43OTdzLS4xODggNi40NDEuNTY1IDguNDg5IDEuNTAzIDYuNjU2IDcuOTEyIDUuMjgyYzUuMzU1LTEuMTQ4IDguMTMtNC4xMjEgOC41MTYtOS4wODEuMjc0LTMuNTI2Ljg5NC0zLjAwNS45MzMtNi4xNThsLjQ5Ny0xLjQ5M2MuNTczLTQuNzguMDkxLTYuMzIyIDMuMzktNS42MDVsLjgwMi4wN2MyLjQyOC4xMSA1LjYwNi0uMzkxIDcuNDcxLTEuMjU3IDQuMDE2LTEuODY0IDYuMzk4LTQuOTc2IDIuNDM4LTQuMTU4Ii8+PHBhdGggZD0iTTMyLjc0NyAyNC42NmMtLjgxNC0uMTEzLTEuNTUyLS4wMDgtMS45MjUuMjc0YS43LjcgMCAwIDAtLjI5Mi40N2MtLjA0Ny4zMzYuMTg4LjcwNy4zMzMuODk4LjQwOS41NDIgMS4wMDYuOTE1IDEuNTk4Ljk5N2EyIDIgMCAwIDAgLjI1Ni4wMThjLjk4NiAwIDEuODgzLS43NjggMS45NjItMS4zMzUuMDk5LS43MS0uOTMyLTEuMTgzLTEuOTMxLTEuMzIybTI2Ljk3NS4wMjJjLS4wNzgtLjU1Ni0xLjA2OC0uNzE1LTIuMDA3LS41ODRzLTEuODQ4LjU1NC0xLjc3MiAxLjExMmMuMDYxLjQzNC44NDQgMS4xNzQgMS43NzEgMS4xNzRxLjExNyAwIC4yMzctLjAxNmMuNjE5LS4wODYgMS4wNzMtLjQ3OSAxLjI4OC0uNzA1LjMyOS0uMzQ1LjUxOC0uNzMuNDg0LS45OG0xNS40NzcgMjMuODI4Yy0uMzQ1LTEuMDQyLTEuNDUzLTEuMzc3LTMuMjk2LS45OTctNS40NzEgMS4xMjktNy40My4zNDctOC4wNzMtLjEyNyA0LjI1Mi02LjQ3OCA3Ljc1LTE0LjMwOCA5LjYzNy0yMS42MTQuODk0LTMuNDYxIDEuMzg4LTYuNjc1IDEuNDI4LTkuMjk0LjA0NS0yLjg3Ni0uNDQ1LTQuOTg4LTEuNDU1LTYuMjc5LTQuMDcyLTUuMjAzLTEwLjA0OC03Ljk5NC0xNy4yODMtOC4wNy00Ljk3My0uMDU2LTkuMTc1IDEuMjE3LTkuOTkgMS41NzVhMjUgMjUgMCAwIDAtNS42MjItLjcyMmMtMy43MzQtLjA2LTYuOTYxLjgzNC05LjYzMyAyLjY1NWE0MyA0MyAwIDAgMC03LjgyOC0yLjA1MmMtNi4zNDItMS4wMjEtMTEuMzgxLS4yNDgtMTQuOTc4IDIuMy00LjI5MSAzLjA0LTYuMjcyIDguNDc1LTUuODg4IDE2LjE1Mi4xMjkgMi41ODMgMS42MDEgMTAuNTI5IDMuOTIzIDE4LjEzOSAzLjA1NyAxMC4wMTYgNi4zOCAxNS42ODYgOS44NzcgMTYuODUyYTQuNCA0LjQgMCAwIDAgMS40MDIuMjMyYzEuMjc2IDAgMi44MzktLjU3NSA0LjQ2Ni0yLjUzMWExNjEgMTYxIDAgMCAxIDYuMTU2LTYuOTY2IDkuOSA5LjkgMCAwIDAgNC40MjkgMS4xOTFsLjAxLjEyMWMtLjMxLjM2OC0uNTY0LjY5LS43ODEuOTY1LTEuMDcgMS4zNTgtMS4yOTMgMS42NDEtNC43MzggMi4zNTEtLjk4LjIwMi0zLjU4Mi43MzgtMy42MiAyLjU2My0uMDQxIDEuOTkzIDMuMDc2IDIuODMgMy40MzEgMi45MTkgMS4yMzguMzEgMi40My40NjMgMy41NjguNDYzIDIuNzY2IDAgNS4yLS45MDkgNy4xNDUtMi42NjgtLjA2IDcuMTA2LjIzNiAxNC4xMDcgMS4wODkgMTYuMjQxLjY5OSAxLjc0NiAyLjQwNiA2LjAxNCA3Ljc5OCA2LjAxNC43OTEgMCAxLjY2Mi0uMDkyIDIuNjItLjI5NyA1LjYyNy0xLjIwNyA4LjA3MS0zLjY5NCA5LjAxNi05LjE3Ny41MDYtMi45MyAxLjM3NC05LjkyOCAxLjc4Mi0xMy42ODIuODYyLjI2OSAxLjk3MS4zOTIgMy4xNy4zOTIgMi41MDEgMCA1LjM4Ny0uNTMxIDcuMTk3LTEuMzcyIDIuMDMzLS45NDQgNS43MDItMy4yNjEgNS4wMzctNS4yNzR6TTYxLjggMjMuMTQ3Yy0uMDE5IDEuMTA4LS4xNzEgMi4xMTQtLjMzMyAzLjE2NC0uMTc0IDEuMTI5LS4zNTQgMi4yOTctLjM5OSAzLjcxNS0uMDQ1IDEuMzc5LjEyOCAyLjgxNC4yOTQgNC4yLjMzNyAyLjgwMS42ODIgNS42ODUtLjY1NSA4LjUzMWExMSAxMSAwIDAgMS0uNTkyLTEuMjE4Yy0uMTY2LS40MDMtLjUyNy0xLjA1LTEuMDI3LTEuOTQ2LTEuOTQ0LTMuNDg3LTYuNDk3LTExLjY1Mi00LjE2Ny0xNC45ODQuNjk0LS45OTIgMi40NTYtMi4wMTEgNi44NzktMS40NjN6TTU2LjQzOSA0LjM3NGM2LjQ4Mi4xNDMgMTEuNjA5IDIuNTY4IDE1LjI0IDcuMjA3IDIuNzg0IDMuNTU4LS4yODIgMTkuNzQ5LTkuMTU4IDMzLjcxNmwtLjI2OS0uMzM5LS4xMTItLjE0YzIuMjk0LTMuNzg4IDEuODQ1LTcuNTM2IDEuNDQ2LTEwLjg1OS0uMTY0LTEuMzY0LS4zMTktMi42NTItLjI4LTMuODYxLjA0MS0xLjI4My4yMS0yLjM4Mi4zNzQtMy40NDYuMjAyLTEuMzExLjQwNy0yLjY2Ny4zNS00LjI2NWExLjggMS44IDAgMCAwIC4wMzctLjYwMWMtLjE0NC0xLjUzMy0xLjg5NC02LjEyLTUuNDYyLTEwLjI3My0xLjk1MS0yLjI3MS00Ljc5Ny00LjgxMy04LjY4Mi02LjUyN2EyOS4zIDI5LjMgMCAwIDEgNi41MTUtLjYxMnpNMjAuMTY3IDUzLjI5OGMtMS43OTMgMi4xNTUtMy4wMzEgMS43NDItMy40MzggMS42MDctMi42NTMtLjg4NS01LjczLTYuNDkxLTguNDQ0LTE1LjM4Mi0yLjM0OC03LjY5My0zLjcyLTE1LjQyOC0zLjgyOS0xNy41OTctLjM0My02Ljg2IDEuMzItMTEuNjQxIDQuOTQzLTE0LjIxIDUuODk2LTQuMTgxIDE1LjU4OS0xLjY3OSAxOS40ODQtLjQwOWwtLjE3LjE2M2MtNi4zOTEgNi40NTUtNi4yNCAxNy40ODMtNi4yMjQgMTguMTU3YTIyIDIyIDAgMCAwIC4wNTEgMS4xMzVjLjExIDEuODU1LjMxNSA1LjMwNy0uMjMyIDkuMjE3LS41MDggMy42MzMuNjEyIDcuMTg5IDMuMDcyIDkuNzU2cS4zODMuMzk4Ljc5NS43NWExNjQgMTY0IDAgMCAwLTYuMDA4IDYuODE0em02LjgzLTkuMTEzYy0xLjk4My0yLjA2OS0yLjg4NC00Ljk0Ny0yLjQ3MS03Ljg5Ni41NzctNC4xMy4zNjQtNy43MjcuMjUtOS42NTlsLS4wMzktLjY5NGMuOTM0LS44MjggNS4yNjEtMy4xNDYgOC4zNDYtMi40MzkgMS40MDguMzIzIDIuMjY2IDEuMjgxIDIuNjIzIDIuOTMxIDEuODQ2IDguNTM5LjI0NCAxMi4wOTgtMS4wNDMgMTQuOTU3LS4yNjUuNTg5LS41MTYgMS4xNDYtLjczIDEuNzIybC0uMTY2LjQ0NWMtLjQyIDEuMTI2LS44MTEgMi4xNzMtMS4wNTMgMy4xNjctMi4xMDgtLjAwNi00LjE1OS0uOTA3LTUuNzE4LTIuNTM0em0uMzI0IDExLjUxNmE1IDUgMCAwIDEtMS40OTQtLjY0MmMuMjcxLS4xMjguNzU0LS4zMDEgMS41OTEtLjQ3NCA0LjA1Mi0uODM0IDQuNjc4LTEuNDIzIDYuMDQ1LTMuMTU4LjMxMy0uMzk4LjY2OS0uODQ5IDEuMTYtMS4zOTguNzMzLS44MjEgMS4wNjgtLjY4MiAxLjY3Ni0uNDMuNDkzLjIwNC45NzIuODIxIDEuMTY3IDEuNTAxLjA5Mi4zMjEuMTk1LjkzLS4xNDMgMS40MDQtMi44NTUgMy45OTctNy4wMTUgMy45NDYtMTAuMDAzIDMuMTk4em0yMS4yMDcgMTkuNzM1Yy00Ljk1NyAxLjA2Mi02LjcxMy0xLjQ2Ny03Ljg2OS00LjM1OS0uNzQ3LTEuODY3LTEuMTEzLTEwLjI4NS0uODUzLTE5LjU4MmExLjEgMS4xIDAgMCAwLS4wNDgtLjM1NiA1IDUgMCAwIDAtLjEzOS0uNjU3Yy0uMzg3LTEuMzUzLTEuMzMxLTIuNDg0LTIuNDYyLTIuOTUzLS40NS0uMTg2LTEuMjc1LS41MjgtMi4yNjctLjI3NC4yMTItLjg3MS41NzgtMS44NTUuOTc2LTIuOTIxbC4xNjctLjQ0OGMuMTg4LS41MDUuNDIzLTEuMDI5LjY3My0xLjU4MyAxLjM0Ny0yLjk5MiAzLjE5Mi03LjA5MSAxLjE5LTE2LjM1LS43NS0zLjQ2OC0zLjI1NC01LjE2MS03LjA1LTQuNzY4LTIuMjc2LjIzNS00LjM1OCAxLjE1NC01LjM5NiAxLjY4cS0uMzM0LjE2OS0uNjE4LjMyOWMuMjktMy40OTQgMS4zODUtMTAuMDI0IDUuNDgxLTE0LjE1NiAyLjU3OS0yLjYwMSA2LjAxNC0zLjg4NiAxMC4xOTktMy44MTcgOC4yNDYuMTM1IDEzLjUzNCA0LjM2NyAxNi41MTggNy44OTMgMi41NzEgMy4wMzkgMy45NjQgNi4xIDQuNTIgNy43NTEtNC4xNzktLjQyNS03LjAyMi40LTguNDYzIDIuNDYtMy4xMzUgNC40ODEgMS43MTUgMTMuMTc4IDQuMDQ2IDE3LjM1OC40MjcuNzY2Ljc5NiAxLjQyOC45MTIgMS43MDkuNzU5IDEuODM5IDEuNzQyIDMuMDY3IDIuNDU5IDMuOTY0LjIyLjI3NS40MzMuNTQxLjU5Ni43NzQtMS4yNjYuMzY1LTMuNTM5IDEuMjA4LTMuMzMyIDUuNDIyLS4xNjcgMi4xMTUtMS4zNTYgMTIuMDE2LTEuOTU5IDE1LjUxNC0uNzk3IDQuNjIxLTIuNDk3IDYuMzQzLTcuMjc5IDcuMzY4em0yMC42OTMtMjMuNjhjLTEuMjk0LjYwMS0zLjQ2IDEuMDUyLTUuNTE4IDEuMTQ4LTIuMjczLjEwNy0zLjQzLS4yNTUtMy43MDItLjQ3Ny0uMTI4LTIuNjI2Ljg1LTIuOTAxIDEuODg0LTMuMTkxLjE2My0uMDQ2LjMyMS0uMDkuNDc0LS4xNDRhNCA0IDAgMCAwIC4zMTMuMjNjMS44MjcgMS4yMDYgNS4wODUgMS4zMzYgOS42ODUuMzg2bC4wNS0uMDFjLS42Mi41OC0xLjY4MiAxLjM1OS0zLjE4NyAyLjA1OHoiLz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Postgres",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 3,
+          "name": "Data & Storage"
+        },
+        {
+          "id": 5,
+          "name": "Development"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "icon": "fa:pen",
+      "name": "n8n-nodes-base.set",
+      "codex": {
+        "data": {
+          "alias": [
+            "Set",
+            "JS",
+            "JSON",
+            "Filter",
+            "Transform",
+            "Map"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-pulling-and-visualizing-data-with-n8n/",
+                "icon": "📈",
+                "label": "Automatically pulling and visualizing data with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/database-monitoring-and-alerting-with-n8n/",
+                "icon": "📡",
+                "label": "Database Monitoring and Alerting with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automatically-adding-expense-receipts-to-google-sheets-with-telegram-mindee-twilio-and-n8n/",
+                "icon": "🧾",
+                "label": "Automatically Adding Expense Receipts to Google Sheets with Telegram, Mindee, Twilio, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/building-an-expense-tracking-app-in-10-minutes/",
+                "icon": "📱",
+                "label": "Building an expense tracking app in 10 minutes"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-membership-development-manager-automates-his-work-and-investments/",
+                "icon": "📈",
+                "label": "How a Membership Development Manager automates his work and investments"
+              },
+              {
+                "url": "https://n8n.io/blog/a-low-code-bitcoin-ticker-built-with-questdb-and-n8n-io/",
+                "icon": "📈",
+                "label": "A low-code bitcoin ticker built with QuestDB and n8n.io"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.set/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Edit Fields"
+      },
+      "iconData": {
+        "icon": "pen",
+        "type": "icon"
+      },
+      "displayName": "Edit Fields (Set)",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "icon": "file:slack.svg",
+      "name": "n8n-nodes-base.slack",
+      "codex": {
+        "data": {
+          "alias": [
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/build-your-own-virtual-assistant-with-n8n-a-step-by-step-guide/",
+                "icon": "👦",
+                "label": "Build your own virtual assistant with n8n: A step by step guide"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/automations-for-activists/",
+                "icon": "✨",
+                "label": "How Common Knowledge use workflow automation for activism"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.slack/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/slack/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"output\"]",
+      "defaults": {
+        "name": "Slack"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBmaWxsPSIjZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB2aWV3Qm94PSIwIDAgMTUwLjg1MiAxNTAuODUyIj48dXNlIHhsaW5rOmhyZWY9IiNhIiB4PSIuOTI2IiB5PSIuOTI2Ii8+PHN5bWJvbCBpZD0iYSIgb3ZlcmZsb3c9InZpc2libGUiPjxnIHN0cm9rZS13aWR0aD0iMS44NTIiPjxwYXRoIGZpbGw9IiNlMDFlNWEiIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTQwLjc0MSA5My41NWMwLTguNzM1IDYuNjA3LTE1Ljc3MiAxNC44MTUtMTUuNzcyczE0LjgxNSA3LjAzNyAxNC44MTUgMTUuNzcydjM4LjgyNGMwIDguNzM3LTYuNjA3IDE1Ljc3NC0xNC44MTUgMTUuNzc0cy0xNC44MTUtNy4wMzctMTQuODE1LTE1Ljc3MnoiLz48cGF0aCBmaWxsPSIjZWNiMjJkIiBzdHJva2U9IiNlY2IyMmQiIGQ9Ik05My41NSAxMDcuNDA4Yy04LjczNSAwLTE1Ljc3Mi02LjYwNy0xNS43NzItMTQuODE1czcuMDM3LTE0LjgxNSAxNS43NzItMTQuODE1aDM4LjgyNmM4LjczNSAwIDE1Ljc3MiA2LjYwNyAxNS43NzIgMTQuODE1cy03LjAzNyAxNC44MTUtMTUuNzcyIDE0LjgxNXoiLz48cGF0aCBmaWxsPSIjMmZiNjdjIiBzdHJva2U9IiMyZmI2N2MiIGQ9Ik03Ny43NzggMTUuNzcyQzc3Ljc3OCA3LjAzNyA4NC4zODUgMCA5Mi41OTMgMHMxNC44MTUgNy4wMzcgMTQuODE1IDE1Ljc3MnYzOC44MjZjMCA4LjczNS02LjYwNyAxNS43NzItMTQuODE1IDE1Ljc3MnMtMTQuODE1LTcuMDM3LTE0LjgxNS0xNS43NzJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMSIgc3Ryb2tlPSIjMzZjNWYxIiBkPSJNMTUuNzcyIDcwLjM3MUM3LjAzNyA3MC4zNzEgMCA2My43NjMgMCA1NS41NTZzNy4wMzctMTQuODE1IDE1Ljc3Mi0xNC44MTVoMzguODI2YzguNzM1IDAgMTUuNzcyIDYuNjA3IDE1Ljc3MiAxNC44MTVzLTcuMDM3IDE0LjgxNS0xNS43NzIgMTQuODE1eiIvPjxnIHN0cm9rZS1saW5lam9pbj0ibWl0ZXIiPjxwYXRoIGZpbGw9IiNlY2IyMmQiIHN0cm9rZT0iI2VjYjIyZCIgZD0iTTc3Ljc3OCAxMzMuMzMzYzAgOC4yMDggNi42MDcgMTQuODE1IDE0LjgxNSAxNC44MTVzMTQuODE1LTYuNjA3IDE0LjgxNS0xNC44MTUtNi42MDctMTQuODE1LTE0LjgxNS0xNC44MTVINzcuNzc4eiIvPjxwYXRoIGZpbGw9IiMyZmI2N2MiIHN0cm9rZT0iIzJmYjY3YyIgZD0iTTEzMy4zMzQgNzAuMzcxaC0xNC44MTVWNTUuNTU2YzAtOC4yMDcgNi42MDctMTQuODE1IDE0LjgxNS0xNC44MTVzMTQuODE1IDYuNjA3IDE0LjgxNSAxNC44MTUtNi42MDcgMTQuODE1LTE0LjgxNSAxNC44MTV6Ii8+PHBhdGggZmlsbD0iI2UwMWU1YSIgc3Ryb2tlPSIjZTAxZTVhIiBkPSJNMTQuODE1IDc3Ljc3OEgyOS42M3YxNC44MTVjMCA4LjIwNy02LjYwNyAxNC44MTUtMTQuODE1IDE0LjgxNVMwIDEwMC44IDAgOTIuNTkzczYuNjA3LTE0LjgxNSAxNC44MTUtMTQuODE1eiIvPjxwYXRoIGZpbGw9IiMzNmM1ZjEiIHN0cm9rZT0iIzM2YzVmMSIgZD0iTTcwLjM3MSAxNC44MTVWMjkuNjNINTUuNTU2Yy04LjIwNyAwLTE0LjgxNS02LjYwNy0xNC44MTUtMTQuODE1UzQ3LjM0OCAwIDU1LjU1NiAwczE0LjgxNSA2LjYwNyAxNC44MTUgMTQuODE1eiIvPjwvZz48L2c+PC9zeW1ib2w+PC9zdmc+"
+      },
+      "displayName": "Slack",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1119,
+      "icon": "fa:robot",
+      "name": "@n8n/n8n-nodes-langchain.agent",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "Chat",
+            "Conversational",
+            "Plan and Execute",
+            "ReAct",
+            "Tools"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.agent/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "AI Agent",
+        "color": "#404040"
+      },
+      "iconData": {
+        "icon": "robot",
+        "type": "icon"
+      },
+      "displayName": "AI Agent",
+      "typeVersion": 3,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1123,
+      "icon": "fa:link",
+      "name": "@n8n/n8n-nodes-langchain.chainLlm",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.chainllm/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Chains",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Basic LLM Chain",
+        "color": "#909298"
+      },
+      "iconData": {
+        "icon": "link",
+        "type": "icon"
+      },
+      "displayName": "Basic LLM Chain",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1145,
+      "icon": "file:anthropic.svg",
+      "name": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "codex": {
+        "data": {
+          "alias": [
+            "claude",
+            "sonnet",
+            "opus"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/cluster-nodes/sub-nodes/n8n-nodes-langchain.lmchatanthropic/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Language Models",
+              "Root Nodes"
+            ],
+            "Language Models": [
+              "Chat Models (Recommended)"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Anthropic Chat Model"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NiIgaGVpZ2h0PSIzMiIgZmlsbD0ibm9uZSI+PHBhdGggZmlsbD0iIzdEN0Q4NyIgZD0iTTMyLjczIDBoLTYuOTQ1TDM4LjQ1IDMyaDYuOTQ1ek0xMi42NjUgMCAwIDMyaDcuMDgybDIuNTktNi43MmgxMy4yNWwyLjU5IDYuNzJoNy4wODJMMTkuOTI5IDB6bS0uNzAyIDE5LjMzNyA0LjMzNC0xMS4yNDYgNC4zMzQgMTEuMjQ2eiIvPjwvc3ZnPg=="
+      },
+      "displayName": "Anthropic Chat Model",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 32,
+      "name": "Market Research"
+    },
+    {
+      "id": 49,
+      "name": "AI Summarization"
+    }
+  ],
+  "image": []
+}

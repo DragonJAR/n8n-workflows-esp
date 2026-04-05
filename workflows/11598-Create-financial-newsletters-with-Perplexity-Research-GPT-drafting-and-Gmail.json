@@ -1,0 +1,1565 @@
+{
+  "id": 9314,
+  "name": "Create financial newsletters with Perplexity Research, GPT drafting, and Gmail approval flow",
+  "views": 628,
+  "recentViews": 0,
+  "totalViews": 628,
+  "createdAt": "2025-10-06T14:32:31.637Z",
+  "description": "## Automated Weekly Newsletter with AI Research, Editorial Drafting, and Approval Flow\n\nThis n8n template demonstrates how to automate the full production cycle of a professional weekly newsletter. It combines AI-powered market research, editorial drafting, compliance validation, and an approval loop — all before creating a final Gmail draft ready for distribution.\n\nUse cases are many:\n- Wealth managers sending weekly market updates to clients\n- Startups producing recurring research digests\n- Teams creating automated newsletters for marketing or content distribution\n\n### Good to know\n\n- At time of writing, each AI call (research, editorial, QC) consumes API tokens from Perplexity and OpenAI. See provider pricing for updated info.\n- Gmail integration requires OAuth setup with your account.\n- You can adapt the prompts to any domain — from finance to tech to education.\n\n## How it works\n\n- Schedule Trigger runs every week and sets the date window.\n- Research LLM fetches structured JSON market data using Perplexity.\n- Editorial LLM transforms research into a polished ~2,000 word client-ready newsletter.\n- QC LLM validates factual accuracy and compliance risks before approval.\n- Preview Email is sent with Approve/Revise buttons. Clicking opens a secure n8n-hosted approval form.\n- Final Draft Creation: Once approved, the workflow generates a clean Gmail draft, ready to send.\n\n## How to use\n\n- Replace the demo schedule trigger with your own (weekly, daily, or event-based).\n- Set up Gmail OAuth credentials to enable email previews and final drafts.\n- Update branding (logo, disclaimer, signature) in the HTML builder node.\n- Adjust prompts to your audience — e.g., simplify tone for marketing, or keep institutional tone for financial clients.\n\n## Requirements\n\n- Perplexity account for research API (or your LLM of choice)\n- OpenAI for editorial and QC steps (or your LLM of choice)\n- Gmail account with OAuth credentials\n- Optional: your own domain to host the approval webhook\n\n## Customising this workflow\n\nThis workflow can be extended beyond financial newsletters. Try:\n- Content marketing: Automate weekly digests or trend reports\n- Education: Generate curriculum summaries with approval loops for teachers\n- Internal comms: Automate compliance-checked company updates",
+  "workflow": {
+    "id": "CXEn5huDEZYc5rqN",
+    "meta": {
+      "instanceId": "f871d098230d5cbf820107875eaeb381e97ddb55492657147c0480a43f50a8a1",
+      "templateCredsSetupCompleted": true
+    },
+    "name": "Newsletter Automation Template",
+    "tags": [
+      {
+        "id": "1FTFi62SDSN4r6je",
+        "name": "Tempura",
+        "createdAt": "2025-09-24T21:22:24.626Z",
+        "updatedAt": "2025-09-24T21:22:24.626Z"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "f591eedc-802c-4031-9829-6b7534c8be6e",
+        "name": "Schedule Trigger",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "position": [
+          -3264,
+          -352
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "weeks",
+                "triggerAtHour": 8
+              }
+            ]
+          }
+        },
+        "typeVersion": 1.2
+      },
+      {
+        "id": "c69d3c32-dad8-494f-9121-d8b553644c7a",
+        "name": "Parse Perplexity JSON",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2592,
+          -352
+        ],
+        "parameters": {
+          "jsCode": "// Expect shape: { choices: [ { message: { content: \"<json string>\" } } ] }\nlet content =\n  $json.choices?.[0]?.message?.content ??\n  $json.choices?.[0]?.delta?.content ??\n  null;\n\nif (typeof content !== 'string') {\n  throw new Error('Perplexity: missing choices[0].message.content (string).');\n}\n\n// ---------- Robust Parser with Repair ----------\nfunction parsePerplexityJSON(s) {\n  let t = String(s).trim();\n\n  // 1. Remove code fences like ```json ... ```\n  t = t.replace(/```[a-z]*\\n?/gi, '').replace(/```/g, '').trim();\n\n  // 2. Remove leading \"+<number>,\" if present\n  t = t.replace(/^\\+\\d+,\\s*/, '');\n\n  // 3. Strip any \"Preview:\" debug sections\n  t = t.replace(/Preview[^{}\"]*({.*)$/s, '$1');\n\n  // 4. Trim to first { ... last }\n  const firstBrace = t.indexOf('{');\n  const lastBrace = t.lastIndexOf('}');\n  if (firstBrace >= 0 && lastBrace > firstBrace) {\n    t = t.slice(firstBrace, lastBrace + 1);\n  }\n\n  // 5. Remove dangling commas\n  t = t.replace(/,\\s*([}\\]])/g, '$1');\n\n  // Try parsing\n  try {\n    return JSON.parse(t);\n  } catch (e) {\n    // Attempt repair: close any unterminated string\n    let repaired = t.replace(/\"[^\"]*$/s, '\"\"}');\n    try {\n      return JSON.parse(repaired);\n    } catch {\n      throw new Error(\"Unable to parse cleaned JSON. First 300 chars:\\n\" + t.slice(0, 300));\n    }\n  }\n}\n\n// ---------- Main ----------\nlet research;\ntry {\n  research = parsePerplexityJSON(content);\n} catch (err) {\n  return [{\n    json: {\n      error: \"Perplexity content is not valid JSON\",\n      details: err.message,\n      raw_preview: content.slice(0, 600)\n    }\n  }];\n}\n\n// -------- Normalization / Back-compat --------\nconst ensureArray = (v) => (Array.isArray(v) ? v : []);\nconst ensureObj   = (v) => (v && typeof v === 'object' ? v : {});\n\nresearch.indices      = ensureArray(research.indices);\nresearch.rates        = ensureArray(research.rates);\nresearch.fx           = ensureArray(research.fx);\nresearch.commodities  = ensureArray(research.commodities);\nresearch.crypto       = ensureArray(research.crypto);\nresearch.earnings     = ensureArray(research.earnings);\nresearch.geopolitics  = ensureArray(research.geopolitics);\nresearch.week_ahead   = ensureArray(research.week_ahead);\n\nif (!research.sectors) research.sectors = { top3: [], bottom3: [] };\nresearch.sectors.top3    = ensureArray(research.sectors.top3);\nresearch.sectors.bottom3 = ensureArray(research.sectors.bottom3);\n\nif (!research.macro_policy) {\n  research.macro_policy = { us: [], eu: [], uk: [], jp: [], cn: [] };\n} else {\n  research.macro_policy.us = ensureArray(research.macro_policy.us);\n  research.macro_policy.eu = ensureArray(research.macro_policy.eu);\n  research.macro_policy.uk = ensureArray(research.macro_policy.uk);\n  research.macro_policy.jp = ensureArray(research.macro_policy.jp);\n  research.macro_policy.cn = ensureArray(research.macro_policy.cn);\n}\n\nconst dba = ensureObj(research.drivers_by_asset);\nif (!research.asset_highlights) {\n  research.asset_highlights = {\n    equities:     ensureArray(dba.equities),\n    fixed_income: ensureArray(dba.fixed_income),\n    fx:           ensureArray(dba.fx),\n    commodities:  ensureArray(dba.commodities),\n    crypto:       ensureArray(dba.crypto),\n  };\n} else {\n  research.asset_highlights.equities     = ensureArray(research.asset_highlights.equities);\n  research.asset_highlights.fixed_income = ensureArray(research.asset_highlights.fixed_income);\n  research.asset_highlights.fx           = ensureArray(research.asset_highlights.fx);\n  research.asset_highlights.commodities  = ensureArray(research.asset_highlights.commodities);\n  research.asset_highlights.crypto       = ensureArray(research.asset_highlights.crypto);\n}\n\nif (research.note != null && typeof research.note !== 'string') {\n  research.note = String(research.note);\n}\n\n// Done\nreturn [{ json: research }];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "7b72fd1e-a9fd-4c99-9903-0eadcb83e810",
+        "name": "Week ranges + run_key",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -3040,
+          -352
+        ],
+        "parameters": {
+          "jsCode": "const now = new Date();               // 08:00 Friday\nconst day = now.getDay();             // 5 on Fri\nconst lastSun = new Date(now); lastSun.setDate(now.getDate() - day); lastSun.setHours(23,59,59,999);\nconst lastMon = new Date(lastSun); lastMon.setDate(lastSun.getDate() - 6); lastMon.setHours(0,0,0,0);\nconst nextMon = new Date(lastSun); nextMon.setDate(lastSun.getDate()+1); nextMon.setHours(0,0,0,0);\nconst nextSun = new Date(nextMon); nextSun.setDate(nextMon.getDate()+6); nextSun.setHours(23,59,59,999);\n\n// simple idempotency key\nconst h = require('crypto').createHash('sha256');\nh.update(`${lastMon.toISOString()}_${lastSun.toISOString()}`);\nconst run_key = h.digest('hex').slice(0,12);\n\nreturn [{ json: {\n  week_label: `Week of ${lastMon.toISOString().slice(0,10)}`,\n  start_iso: lastMon.toISOString(),\n  end_iso: lastSun.toISOString(),\n  next_start_iso: nextMon.toISOString(),\n  next_end_iso: nextSun.toISOString(),\n  run_key\n}}];\n"
+        },
+        "typeVersion": 2
+      },
+      {
+        "id": "71f824b6-10c6-44cc-9eb9-ee0e60e59cc3",
+        "name": "Assemble Preview (Code)",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -1328,
+          -256
+        ],
+        "parameters": {
+          "jsCode": "// ---------- tiny helpers ----------\nfunction get(node, path) {\n  try {\n    const o = $node[node].json;\n    return path ? path.split('.').reduce((a, k) => a?.[k], o) : o;\n  } catch { return undefined; }\n}\n\nfunction readFromHB(hb, key) {\n  if (!hb) return undefined;\n  if (typeof hb === 'string') {\n    try { const p = JSON.parse(hb); return p?.[key]; } catch { return undefined; }\n  }\n  if (hb[key]) return hb[key];\n  const m = hb.message;\n  if (m && typeof m === 'object') {\n    if (m[key]) return m[key];\n    const c = m.content ?? m.text ?? '';\n    if (typeof c === 'string') { try { const p = JSON.parse(c); return p?.[key]; } catch {} }\n    else if (c && typeof c === 'object') { return c[key]; }\n  }\n  return undefined;\n}\n\nfunction parseLLMJson(nodeName) {\n  const n = get(nodeName);\n  if (!n) return;\n  if (typeof n === 'string') { try { return JSON.parse(n); } catch {} }\n  if (n.message) {\n    const c = n.message.content ?? n.message.text ?? n.message;\n    if (typeof c === 'string') { try { return JSON.parse(c); } catch {} }\n    if (typeof c === 'object') return c;\n  }\n  if (n.json && typeof n.json === 'object') return n.json;\n  if (typeof n === 'object') return n;\n}\n\n// ---------- prefer new builder → fallbacks ----------\nconst hb = get(\"HTML Builder LLM\") || get(\"HTML Builder\") || {};\nconst html =\n  readFromHB(hb, \"html\") ??\n  get(\"Build Draft HTML\", \"html\") ??\n  $json.html;\n\nconst weekLabel =\n  get(\"Week ranges + run_key\", \"week_label\") ||\n  $json.week_label || \"\";\n\nconst subject =\n  (readFromHB(hb, \"subject\") ??\n   get(\"Build Draft HTML\", \"subject\") ??\n   (weekLabel ? `Weekly Markets — ${weekLabel}` : \"Weekly Markets\"))\n  .toString()\n  .trim();\n\nif (!html) throw new Error(\"No HTML from builders or payload. Run prior nodes.\");\n\n// ---------- QC → lightweight warnings ----------\nconst qc = get(\"QC LLM\") || {};\nconst warnings = [];\nif (Array.isArray(qc.facts) && qc.facts.length) warnings.push(`Fact issues: ${qc.facts.length}`);\nif (Array.isArray(qc.compliance) && qc.compliance.length) warnings.push(`Compliance flags: ${qc.compliance.length}`);\nif (qc.material_issue) warnings.push(\"Material issues present\");\n\n// ---------- enrich for stateless approve/revise ----------\nconst editor_json =\n  $json.editor_json ?? parseLLMJson(\"Editor LLM\");\n\nconst research =\n  $json.research ??\n  get(\"Parse Perplexity JSON\") ??\n  get(\"Research JSON\");\n\nconst wk = get(\"Week ranges + run_key\") || {};\nconst week_meta = {\n  week_label: wk.week_label ?? $json.week_label,\n  start_iso:  wk.start_iso  ?? $json.start_iso,\n  end_iso:    wk.end_iso    ?? $json.end_iso,\n  run_key:    wk.run_key    ?? $json.run_key,\n};\n\n// Everything the webhook needs in one canon payload\nconst fullContext = {\n  ...$json,            // keep upstream vars (safe – last-write wins downstream)\n  subject,\n  html,\n  warnings,\n  editor_json,\n  research,\n  week_meta,\n};\n\n// Single, URL-safe encoding for emails/links\nconst encoded_context = Buffer.from(JSON.stringify(fullContext)).toString(\"base64url\");\n\n// Output for downstream (email + storage)\nreturn [{\n  json: { subject, html, warnings, encoded_context }\n}];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "03ba2874-5b36-4295-87d6-44b4d2d2bb04",
+        "name": "Send Preview",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          -1184,
+          -256
+        ],
+        "webhookId": "744592c3-6a23-44c7-96de-34141f46dc82",
+        "parameters": {
+          "sendTo": "[Your Email address]",
+          "message": "={{ (() => {\n  const html = (($json.html || '') + '').trim() || '<p>No preview HTML.</p>';\n\n  // use context you already pass around – never read other nodes\n  const run = encodeURIComponent($json.week_meta?.run_key || $json.run_key || '');\n  const ctx = encodeURIComponent($json.encoded_context || $json.context || '');\n\n  const base = 'https://[YOURDOMAIN].app.n8n.cloud/webhook/newsletter-approval';\n  const approveUrl = `${base}?run=${run}&action=approve#ctx=${ctx}`;\n  const reviseUrl  = `${base}?run=${run}&action=revise#ctx=${ctx}`;\n\n  const btn = (href, label) =>\n    `<a href=\"${href}\" target=\"_blank\" style=\"display:inline-block;padding:10px 16px;border-radius:6px;background:#111827;color:#fff;text-decoration:none;font-weight:600\">${label}</a>`;\n\n  return `<div style=\"max-width:720px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden\">\n    <div style=\"padding:24px\">${html}</div>\n    <div style=\"padding:16px 24px;border-top:1px solid #e5e7eb;display:flex;gap:12px;align-items:center\">\n      ${btn(approveUrl,'Approve')} ${btn(reviseUrl,'Request revisions')}\n    </div>\n  </div>`;\n})() }}\n",
+          "options": {},
+          "subject": "={{ (() => {\n  let s = ($json.subject || 'Weekly Markets').toString().trim();\n  s = s.replace(/\\[(?:Preview|Test|Approve[^\\]]*)\\]\\s*/gi, '').trim();\n  return `[Preview] ${s}`;\n})() }}\n"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1
+      },
+      {
+        "id": "a84993af-1bc4-40dc-b59d-9621edbdac39",
+        "name": "Respond to Webhook",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          -1680,
+          304
+        ],
+        "parameters": {
+          "options": {
+            "responseCode": 200,
+            "responseHeaders": {
+              "entries": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/plain; charset=utf-8"
+                }
+              ]
+            }
+          },
+          "respondWith": "text",
+          "responseBody": "=={{\n(() => {\n  const qp = new URLSearchParams($json.query?.__rawQuery || $json.query || '');\n  const run    = qp.get('run')    || '';\n  const action = qp.get('action') || 'revise';\n  const postUrl = 'https://[YOURDOMAIN].app.n8n.cloud/webhook/newsletter-approval-submit';\n\n  return `<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\"/>\n  <title>Newsletter Approval</title>\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>\n  <style>\n    body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:24px;background:#f6f7f9}\n    .card{max-width:720px;margin:0 auto;border:1px solid #e5e5e5;border-radius:8px;padding:20px;background:#fff}\n    .muted{color:#6b7280}\n    .btn{display:inline-block;padding:10px 16px;border:0;border-radius:6px;color:#fff;font-weight:600;text-decoration:none;cursor:pointer}\n    .btn-approve{background:#16a34a}\n    .btn-revise{background:#111}\n    textarea{width:100%;box-sizing:border-box}\n  </style>\n</head>\n<body>\n  <div class=\"card\">\n    <h2 style=\"margin:0 0 8px\">Weekly Newsletter — Approval</h2>\n    <p class=\"muted\" style=\"margin:0 0 16px\">Run: ${run || 'n/a'}</p>\n\n    <form id=\"f\" method=\"POST\" action=\"${postUrl}\">\n      <input type=\"hidden\" name=\"run\" value=\"${run}\"/>\n      <input type=\"hidden\" id=\"ctx\" name=\"context\" value=\"\"/>\n      <input type=\"hidden\" id=\"act\" name=\"action\" value=\"${action}\"/>\n\n      <div id=\"reviseBox\" style=\"margin:16px 0;display:${action==='revise'?'block':'none'}\">\n        <label for=\"notes\"><strong>Revision notes</strong></label>\n        <textarea id=\"notes\" name=\"notes\" rows=\"7\" placeholder=\"Be specific about what to change...\"></textarea>\n        <div style=\"margin-top:12px\">\n          <button class=\"btn btn-revise\" type=\"submit\">Send revision</button>\n        </div>\n      </div>\n\n      <div id=\"approveBox\" style=\"display:${action==='approve'?'block':'none'}\">\n        <p>Approving will create the final Gmail draft.</p>\n        <button class=\"btn btn-approve\" type=\"submit\">Approve</button>\n      </div>\n    </form>\n\n    <p class=\"muted\" style=\"margin-top:16px\">Tip: the large context is carried in the URL hash, not in the query.</p>\n  </div>\n\n  <script>\n    (function(){\n      // pull context from #ctx=... (preferred), fall back to ?context=\n      var h = location.hash || \"\";\n      var ctx = \"\";\n      if (h.indexOf(\"#ctx=\") === 0) {\n        try { ctx = decodeURIComponent(h.slice(5)); } catch(e) { ctx = h.slice(5); }\n      } else {\n        var q = new URLSearchParams(location.search);\n        ctx = q.get(\"context\") || \"\";\n      }\n      var el = document.getElementById(\"ctx\"); if (el) el.value = ctx;\n\n      // auto-submit if action=approve\n      if (\"${action}\" === \"approve\") {\n        try { document.getElementById(\"f\").submit(); } catch(e) {}\n      }\n    })();\n  </script>\n</body>\n</html>`;\n})()\n}}\n"
+        },
+        "typeVersion": 1.4,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "b1d7e9ac-aac7-4991-95a2-969eed35e16f",
+        "name": "Enrich for Editorial",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2368,
+          -352
+        ],
+        "parameters": {
+          "jsCode": "const src = $json; // output of Parse Perplexity JSON\nconst week = $node[\"Week ranges + run_key\"].json.week_label;\nconst runKey = $node[\"Week ranges + run_key\"].json.run_key || String(Date.now());\n\nreturn [{\n  json: {\n    ...src,\n\n    // Values the Editorial LLM should see & use in the HTML it generates:\n    week_label: week,\n    firm_name: \"Company Name\",\n    contact_url: \"contact url\",\n    view_url: `https://website/${runKey}`,\n    year: new Date().getFullYear()\n  }\n}];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "578406b0-c63f-4189-916a-4c25c04ab62e",
+        "name": "Research LLM",
+        "type": "n8n-nodes-base.perplexity",
+        "position": [
+          -2816,
+          -352
+        ],
+        "parameters": {
+          "options": {
+            "topP": 1,
+            "maxTokens": 4000,
+            "temperature": 0.2
+          },
+          "messages": {
+            "message": [
+              {
+                "role": "system",
+                "content": "=You are a buy-side markets researcher for high-net-worth clients. Your job is to collect and synthesize weekly market facts (prices, % moves, yields, credible headlines) and return ONE STRICT JSON object only.\n\nHARD RULES\n- Output ONE valid JSON object. No prose, no markdown, no code fences.\n- Use the provided ISO window as the only reference period (official closes only; no intraday).\n- Prefer primary sources and tier-1 outlets only: index providers (S&P, Nasdaq, FTSE, STOXX, MSCI), exchanges, central banks, Treasury/FRED/ONS/Eurostat, IMF/World Bank, and Reuters/FT/WSJ/Bloomberg.\n- Exclude minor markets and assets unless they have moved enough to affect a typical multi-asset institutional portfolio or shifted global risk sentiment.\n- Every numeric row should include ≥1 source; important rows should include ≥2.\n- Be neutral; do not speculate or predict.\n- If something can't be corroborated, omit it (do not invent placeholders).\n\nCOVERAGE SCOPE (weekly closes; w/w = this week close vs last week close; YTD vs prior year end)\n\nINDICES (≥15 mixed regions with sector breakdown):\n- US: S&P 500, Nasdaq Composite, Dow Jones, Russell 2000, Russell 1000 Growth, Russell 1000 Value\n- Europe: STOXX Europe 600, FTSE 100, DAX 30, CAC 40, FTSE MIB, IBEX 35\n- Asia-Pacific: Nikkei 225, Hang Seng, CSI 300, KOSPI, ASX 200, Nifty 50\n- Global: MSCI World, MSCI Emerging Markets, MSCI ACWI\n- Include weekly high/low ranges where available\n- Do not include regional indices, currencies, or commodities outside the defined list unless their weekly change impacted listed equity, rates, or credit indices.\n\nRATES & CREDIT (yields in %, bps w/w changes):\n- Sovereign: US 3m, 2y, 5y, 10y, 30y; DE 2y, 10y; UK 2y, 10y; JP 2y, 10y; AU 2y, 10y\n- Curves: US 2s10s, 5s30s in bps; term structure analysis\n- Credit: US IG spreads, US HY spreads, EUR IG spreads, EUR HY spreads (bps w/w)\n- Real rates: US 5y5y breakevens, 10y TIPS yields\n\nFX MAJORS (w/w % changes, volatility if available):\n- DXY, EURUSD, USDJPY, GBPUSD, USDCAD, AUDUSD, USDCHF, NZDUSD\n- EM FX: USDCNY, USDBRL, USDMXN, USDINR if relevant to weekly moves\n- Include EM FX and minor commodities only if their volatility or price shift impacts cross-asset flows or ranks as a leading driver cited by two or more tier-1 sources\n\nCOMMODITIES (w/w % changes, technical levels):\n- Energy: WTI Crude, Brent Crude, Natural Gas (US & EU), Gasoline\n- Metals: Gold, Silver, Copper, Platinum, Palladium\n- Agriculture: Wheat, Corn, Soybeans (if significant moves)\n- Include key support/resistance levels where relevant\n- Include EM FX and minor commodities only if their volatility or price shift impacts cross-asset flows or ranks as a leading driver cited by two or more tier-1 sources\n\nVOLATILITY & RISK METRICS:\n- Equity vol: VIX, VXN (Nasdaq vol), VSTOXX, VIX9D\n- Bond vol: MOVE index\n- FX vol: JPY, EUR implied vols if elevated\n- Risk-YOUR_OPENAI_KEY_HERE/off indicators: High-beta vs low-vol performance\n\nSECTOR PERFORMANCE (S&P GICS Level 1, w/w %):\n- All 11 sectors with specific callouts for top 3 winners/bottom 3 laggards\n- Notable sub-sector moves (banks, semis, REITs, utilities)\n- Style factors: Growth vs Value, Large vs Small cap performance\n\nMARKET BREADTH & TECHNICALS:\n- S&P 500: % above 50dma, 200dma; new highs/lows\n- NYSE: advance/decline ratio, up/down volume\n- Nasdaq: advance/decline, new highs/lows ratio\n- Key technical levels: S&P 500 support/resistance, major moving averages\n\nECONOMIC DATA & EVENTS (with market impact analysis):\n- Central Bank Actions: Fed, ECB, BoJ, BoE decisions or speeches with yield/FX impact\n- Inflation Data: CPI, PCE, Core readings with bond market reaction\n- Employment: NFP, unemployment, wage growth with sector implications\n- Growth Indicators: GDP, PMIs, retail sales with equity sector impact\n- Include actual vs consensus vs prior for key releases\n- Ignore sub-sector or single-stock headlines unless they have driven top-three sector moves in one of the named indices, or been widely cited by tier-1 outlets for shifting market direction.\n\nGEOPOLITICAL & POLICY DEVELOPMENTS:\n- Fed/ECB policy signals and market interpretation\n- Regulatory changes affecting sectors (banks, tech, energy)\n- Trade developments, sanctions, geopolitical tensions\n- Fiscal policy announcements with market-moving potential\n- Only retain topics where the news altered global indices, major sovereign curves, cross-asset correlations, or HNW portfolio risk metrics in that week.\n\nCORPORATE & STRUCTURAL THEMES:\n- Major earnings themes if in earnings season\n- M&A activity affecting sectors or indices\n- Credit events or downgrades affecting spreads\n- Notable IPO/secondary offerings if market-moving\n- avoid smaller markets that have little impact on the portfolio of the clients who will receive the newsletter\n- Only retain topics where the news altered global indices, major sovereign curves, cross-asset correlations, or HNW portfolio risk metrics in that week.\n\nWEEK-AHEAD CALENDAR (6-15 events):\n- Economic releases: exact date, time, consensus, why it matters to markets\n- Central bank events: speeches, minutes, decisions\n- Corporate events: major earnings, ex-dividend dates\n- Policy events: auctions, regulatory announcements\n- Each event must include market relevance and potential portfolio impact\n\nCLIENT PORTFOLIO CONTEXT:\nFor each major theme, include:\n- \"hnw_impact\": How this affects typical 60/40+ portfolios, alternative investments\n- \"positioning_implications\": General themes (duration, quality, diversification, not specific trades)\n- \"risk_level\": low/medium/high for client attention prioritization\n- \"time_horizon\": immediate/tactical (1-3 months)/strategic (6+ months)\n\nRETURN STRICT JSON WITH EXPANDED STRUCTURE:\n\n{\n  \"metadata\": {\n    \"week_label\": \"Week of [Date] - [Date]\",\n    \"window\": { \n      \"start_iso\": \"YYYY-MM-DDTHH:mm:ssZ\", \n      \"end_iso\": \"YYYY-MM-DDTHH:mm:ssZ\", \n      \"tz\": \"America/New_York\" \n    },\n    \"research_timestamp\": \"YYYY-MM-DDTHH:mm:ssZ\",\n    \"primary_themes\": [\"theme1\", \"theme2\", \"theme3\"]\n  },\n\n  \"equity_indices\": [\n    { \n      \"name\": \"S&P 500\", \n      \"close\": 0, \n      \"w_w_pct\": \"+0.0%\", \n      \"ytd_pct\": \"+0.0%\", \n      \"week_high\": 0,\n      \"week_low\": 0,\n      \"technical_note\": \"Above/below key MA\",\n      \"date\": \"YYYY-MM-DD\", \n      \"tz\": \"America/New_York\",\n      \"sources\": [ \n        { \"publisher\": \"S&P DJI\", \"url\": \"...\" }, \n        { \"publisher\": \"Reuters\", \"url\": \"...\" } \n      ] \n    }\n    // Include all 15+ indices with same structure\n  ],\n\n  \"rates_credit\": {\n    \"sovereigns\": [\n      { \n        \"name\": \"US 10y\", \n        \"yield_pct\": 0.00, \n        \"w_w_bps\": 0, \n        \"ytd_bps\": 0,\n        \"technical_level\": \"near resistance/support\",\n        \"date\": \"YYYY-MM-DD\", \n        \"sources\": [ { \"publisher\": \"U.S. Treasury/FRED\", \"url\": \"...\" } ] \n      }\n      // Include all major sovereigns\n    ],\n    \"curves\": [\n      { \"name\": \"US 2s10s\", \"spread_bps\": 0, \"w_w_bps\": 0, \"ytd_bps\": 0 },\n      { \"name\": \"US 5s30s\", \"spread_bps\": 0, \"w_w_bps\": 0, \"ytd_bps\": 0 }\n    ],\n    \"credit_spreads\": [\n      { \"name\": \"US IG\", \"spread_bps\": 0, \"w_w_bps\": 0, \"ytd_bps\": 0 },\n      { \"name\": \"US HY\", \"spread_bps\": 0, \"w_w_bps\": 0, \"ytd_bps\": 0 },\n      { \"name\": \"EUR IG\", \"spread_bps\": 0, \"w_w_bps\": 0, \"ytd_bps\": 0 },\n      { \"name\": \"EUR HY\", \"spread_bps\": 0, \"w_w_bps\": 0, \"ytd_bps\": 0 }\n    ],\n    \"real_rates\": [\n      { \"name\": \"US 5y5y Breakeven\", \"rate_pct\": 0.00, \"w_w_bps\": 0 },\n      { \"name\": \"US 10y TIPS\", \"yield_pct\": 0.00, \"w_w_bps\": 0 }\n    ]\n  },\n\n  \"fx_markets\": [\n    { \n      \"pair\": \"DXY\", \n      \"close\": 0.00, \n      \"w_w_pct\": \"+0.0%\", \n      \"ytd_pct\": \"+0.0%\",\n      \"volatility_note\": \"elevated/normal\",\n      \"technical_level\": \"key support/resistance\",\n      \"sources\": [ { \"publisher\": \"ICE/Reuters\", \"url\": \"...\" } ] \n    }\n    // Include all 8+ major pairs\n  ],\n\n  \"commodities\": [\n    { \n      \"name\": \"WTI Crude\", \n      \"close\": 0.00, \n      \"w_w_pct\": \"+0.0%\", \n      \"ytd_pct\": \"+0.0%\",\n      \"technical_level\": \"$XX support/resistance\",\n      \"fundamental_driver\": \"supply/demand factor\",\n      \"sources\": [ { \"publisher\": \"EIA/NYMEX\", \"url\": \"...\" } ] \n    }\n    // Include all major commodities\n  ],\n\n  \"volatility_risk\": {\n    \"equity_vol\": [\n      { \"name\": \"VIX\", \"close\": 0.00, \"w_w_pct\": \"+0.0%\", \"regime\": \"low/elevated/high\" },\n      { \"name\": \"VXN\", \"close\": 0.00, \"w_w_pct\": \"+0.0%\" }\n    ],\n    \"bond_vol\": [\n      { \"name\": \"MOVE\", \"close\": 0.00, \"w_w_pct\": \"+0.0%\" }\n    ],\n    \"risk_sentiment\": {\n      \"risk_on_off\": \"risk-YOUR_OPENAI_KEY_HERE/risk-YOUR_OPENAI_KEY_HERE/mixed\",\n      \"quality_spread\": \"IG vs HY spread change\",\n      \"defensive_sectors\": \"Utilities, Staples performance vs market\"\n    }\n  },\n\n  \"sector_performance\": [\n    { \n      \"sector\": \"Information Technology\", \n      \"w_w_pct\": \"+0.0%\", \n      \"ytd_pct\": \"+0.0%\",\n      \"key_drivers\": [\"earnings\", \"rates\", \"regulation\"],\n      \"notable_movers\": [\"NVDA weight impact\", \"if relevant\"],\n      \"sources\": [ { \"publisher\": \"S&P DJI\", \"url\": \"...\" } ] \n    }\n    // All 11 GICS sectors\n  ],\n\n  \"market_breadth\": {\n    \"sp500_breadth\": {\n      \"pct_above_50dma\": 0,\n      \"pct_above_200dma\": 0,\n      \"new_highs\": 0,\n      \"new_lows\": 0,\n      \"weekly_interpretation\": \"broad/narrow participation\"\n    },\n    \"nyse_data\": {\n      \"adv_dec_ratio\": 0.00,\n      \"up_vol_pct\": 0,\n      \"down_vol_pct\": 0\n    },\n    \"technical_levels\": {\n      \"sp500_support\": 0000,\n      \"sp500_resistance\": 0000,\n      \"key_moving_averages\": \"50dma, 200dma levels\"\n    }\n  },\n\n  \"economic_calendar_past\": [\n    { \n      \"date\": \"YYYY-MM-DD\", \n      \"time\": \"HH:mm\",\n      \"region\": \"US\", \n      \"indicator\": \"CPI YoY\", \n      \"actual\": \"0.0%\",\n      \"consensus\": \"0.0%\",\n      \"prior\": \"0.0%\",\n      \"market_impact\": \"bond yields rose/fell Xbps\",\n      \"portfolio_relevance\": \"supports Fed easing/tightening\",\n      \"sources\": [ { \"publisher\": \"BLS\", \"url\": \"...\" } ] \n    }\n    // 8-15 key releases from the past week\n  ],\n\n  \"macro_policy_themes\": [\n    {\n      \"theme\": \"Fed Policy Path\",\n      \"development\": \"Powell speech signals dovish pivot\",\n      \"market_reaction\": \"10y yields fell 15bps, financials underperformed\",\n      \"client_implication\": \"duration extension opportunity\",\n      \"time_horizon\": \"tactical\",\n      \"sources\": [ { \"publisher\": \"Federal Reserve\", \"url\": \"...\" } ]\n    }\n    // 3-6 major themes\n  ],\n\n  \"corporate_structural\": [\n    {\n      \"theme\": \"Tech Earnings Momentum\",\n      \"details\": \"Semiconductor strength drives Nasdaq outperformance\",\n      \"sector_impact\": \"IT +2.5% vs S&P +1.2%\",\n      \"portfolio_angle\": \"quality growth beneficiary\",\n      \"sources\": [ { \"publisher\": \"Bloomberg\", \"url\": \"...\" } ]\n    }\n    // 2-4 themes if relevant\n  ],\n\n  \"week_ahead_calendar\": [\n    { \n      \"date\": \"YYYY-MM-DD\", \n      \"time\": \"HH:mm\",\n      \"tz\": \"America/New_York\",\n      \"region\": \"US\", \n      \"event\": \"FOMC Minutes\", \n      \"consensus\": \"N/A or expected reading\",\n      \"why_matters\": \"Signals December rate cut probability\",\n      \"portfolio_impact\": \"Duration and financial sector positioning\",\n      \"importance\": \"high/medium/low\",\n      \"primary_source_url\": \"federalreserve.gov link if available\" \n    }\n    // 8-15 events, prioritized by market impact\n  ],\n\n  \"client_context\": {\n    \"week_summary\": {\n      \"primary_driver\": \"One sentence on main market driver\",\n      \"secondary_driver\": \"One sentence on secondary theme\", \n      \"hnw_portfolio_impact\": \"How typical 60/40+ allocation performed\",\n      \"risk_level\": \"low/medium/high\",\n      \"attention_priority\": \"routine/elevated/urgent\"\n    },\n    \"positioning_themes\": {\n      \"equity\": \"quality bias continues, growth leadership\",\n      \"fixed_income\": \"extend duration on dovish Fed\",\n      \"alternatives\": \"REITs benefit from rate cuts\",\n      \"fx_commodities\": \"dollar weakness supports commodities\"\n    },\n    \"risk_considerations\": [\n      \"Geopolitical tensions remain elevated\",\n      \"Credit spreads at tight levels\",\n      \"Volatility regime could shift quickly\"\n    ]\n  },\n\n  \"data_quality\": {\n    \"coverage_complete\": {\n      \"indices\": true,\n      \"rates\": true, \n      \"fx\": true,\n      \"commodities\": true,\n      \"volatility\": true,\n      \"sectors\": true,\n      \"breadth\": true,\n      \"economic_data\": true,\n      \"calendar\": true\n    },\n    \"source_tier_distribution\": {\n      \"tier_1_pct\": 85,\n      \"tier_2_pct\": 15,\n      \"total_sources\": 45\n    },\n    \"missing_data\": [],\n    \"research_confidence\": \"high/medium/low\",\n    \"core_ok\": true,\n    \"ok_to_send\": true\n  },\n\n  \"kpi_summary_strings\": [\n    \"S&P 500 4,622 (+1.2% w/w, +14.6% YTD)\",\n    \"Nasdaq Composite 16,000 (+2.5% w/w, +24.2% YTD)\",\n    \"US 10y 4.22% (+4bps w/w, +45bps YTD)\",\n    \"DXY 103.2 (-0.8% w/w, +2.1% YTD)\",\n    \"WTI $73.45 (+2.1% w/w, -8.2% YTD)\",\n    \"VIX 14.2 (-2.1pts w/w)\"\n  ]\n}\n\nIf any required datapoint is missing or cannot be corroborated from primary sources, add it to data_quality.missing_data and set the corresponding coverage boolean to false. Prioritize accuracy over completeness - omit rather than estimate."
+              },
+              {
+                "content": "=Generate the global market report for the week **{{ $json.week_label }}**, using only official closes between:\n- start: {{ $json.start_iso }}\n- end:   {{ $json.end_iso }}\nTimezone: Singapore.\n\nFill every numeric section you can corroborate. Omit anything you cannot validate with tier-1 sources. Compute w/w and YTD (vs prior year end). Return ONE JSON matching the schema in the system prompt.\n"
+              }
+            ]
+          },
+          "requestOptions": {}
+        },
+        "credentials": {
+          "perplexityApi": {
+            "id": "credential-id",
+            "name": "perplexityApi Credential"
+          }
+        },
+        "typeVersion": 1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "77a4ff73-cfc4-4e3e-a832-9be006d0fdeb",
+        "name": "QC LLM",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          -1616,
+          -256
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-3.5-turbo",
+            "cachedResultName": "GPT-3.5-TURBO"
+          },
+          "options": {
+            "maxTokens": 1000,
+            "temperature": 0
+          },
+          "messages": {
+            "values": [
+              {
+                "role": "system",
+                "content": "=You are “QC”—a deterministic, conservative validator for a weekly client newsletter at a $50B private wealth firm.\n\nScope:\n1) FACT-CHECK the draft’s claims against the supplied research JSON.\n2) COMPLIANCE SCAN for risky language (promissory, specific advice, guarantees, allocations).\n3) THEME Reject any draft where more than 5% of the content covers assets, events, or regions that are not part of an average institutional/RIA client's multi-asset portfolio.\n\nDecision rules:\n- Flag ONLY what you can point to explicitly in the draft.\n- Be conservative: better to flag than miss.\n- Never rewrite the newsletter—just report issues.\n\nOutput: A single JSON object **exactly** in this schema (no extra text):\n{\n  \"material_issue\": boolean,               // true if any high-severity fact or comp issue\n  \"facts\": [\n    {\n      \"severity\": \"low|medium|high\",\n      \"where\": \"section/heading or CSS selector or short quote\",\n      \"claim\": \"verbatim or tight paraphrase of the draft claim\",\n      \"reason\": \"why it’s wrong/unsupported/overstated\",\n      \"evidence\": \"numbers/dates from research JSON that contradict or fail to support\",\n      \"fix\": \"plain-language correction suggestion\"\n    }\n  ],\n  \"compliance\": [\n    {\n      \"severity\": \"low|medium|high\",\n      \"where\": \"section/heading or short quote\",\n      \"issue\": \"promissory language / specific advice / guarantee / allocation / performance claim / other\",\n      \"snippet\": \"verbatim risky wording\",\n      \"policy\": \"short label of the violated guardrail\",\n      \"fix\": \"safer phrasing or removal guidance\"\n    }\n  ],\n  \"notes\": [\n    \"optional short observations to help the editor (never prescriptive rewriting)\"\n  ]\n}\n\nSeverity guidance:\n- high  = could mislead on facts or breach core compliance.\n- medium= material nuance missing; could be misread by clients.\n- low   = wording tone or minor precision issue.\n"
+              },
+              {
+                "content": "=WEEK_CONTEXT:\n{{\n  JSON.stringify({\n    start_iso:  $json.week_meta?.start_iso  || $json.start_iso  || \"\",\n    end_iso:    $json.week_meta?.end_iso    || $json.end_iso    || \"\",\n    week_label: $json.week_meta?.week_label || $json.week_label || \"\"\n  })\n}}\n\nDRAFT_HTML:\n{{\n  (() => {\n    let html = ($json.html || \"\").toString();\n    // keep QC fast: drop scripts/styles and cap length\n    html = html.replace(/<script[\\s\\S]*?<\\/script>/gi, \"\")\n               .replace(/<style[\\s\\S]*?<\\/style>/gi, \"\");\n    return html.length > 30000 ? html.slice(0, 30000) : html;\n  })()\n}}\n\nRESEARCH_JSON:\n{{\n  (() => {\n    // If you already attach a compact research object in context, use it directly.\n    const r = $json.research || {};\n    // Optional: if r can be huge, pick only needed keys:\n    // const slim = { equities: r.equities, rates: r.rates, fx: r.fx, notes: r.notes };\n    const s = JSON.stringify(r);\n    return s.length > 30000 ? s.slice(0, 30000) : s;\n  })()\n}}\n\n\nINSTRUCTIONS:\n- Compare DRAFT_HTML against RESEARCH_JSON using WEEK_CONTEXT for dates.\n- If RESEARCH_JSON is empty, skip factual checks and only run compliance checks; set notes = \"facts_skipped_no_research\".\n- Match numeric values exactly (including %/bps). If rounding differs but clearly references the same RESEARCH number, mark \"medium\" and suggest rounding to one decimal (or bps for yields).\n- Flag any dates not equal to WEEK_CONTEXT (including YEAR).\n- Focus only on issues that matter for institutional communications.\n\nReturn ONLY the JSON object specified in the system message.\n"
+              }
+            ]
+          },
+          "simplify": false,
+          "jsonOutput": true
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "9a9426ae-4678-4e06-9126-bf090b1acffe",
+        "name": "HTML Builder LLM",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          -1888,
+          -256
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-3.5-turbo",
+            "cachedResultName": "GPT-3.5-TURBO"
+          },
+          "options": {
+            "maxTokens": 4000,
+            "temperature": 0.2
+          },
+          "messages": {
+            "values": [
+              {
+                "role": "system",
+                "content": "=You are “HTML Builder”. Input: the editor JSON above. Output: ONE JSON:\n{ \"subject\": string, \"html\": string }\n\nRENDERING RULES\"\n- Headline: render ONLY <h1>{{ $json.message.content.newsletter_content.headline }}</h1>.\n- Do NOT render newsletter_content.subheader anywhere in the HTML body.\n- (Subject logic unchanged.)\n- Subject: use newsletter_content.subject if present; otherwise \"Weekly Markets — \" + newsletter_content.subheader. {{ $json.message.content.newsletter_content.subject_options }} and {{ $json.message.content.newsletter_content.headline }} need to be consistent\n\nHTML STRUCTURE:\n- Full HTML document (<!doctype html>) with <meta charset=\"utf-8\"> and responsive meta.\n- Container: max-width 720px; centered; 24px page padding.\n- Typography: -apple-system, Segoe UI, Roboto, Arial, sans-serif; base 16px; line-height ~1.55.\n- Palette: #111 text; #555 secondary; dividers #e6e6e9; subtle background #f6f7fb; link #2d6cdf.\n- Sections in this exact order & labels (the order MUST be respected):\n  1) Author Note → newsletter_content.sections.author_note_html\n  2) Weekly Markets Summary → newsletter_content.sections.market_summary_html\n  3) Deeper Dive → newsletter_content.sections.deep_dive_html\n  4) What to Expect Next Week → newsletter_content.sections.next_week_html\n  5) Sources → newsletter_content.sections.sources_html\n  6) Disclaimers → newsletter_content.sections.disclaimer_html\n  7) Signature → signature_html\n\nSTYLE: \n- use <h1>/<h2>, 24–28px spacing, 1px dividers (#e6e6e9), bullet lists where provided. Avoid large data tables unless supplied by the editor (next_week table is expected).\n- Sanitize/escape untrusted inputs; no inline JS; no external assets.\n\nTABLES (EMAIL-SAFE — use THIS exact markup for “What to Expect Next Week”)\n- Emit pure HTML with INLINE styles only. No Markdown tables. No <style> blocks.\n- Wrap the table in a 720px container div (do NOT add other wrappers around it later).\n\n<!-- Responsive container -->\n<div style=\"max-width:720px;margin:0 auto;background:#ffffff;\">\n  <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\"\n    style=\"border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:8px;background:#ffffff;\">\n    <thead>\n      <tr>\n        <th style=\"padding:10px 12px;background:#f3f4f6;border-bottom:1px solid #e5e7eb;\n                   text-align:left;font-weight:700;color:#111827;font-size:14px;\">Date</th>\n        <th style=\"padding:10px 12px;background:#f3f4f6;border-bottom:1px solid #e5e7eb;\n                   text-align:left;font-weight:700;color:#111827;font-size:14px;\">Region</th>\n        <th style=\"padding:10px 12px;background:#f3f4f6;border-bottom:1px solid #e5e7eb;\n                   text-align:left;font-weight:700;color:#111827;font-size:14px;\">Event</th>\n        <th style=\"padding:10px 12px;background:#f3f4f6;border-bottom:1px solid #e5e7eb;\n                   text-align:left;font-weight:700;color:#111827;font-size:14px;\">Relevance</th>\n      </tr>\n    </thead>\n    <tbody>\n      <!-- Example row -->\n      <tr>\n        <td style=\"padding:12px;border-bottom:1px solid #e5e7eb;text-align:left;\n                   white-space:nowrap;font-variant-numeric:tabular-nums;\">2025-09-24</td>\n        <td style=\"padding:12px;border-bottom:1px solid #e5e7eb;\">US</td>\n        <td style=\"padding:12px;border-bottom:1px solid #e5e7eb;\">FOMC meeting statement</td>\n        <td style=\"padding:12px;border-bottom:1px solid #e5e7eb;\">High — sets tone for rates</td>\n      </tr>\n    </tbody>\n  </table>\n</div>\n\n\nRULES:\n- Keep table-layout:fixed and the exact <colgroup> widths above.\n- Every TH/TD MUST include background:#ffffff; to prevent grey banding in Gmail.\n- Dates must not wrap (white-space:nowrap; tabular-nums).\n- No additional containers around the table beyond the single outer <div>.\n- Escape user text; never inject scripts or external assets.\n- the order of elements is fixed \n\nRETURN ONLY:\n{ \"subject\": \"<final subject>\", \"html\": \"<!doctype html>...complete document...\" }\n"
+              },
+              {
+                "content": "=---EDITOR JSON---\n{{ typeof $node[\"Editor LLM\"].json.message?.content === 'string'\n    ? $node[\"Editor LLM\"].json.message.content\n    : JSON.stringify($node[\"Editor LLM\"].json.message?.content || {}) }}\n---END---\n\n---WEEK_CONTEXT---\n{\n  \"start_iso\": \"{{ $('Week ranges + run_key').isExecuted ? $node['Week ranges + run_key'].json.start_iso : ($json.week_meta?.start_iso || '') }}\",\n  \"end_iso\":   \"{{ $('Week ranges + run_key').isExecuted ? $node['Week ranges + run_key'].json.end_iso   : ($json.week_meta?.end_iso   || '') }}\",\n  \"week_label\":\"{{ $('Week ranges + run_key').isExecuted ? $node['Week ranges + run_key'].json.week_label: ($json.week_meta?.week_label|| '') }}\"\n}\n---END---\n"
+              }
+            ]
+          },
+          "jsonOutput": true
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8
+      },
+      {
+        "id": "d6ce01de-37ce-4da6-af25-4fe6aec0b4f0",
+        "name": "Editor LLM",
+        "type": "@n8n/n8n-nodes-langchain.openAi",
+        "position": [
+          -2144,
+          -256
+        ],
+        "parameters": {
+          "modelId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "gpt-4.1-mini",
+            "cachedResultName": "GPT-4.1-MINI"
+          },
+          "options": {
+            "maxTokens": 4500,
+            "temperature": 0.6
+          },
+          "messages": {
+            "values": [
+              {
+                "role": "system",
+                "content": "=You are the Head of Client Communications at a $50B global private wealth advisory firm. Transform weekly research JSON into a substantive, client-ready newsletter for high-net-worth individuals and family offices.\n\nTARGET AUDIENCE & TONE: \n- high network families, family offices, private investors. Sophisticated but time-constrained executives who need actionable market intelligence.\n- Tone: calm confidence; no hype; no salesy language.\n\nNEWSLETTER SPECIFICATIONS:\n- Reading Time: 8-10 minutes (1,800-2,200 words)\n- Tone: Calm confidence, institutional quality, no hype\n- Structure: Executive brief format with clear hierarchy\n- Data Integration: Every claim backed by specific numbers from research JSON\n- Positioning: General themes only - no individual advice or stock picks\n- The editorial narrative should strictly focus on major US, EU, UK, Japan, and global benchmark market moves and their direct portfolio relevance. Eliminate any analysis of smaller regions, obscure stocks, or data irrelevant to global asset allocation.\n\nCONTENT REQUIREMENTS:\n\nHEADLINE & FRAMING:\n- Headline: 6-10 words focusing on market outcome/implication, not events\n- Subheader: Week dates with 1-2 word theme descriptor\n- Subject line options: 5 variations balancing intrigue with professionalism\n\nSECTION STRUCTURE:\n\n1. AUTHOR INTRO (200-250 words):\n-  Lead with a concise, single context paragraph summarizing the main takeaways from this week and what to expect for the next. Avoid \"I'm writing to inform you\" - direct and substantive. CRITICAL: The bullet points of key movements must be placed after this paragraph, not before.\n- Avoid \"I'm writing to inform you\" - direct and substantive\n\n2. MARKET VITALS (300-350 words):\nCRITICAL: This section must be highly succinct and avoid tables. Focus the narrative only on the most significant movers of the week among US Indices, Global Indices, and Volatility (VIX). Use specific data points, but only to support the narrative. Remove the explicit requirement for tables/structured summaries for Rates, Curves, FX, Commodities, and Credit. Instead, briefly summarize the impact of Rate, FX, and Commodity movements only if they were a primary driver of equity or bond action  - Formatted table or structured summary of key weekly closes and changes\n  - US Indices: S&P 500, Nasdaq, Dow, Russell 2000 (close, w/w%, YTD%)\n  - Global Indices: STOXX 600, FTSE 100, DAX, Nikkei, Hang Seng (close, w/w%)\n  - Rates: US 2y, 10y, 30y; key international 10y yields (level, bps change)\n  - Curves: 2s10s spread in bps with weekly change\n  - FX: DXY, EURUSD, USDJPY, GBPUSD (close, w/w%)\n  - Commodities: WTI, Brent, Gold, Copper (close, w/w%)\n  - Volatility: VIX close and weekly change\n  - Credit: US IG/HY spreads if significant moves\n- Brief narrative connecting the numbers - what story do they tell?\n- avoid focusing on small markets that have no impact on the portfolio of this kind of investors (e.g. Singapore)\n\n3. WEEK RECAP (400-500 words):\n- Narrative flow connecting market moves with clear cause-and-effect\n- Start with dominant theme, then secondary drivers\n- Integrate sector performance with broader market moves\n- Include breadth metrics and technical context where relevant\n- Specific examples: \"Technology led gains at +2.1% as semiconductor earnings exceeded expectations, while Utilities lagged at -0.8% on rising rate expectations\"\n- Connect FX, commodities, and volatility to equity/bond themes\n- Reference specific economic data releases and their market impact\n\n4. DEEP DIVE (500-600 words):\n- Select a dominant market theme (from the major indices, sectors, rates, or FX) that has appeared in multiple top-tier outlets and demonstrably affected fund flows or asset prices as seen in the Research JSON. Do not deep-dive into topics with narrow or local relevance.\n- Structure: What happened → Why it matters → Market mechanism → Portfolio impact → Scenarios\n- Include exactly one bolded sentence highlighting the key insight: **[Critical takeaway]**\n- Use specific data points and market reactions\n- Examples of themes: Fed policy inflection, sector rotation, geopolitical risk, credit conditions, volatility regime shifts\n- Start with the dominant theme, connect it to specific market moves, economic data, sector performance, FX, and commodities. Use the structure: What happened → Why it matters → Market mechanism → Portfolio impact → Scenarios.\n\n5. CLIENT POSITIONING & OUTLOOK (400-500 words):\n- Lead with: \"For our clients, the key takeaway is...\" paragraph synthesizing implications\n- \"How we're thinking about positioning:\" with 4-5 general themes:\n  * Equity allocation: quality/growth/value bias, geographic tilts, sector considerations\n  * Fixed income: duration positioning, credit exposure, curve considerations  \n  * Alternatives: REITs, commodities, hedge fund strategies as portfolio context\n  * Risk management: volatility, correlation, tail risk considerations\n- Avoid specific allocations, individual securities, or performance predictions\n- Frame as \"considerations\" and \"themes\" rather than recommendations\n- Include time horizon context (tactical vs strategic)\n\n6. WEEK AHEAD (200-250 words):\n- Table format with key upcoming events:\n  * Date | Region | Event | Portfolio Relevance\n- Prioritize events by potential market impact\n- Filter calendar events so only those expected to move equity indices, credit, rates, or volatility at the regional/global scale are retained; minor country releases/events should be excluded.\n- 8-12 most important events: economic releases, central bank communications, earnings themes, policy announcements\n- Each \"Portfolio Relevance\" entry should be concise investor impact (e.g., \"Sets Fed December odds,\" \"Credit spread direction,\" \"Sector rotation catalyst\")\n- Include specific times for major releases\n\n7. SOURCES & DISCLAIMER (100-150 words):\n- List unique publishers from research with relevant links\n- Standard wealth management disclaimer covering: no individual advice, past performance, risk considerations, consultation recommendation\n- Professional but not overly legal in tone\n\nDATA INTEGRATION REQUIREMENTS:\n- Every market reference must include specific numbers from the research JSON\n- Percentage changes rounded to one decimal place\n- Yield changes in basis points\n- Include both weekly and YTD performance context where relevant\n- Reference technical levels, support/resistance when provided\n- Cite economic data actual vs consensus vs prior\n\nWRITING STYLE:\n- Sentences: 15-25 words average, vary length for rhythm\n- Paragraphs: 3-5 sentences, 100-150 words maximum  \n- Jargon: Minimal - explain when necessary (\"front-end rates\" = \"short-term interest rates\")\n- Voice: Active voice, confident but not arrogant\n- Transitions: Smooth flow between themes and sections\n- Numbers: Integrate naturally, don't dominate narrative\n- Focus on portfolio implications, not play-by-play.\n\nVALIDATION BEFORE RETURN\n- Use WEEK_CONTEXT for all dates. Confirm YEAR present.\n- Ensure every section key above exists and is non-empty.\n- No big KPI tables in market_summary_html; bullets + short prose only.\n\nCOMPLIANCE GUARDRAILS:\n- Dates come ONLY from WEEK_CONTEXT (provided below). Display format: “Week of YYYY-MM-DD”.\n- Include the YEAR in subheader and subject.\n- No preheader anywhere.\n- Use only data found in RESEARCH; never fabricate figures or events.\n- No individual stock recommendations or price targets\n- No specific allocation percentages or portfolio weights\n- No performance guarantees or return predictions\n- Frame outlook as \"scenarios\" and \"considerations\"\n- Avoid words like \"should,\" \"will,\" \"guaranteed,\" \"certain\"\n- Use \"may,\" \"could,\" \"suggests,\" \"indicates,\" \"considerations\"\n\nOUTPUT JSON STRUCTURE:\n{\n  \"newsletter_content\": {\n    \"headline\": \"6–10 words focused on outcome/implication (not event)\",\n    \"subheader\": \"Week of YYYY-MM-DD – YYYY-MM-DD: <1–2 word theme>\",\n    \"subject\": \"Weekly Markets — Week of YYYY-MM-DD – YYYY-MM-DD — <concise outcome>\",\n    \"subject_options\": [\n      \"<option 1>\", \"<option 2>\", \"<option 3>\", \"<option 4>\", \"<option 5>\"\n    ],\n    \"sections\": {\n      \"author_note_html\": \"<p>200–250 words. Direct summary of this week’s main takeaways and 1–2 sentences on what to expect next week.</p><ul><li>3–5 bullets: key weekly moves with numbers and one-clause portfolio relevance</li></ul>\",\n\n      \"market_summary_html\": \"<p>120–180 words. Succinct movers/impact view (no large tables). Mention only what moved and why it matters.</p><ul><li>Top equity/sector/FX/commodities movers with w/w % and one-clause ‘so-what’</li><li>1–2 breadth or vol observations if meaningful</li></ul>\",\n\n      \"deep_dive_html\": \"<h3>[Theme Title]</h3><p>What happened with numbers</p><p>Why it matters / mechanism</p><p><strong>[Critical takeaway in one bold sentence]</strong></p><p>Portfolio considerations and scenarios (no allocations)</p>\",\n\n      \"next_week_html\": \"<p>120–180 words on outlook & positioning themes framed as considerations (equity, fixed income, alternatives, risk).</p><table><tr><th>Date</th><th>Region</th><th>Event</th><th>Portfolio Relevance</th></tr>[8–12 rows from RESEARCH week_ahead]</table>\",\n\n      \"sources_html\": \"<ul>[unique publishers with links]</ul>\",\n      \"disclaimer_html\": \"<p>~100–150 words. Standard wealth-management disclaimer (no personal advice; past performance etc.). Professional tone.</p>\"\n    }\n  },\n  \"metadata\": {\n    \"estimated_reading_time\": \"8–10 minutes\",\n    \"word_count\": 2000,\n    \"primary_themes\": [\"theme1\", \"theme2\", \"theme3\"]\n  },\n  \"quality_control\": {\n    \"data_points_used\": 35,\n    \"json_fields_referenced\": [\"equity_indices\",\"rates_credit\",\"fx_markets\",\"commodities\",\"sector_performance\",\"economic_calendar_past\",\"week_ahead_calendar\"],\n    \"compliance_check\": \"passed\",\n    \"fact_density\": \"high\"\n  },\n  \"signature_html\": \"<p>Best regards,<br><br>[Your Name]<br>Head of Client Communications<br>[Firm Name]</p>\"\n}\n\nCRITICAL SUCCESS FACTORS:\n1. Every section must reference specific data points from the research JSON\n2. Maintain institutional tone throughout - no retail market commentary style\n3. Balance comprehensive coverage with readable narrative flow\n4. Focus on portfolio implications, not just market movements\n5. Ensure 8-10 minute reading time through appropriate depth and pacing\n6. Reject any draft where more than 5% of the content covers assets, events, or regions that are not part of an average institutional/RIA client's multi-asset portfolio.\n\nTransform the research data into client-focused intelligence that helps sophisticated investors understand market developments and their portfolio implications."
+              },
+              {
+                "content": "=MODE: {{\n  $json.editor_json ? 'REVISE' : 'FRESH'\n}}\n\nWEEK_CONTEXT:\n{{\n  JSON.stringify({\n    start_iso:  $json.week_meta?.start_iso  || $json.start_iso  || \"\",\n    end_iso:    $json.week_meta?.end_iso    || $json.end_iso    || \"\",\n    week_label: $json.week_meta?.week_label || $json.week_label || \"\"\n  })\n}}\n\nRESEARCH:\n{{\n  (() => {\n    // Prefer compact research already stored in context\n    const r = $json.research\n      ?? $json.research_json\n      ?? {};\n    // If needed, you can slim it:\n    // const slim = { equities: r.equities, rates: r.rates, fx: r.fx, calendar: r.calendar };\n    const s = JSON.stringify(r);\n    return s.length > 35000 ? s.slice(0, 35000) : s;\n  })()\n}}\n\nPRIOR_DRAFT: {{\n  // Full prior editor JSON if present (for REVISE mode)\n  (() => {\n    const d = $json.editor_json || null;\n    const s = JSON.stringify(d);\n    return s && s.length > 35000 ? s.slice(0, 35000) : s;\n  })()\n}}\n\nREVISION_NOTES: {{\n  (() => {\n    const n = (typeof $json.notes === 'string')\n      ? $json.notes\n      : JSON.stringify($json.notes || \"\");\n    return n.length > 8000 ? n.slice(0, 8000) : n;\n  })()\n}}\n\nINSTRUCTION:\nTransform the RESEARCH into the JSON schema described in the system message for the specified WEEK_CONTEXT. Use ONLY WEEK_CONTEXT for dates (ensure YEAR). \n- If MODE = REVISE and PRIOR_DRAFT is provided, apply REVISION_NOTES surgically, update figures to match RESEARCH, and preserve structure; output the full, final JSON (not a diff).\n- If MODE = FRESH, generate a full draft per schema, grounded strictly in RESEARCH.\nReturn ONLY the JSON object.\n"
+              }
+            ]
+          },
+          "jsonOutput": true
+        },
+        "credentials": {
+          "openAiApi": {
+            "id": "credential-id",
+            "name": "openAiApi Credential"
+          }
+        },
+        "typeVersion": 1.8,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "ed76f078-2d5b-4fc7-9299-0ea849841310",
+        "name": "Normalize",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2384,
+          384
+        ],
+        "parameters": {
+          "jsCode": "// --- helpers ---\nfunction b64urlToUtf8(s) {\n  let b = String(s || '').replace(/-/g, '+').replace(/_/g, '/');\n  const pad = b.length % 4 ? 4 - (b.length % 4) : 0;\n  if (pad) b += '='.repeat(pad);\n  return b ? Buffer.from(b, 'base64').toString('utf8') : '';\n}\nfunction safeJsonParse(txt) {\n  try { return JSON.parse(txt); } catch { return {}; }\n}\n\n// --- inputs from GET/POST ---\nconst actionRaw = $json.body?.action ?? $json.action ?? $json.query?.action ?? '';\nconst action = String(actionRaw || '').toLowerCase();\n\n// context may be in POST body, query, or current json\nconst rawCtx = $json.body?.context ?? $json.context ?? $json.query?.context ?? '';\nconst ctx = rawCtx\n  ? safeJsonParse(/^\\s*\\{/.test(rawCtx) ? rawCtx : b64urlToUtf8(rawCtx))\n  : {};\n\n// notes only arrive on the revision form POST\nlet notes = $json.body?.notes ?? $json.notes ?? ctx.notes ?? '';\nif (typeof notes !== 'string') notes = JSON.stringify(notes || '');\n\n// --- merge contract (always present for downstream LLMs) ---\nconst week_meta = ctx.week_meta ?? $json.week_meta ?? {\n  start_iso:  $json.start_iso  ?? '',\n  end_iso:    $json.end_iso    ?? '',\n  week_label: $json.week_label ?? '',\n  run_key:    $json.run_key    ?? ''\n};\n\nconst research    = ctx.research    ?? $json.research    ?? {};\nconst editor_json = ctx.editor_json ?? $json.editor_json ?? null;\n\nconst subjIn = (ctx.subject ?? $json.subject ?? 'Weekly Markets').toString();\nlet subject = subjIn.replace(/\\[(?:Preview|Test|Approve[^\\]]*|approved)\\]\\s*/gi, '').trim();\nif (action === 'approve') subject = `[approved] ${subject}`;\n\nconst html = (ctx.html ?? $json.html ?? '').toString();\n\n// Return a clean, self-sufficient payload\nreturn [{\n  json: {\n    action,\n    subject,\n    html,\n    research,\n    editor_json,\n    week_meta,\n    notes,\n    // keep original fields too in case other nodes read them\n    ...$json\n  }\n}];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "43bfb01a-bbf0-4d40-9b00-4419e6b8574b",
+        "name": "Approval Submit (POST)",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -2688,
+          384
+        ],
+        "webhookId": "1965d8a1-feed-40e6-a80b-f41c64b1fb9b",
+        "parameters": {
+          "path": "newsletter-approval-submit",
+          "options": {},
+          "httpMethod": "POST",
+          "responseMode": "responseNode"
+        },
+        "typeVersion": 2.1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "ea6dea4d-dc39-42af-9998-4bad519b1536",
+        "name": "Create Final Draft for Editor",
+        "type": "n8n-nodes-base.gmail",
+        "position": [
+          -2000,
+          304
+        ],
+        "webhookId": "b9f0caa8-8708-4a6e-9b5b-e24de471bba1",
+        "parameters": {
+          "message": "={{ $json.html ?? $json.body?.html ?? '' }}",
+          "options": {},
+          "subject": "={{ (() => {\n  const action = String($json.action || $json.body?.action || '').toLowerCase();\n  const subjIn = String($json.subject ?? 'Weekly Markets');\n  let s = subjIn.replace(/\\[(?:Preview|Test|Approve[^\\]]*|approved)\\]\\s*/gi, '').trim();\n  if (action === 'approve') s = `[approved] ${s}`;\n  return s;\n})() }}",
+          "resource": "draft",
+          "emailType": "html"
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "credential-id",
+            "name": "gmailOAuth2 Credential"
+          }
+        },
+        "typeVersion": 2.1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "1eb0146c-ab8b-4be9-b426-c7d0e0e15677",
+        "name": "Approval Webhook (GET)",
+        "type": "n8n-nodes-base.webhook",
+        "position": [
+          -3264,
+          -160
+        ],
+        "webhookId": "be46d2a3-7f79-4321-a2b5-e2ad3487023c",
+        "parameters": {
+          "path": "newsletter-approval",
+          "options": {},
+          "responseMode": "responseNode"
+        },
+        "typeVersion": 2.1,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "ab29775c-532b-4a8f-ab85-3136f50272ec",
+        "name": "Merge Revision Notes",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2704,
+          -32
+        ],
+        "parameters": {
+          "jsCode": "// Inputs:\n// - $json contains fields from Normalize + Decode Context\n//   expected: run (run_key), encoded_context (optional), any prior context (week_meta, research, subject, html, etc.)\n// - Notes may arrive as: $json.notes OR $json.revision_notes\n\nconst MAX_NOTES = 2000;\n\nconst nowIso = new Date().toISOString();\n\n// 1) read existing carried context (already decoded by \"Decode Context\")\nconst ctx = { ...$json }; // includes prior subject/html/research/week_meta if present\n\n// 2) normalize notes\nlet notes = (ctx.notes ?? ctx.revision_notes ?? \"\").toString().trim();\n\n// compact whitespace + hard cap\nnotes = notes.replace(/\\s+/g, \" \").slice(0, MAX_NOTES);\n\n// 3) revision bookkeeping\nconst prevRev = Number(ctx.rev_no || 0);\nconst rev_no = Number.isFinite(prevRev) ? prevRev + 1 : 1;\n\n// 4) build a minimal, predictable merge\n// keep run_key stable; prefer explicit ctx.run_key, else ctx.run\nconst run_key = ctx.run_key || ctx.run || \"\";\n\n// 5) append notes history (optional but useful)\nconst revision_history = Array.isArray(ctx.revision_history) ? ctx.revision_history.slice(0, 20) : [];\nif (notes) {\n  revision_history.unshift({\n    rev_no,\n    at: nowIso,\n    notes\n  });\n}\n\n// 6) final merged context exposed to downstream nodes\nconst merged = {\n  ...ctx,\n\n  // canonical IDs / meta\n  run_key,\n  rev_no,\n  last_updated_at: nowIso,\n\n  // carry notes in consistent fields\n  revision_notes: notes,\n  notes, // keep duplicate key for templates\n\n  // keep a bounded history for audit/debug\n  revision_history,\n};\n\n// OPTIONAL: nuke large blobs you don't want to carry across runs\n// e.g., if your upstream adds big raw JSONs, strip them here to keep URLs small.\n// delete merged.raw_perplexity_dump;\n\nreturn [{ json: merged }];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "0b4670f7-f6c6-4d7f-8444-b8df0d4238ef",
+        "name": "Check Action Type",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -2224,
+          384
+        ],
+        "parameters": {
+          "options": {
+            "ignoreCase": true
+          },
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": false,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "ef555ddb-bc8c-4088-9737-680af7329dbd",
+                "operator": {
+                  "name": "filter.operator.equals",
+                  "type": "string",
+                  "operation": "equals"
+                },
+                "leftValue": "={{ ($json.body?.action || $json.query?.action || '').toLowerCase() }}",
+                "rightValue": "approve"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "4a6279fc-ca4e-4bd6-b04f-ca768175a189",
+        "name": "Decode",
+        "type": "n8n-nodes-base.code",
+        "position": [
+          -2528,
+          384
+        ],
+        "parameters": {
+          "jsCode": "function b64urlToUtf8(s) {\n  let b = s.replace(/-/g, '+').replace(/_/g, '/');\n  const pad = b.length % 4 ? 4 - (b.length % 4) : 0;\n  if (pad) b += '='.repeat(pad);\n  return Buffer.from(b, 'base64').toString('utf8');\n}\n\nconst raw = String($json.body?.context || $json.query?.context || '').trim();\nlet decoded = {};\ntry {\n  const txt = raw.startsWith('{') ? raw : b64urlToUtf8(raw);\n  decoded = JSON.parse(txt);\n} catch (e) {\n  decoded = {};\n}\n\nreturn [{\n  json: {\n    ...$json,\n    ...decoded,                 // should include subject, html, editor_json, research, week_meta\n    subject: decoded.subject || $json.subject || '',\n    html: decoded.html || $json.html || ''\n  }\n}];\n"
+        },
+        "typeVersion": 2,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "48b86b24-c81d-4d4f-9e65-09a71ff27e9a",
+        "name": "Respond Form HTML1",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          -1680,
+          496
+        ],
+        "parameters": {
+          "options": {
+            "responseCode": 200,
+            "responseHeaders": {
+              "entries": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/html; charset=utf-8"
+                }
+              ]
+            }
+          },
+          "respondWith": "text",
+          "responseBody": "={{ (() => {\n  const qp = new URLSearchParams($json.query?.__rawQuery || $json.query || '');\n  const run    = qp.get('run') || '';\n  const action = qp.get('action') || 'revise';\n  const postUrl = 'https://[YOURDOMAIN].app.n8n.cloud/webhook/newsletter-approval-submit';\n  return `<!doctype html><html><body>\n    <form id=\"f\" method=\"post\" action=\"${postUrl}\">\n      <input type=\"hidden\" name=\"action\" value=\"${action}\" />\n      <input type=\"hidden\" name=\"run\" value=\"${run}\" />\n      <input type=\"hidden\" id=\"ctx\" name=\"context\" value=\"\" />\n    </form>\n    <script>\n      (function () {\n        try {\n          var c = (location.hash||'').replace(/^#ctx=/,'');\n          document.getElementById('ctx').value = c || '';\n          if ((new URLSearchParams(location.search)).get('action') === 'approve') {\n            document.getElementById('f').submit();\n          }\n        } catch (e) {}\n      }());\n    </script>\n  </body></html>`;\n})() }}\n"
+        },
+        "typeVersion": 1.4
+      },
+      {
+        "id": "e3b5b553-f28a-4434-bd6a-faa8542caa22",
+        "name": "Respond to Webhook (HTML page)",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "position": [
+          -3056,
+          -160
+        ],
+        "parameters": {
+          "options": {
+            "responseCode": 200,
+            "responseHeaders": {
+              "entries": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/html; charset=utf-8"
+                }
+              ]
+            }
+          },
+          "respondWith": "text",
+          "responseBody": "=<!doctype html><meta charset=\"utf-8\">\n<title>Newsletter Approval</title>\n<body style=\"font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif; margin:24px;\">\n<script>\n(function () {\n  const q = new URLSearchParams(location.search);\n  const action = (q.get('action') || 'approve').toLowerCase();\n  let ctx = \"\";\n  if (location.hash.startsWith('#ctx=')) {\n    try { ctx = decodeURIComponent(location.hash.slice(5)); } catch (e) { ctx = location.hash.slice(5); }\n  }\n  if (!ctx) ctx = q.get('context') || '';\n\n  if (action === 'approve') {\n    // Auto-submit straight to POST for approve\n    const f = document.createElement('form');\n    f.method = 'post';\n    f.action = '/webhook/newsletter-approval-submit';\n    f.innerHTML = `\n      <input type=\"hidden\" name=\"run\" value=\"${q.get('run')||''}\">\n      <input type=\"hidden\" name=\"action\" value=\"approve\">\n      <input type=\"hidden\" name=\"context\" value=\"${ctx}\">\n    `;\n    document.body.append('Finalizing approval…'); \n    document.body.appendChild(f); f.submit();\n    return;\n  }\n\n  // action = revise → show the notes form (no auto-submit)\n  document.body.innerHTML = `\n    <h2>Request revisions</h2>\n    <form method=\"post\" action=\"/webhook/newsletter-approval-submit\" style=\"max-width:720px\">\n      <textarea name=\"notes\" rows=\"8\" style=\"width:100%; font:inherit;\" placeholder=\"What should be changed?\"></textarea>\n      <input type=\"hidden\" name=\"run\" value=\"${q.get('run')||''}\">\n      <input type=\"hidden\" name=\"action\" value=\"revise\">\n      <input type=\"hidden\" name=\"context\" value=\"${ctx}\">\n      <div style=\"margin-top:12px\"><button type=\"submit\">Send revisions</button></div>\n    </form>`;\n})();\n</script>\n</body>\n"
+        },
+        "typeVersion": 1.4,
+        "alwaysOutputData": true
+      },
+      {
+        "id": "3599ddab-1836-431f-94ac-5df6ce1755fa",
+        "name": "If",
+        "type": "n8n-nodes-base.if",
+        "position": [
+          -2016,
+          480
+        ],
+        "parameters": {
+          "options": {},
+          "conditions": {
+            "options": {
+              "version": 2,
+              "leftValue": "",
+              "caseSensitive": true,
+              "typeValidation": "strict"
+            },
+            "combinator": "and",
+            "conditions": [
+              {
+                "id": "cbbae162-7e01-428c-8769-d182b1a876a6",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                },
+                "leftValue": "=={{ ($json.body?.notes ?? $json.body?.revision_notes ?? $json.notes ?? '').trim() }}\n",
+                "rightValue": "approve"
+              }
+            ]
+          }
+        },
+        "typeVersion": 2.2
+      },
+      {
+        "id": "0d767743-3227-4135-9bb9-71863d453092",
+        "name": "Sticky Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1200,
+          -576
+        ],
+        "parameters": {
+          "width": 336,
+          "height": 480,
+          "content": "## NEEDS PERSONALIZATION\n\n1) Sender Address (Send Preview node): sendTo: change to your own test or distribution list.\n\n2) Gmail OAuth2 Credentials: Replace with your own Gmail/Google Workspace account credentials.\n\n3) [YOURDOMAIN] placeholder: must be updated to your n8n cloud domain or self-hosted domain."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "7bd09a0b-dab6-49f4-8923-c44c77353e25",
+        "name": "Sticky Note1",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -1776,
+          128
+        ],
+        "parameters": {
+          "width": 320,
+          "height": 512,
+          "content": "## NEEDS PERSONALIZATION\n\n[YOURDOMAIN] placeholder: must be updated to your n8n cloud domain or self-hosted domain."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "b6f6e403-b9f2-4d47-8eb2-9ed88d4e1c33",
+        "name": "Sticky Note2",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2160,
+          -496
+        ],
+        "parameters": {
+          "width": 784,
+          "height": 400,
+          "content": "## NEEDS PERSONALIZATION\n\n1) Editorial Prompts: System prompts in Editor LLM and HTML Builder LLM can be lightly adapted to match their tone (e.g., institutional vs. retail audience).\n\n2) Output Styling: Colors, typography, table styling in HTML Builder LLM → align with client brand guidelines.\n\n3) QC Rules: Compliance checks (promissory language, allocations) may be loosened/tightened depending on jurisdiction."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "3f347f1f-037f-4e1a-a96a-b754b26999c9",
+        "name": "Sticky Note3",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2896,
+          -528
+        ],
+        "parameters": {
+          "width": 256,
+          "height": 336,
+          "content": "## NEEDS PERSONALIZATION\nSubstitute LLM instructions on what and how to research the topic of interest"
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "2c2a3823-db8c-4b26-a53e-9caa63495679",
+        "name": "Sticky Note4",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -3344,
+          -544
+        ],
+        "parameters": {
+          "width": 256,
+          "height": 336,
+          "content": "## NEEDS PERSONALIZATION\n\nSchedule Trigger: Adjust interval and triggerAtHour to their preferred publishing time (e.g., Friday 8am)."
+        },
+        "typeVersion": 1
+      },
+      {
+        "id": "1b19656c-c86a-46f7-9437-114727c86f37",
+        "name": "Sticky Note5",
+        "type": "n8n-nodes-base.stickyNote",
+        "position": [
+          -2432,
+          -736
+        ],
+        "parameters": {
+          "width": 256,
+          "height": 528,
+          "content": "## NEEDS PERSONALIZATION\n\n1) Branding & Identity\nFirm/Company Info (in Enrich for Editorial):\n\nfirm_name: \"Company Name\"\ncontact_url: \"contact url\"\nview_url: https://website/${runKey} → swap with client’s domain.\nSignature Block (signature_html in Editor LLM prompt):\n\nReplace [Your Name], [Firm Name]."
+        },
+        "typeVersion": 1
+      }
+    ],
+    "active": false,
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "versionId": "add4681b-08a8-4325-938a-414ddf5ff8ef",
+    "connections": {
+      "If": {
+        "main": [
+          [
+            {
+              "node": "Merge Revision Notes",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Respond Form HTML1",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decode": {
+        "main": [
+          [
+            {
+              "node": "Normalize",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "QC LLM": {
+        "main": [
+          [
+            {
+              "node": "Assemble Preview (Code)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize": {
+        "main": [
+          [
+            {
+              "node": "Check Action Type",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Editor LLM": {
+        "main": [
+          [
+            {
+              "node": "HTML Builder LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Research LLM": {
+        "main": [
+          [
+            {
+              "node": "Parse Perplexity JSON",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Preview": {
+        "main": [
+          []
+        ]
+      },
+      "HTML Builder LLM": {
+        "main": [
+          [
+            {
+              "node": "QC LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Week ranges + run_key",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Action Type": {
+        "main": [
+          [
+            {
+              "node": "Create Final Draft for Editor",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "If",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Respond Form HTML1": {
+        "main": [
+          []
+        ]
+      },
+      "Respond to Webhook": {
+        "main": [
+          []
+        ]
+      },
+      "Enrich for Editorial": {
+        "main": [
+          [
+            {
+              "node": "Editor LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Revision Notes": {
+        "main": [
+          [
+            {
+              "node": "Editor LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Perplexity JSON": {
+        "main": [
+          [
+            {
+              "node": "Enrich for Editorial",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Week ranges + run_key": {
+        "main": [
+          [
+            {
+              "node": "Research LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Approval Submit (POST)": {
+        "main": [
+          [
+            {
+              "node": "Decode",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Approval Webhook (GET)": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook (HTML page)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Assemble Preview (Code)": {
+        "main": [
+          [
+            {
+              "node": "Send Preview",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create Final Draft for Editor": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
+  },
+  "lastUpdatedBy": 1,
+  "workflowInfo": {
+    "nodeCount": 27,
+    "nodeTypes": {
+      "n8n-nodes-base.if": {
+        "count": 2
+      },
+      "n8n-nodes-base.code": {
+        "count": 7
+      },
+      "n8n-nodes-base.gmail": {
+        "count": 2
+      },
+      "n8n-nodes-base.webhook": {
+        "count": 2
+      },
+      "n8n-nodes-base.perplexity": {
+        "count": 1
+      },
+      "n8n-nodes-base.stickyNote": {
+        "count": 6
+      },
+      "n8n-nodes-base.scheduleTrigger": {
+        "count": 1
+      },
+      "@n8n/n8n-nodes-langchain.openAi": {
+        "count": 3
+      },
+      "n8n-nodes-base.respondToWebhook": {
+        "count": 3
+      }
+    }
+  },
+  "status": "published",
+  "readyToDemo": null,
+  "user": {
+    "name": "Cristina",
+    "username": "criruggeri",
+    "bio": "",
+    "verified": false,
+    "links": [],
+    "avatar": "https://gravatar.com/avatar/b6444841391471b583cd86bfc56aef7014f8e57313240a1d8d43249c8e3a197f?r=pg&d=retro&size=200"
+  },
+  "nodes": [
+    {
+      "id": 20,
+      "icon": "fa:map-signs",
+      "name": "n8n-nodes-base.if",
+      "codex": {
+        "data": {
+          "alias": [
+            "Router",
+            "Filter",
+            "Condition",
+            "Logic",
+            "Boolean",
+            "Branch"
+          ],
+          "details": "The IF node can be used to implement binary conditional logic in your workflow. You can set up one-to-many conditions to evaluate each item of data being inputted into the node. That data will either evaluate to TRUE or FALSE and route out of the node accordingly.\n\nThis node has multiple types of conditions: Bool, String, Number, and Date & Time.",
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-to-automate-your-factorys-incident-reporting-a-step-by-step-guide/",
+                "icon": "🏭",
+                "label": "Learn to Automate Your Factory's Incident Reporting: A Step by Step Guide"
+              },
+              {
+                "url": "https://n8n.io/blog/2021-the-year-to-automate-the-new-you-with-n8n/",
+                "icon": "☀️",
+                "label": "2021: The Year to Automate the New You with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/create-a-toxic-language-detector-for-telegram/",
+                "icon": "🤬",
+                "label": "Create a toxic language detector for Telegram in 4 step"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-your-data-processing-pipeline-in-9-steps-with-n8n/",
+                "icon": "⚙️",
+                "label": "Automate your data processing pipeline in 9 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/automation-for-maintainers-of-open-source-projects/",
+                "icon": "🏷️",
+                "label": "How to automatically manage contributions to open-source projects"
+              },
+              {
+                "url": "https://n8n.io/blog/how-uproc-scraped-a-multi-page-website-with-a-low-code-workflow/",
+                "icon": " 🕸️",
+                "label": "How uProc scraped a multi-page website with a low-code workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/sending-automated-congratulations-with-google-sheets-twilio-and-n8n/",
+                "icon": "🙌",
+                "label": "Sending Automated Congratulations with Google Sheets, Twilio, and n8n "
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-set-up-a-ci-cd-pipeline-with-no-code/",
+                "icon": "🎡",
+                "label": "How to set up a no-code CI/CD pipeline with GitHub and TravisCI"
+              },
+              {
+                "url": "https://n8n.io/blog/benefits-of-automation-and-n8n-an-interview-with-hubspots-hugh-durkin/",
+                "icon": "🎖",
+                "label": "Benefits of automation and n8n: An interview with HubSpot's Hugh Durkin"
+              },
+              {
+                "url": "https://n8n.io/blog/aws-workflow-automation/",
+                "label": "7 no-code workflow automations for Amazon Web Services"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.if/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Flow"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "If",
+        "color": "#408000"
+      },
+      "iconData": {
+        "icon": "map-signs",
+        "type": "icon"
+      },
+      "displayName": "If",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.webhook",
+      "codex": {
+        "data": {
+          "alias": [
+            "HTTP",
+            "API",
+            "Build",
+            "WH"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/learn-how-to-automatically-cross-post-your-content-with-n8n/",
+                "icon": "✍️",
+                "label": "Learn how to automatically cross-post your content with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/running-n8n-on-ships-an-interview-with-maranics/",
+                "icon": "🛳",
+                "label": "Running n8n on ships: An interview with Maranics"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-build-a-low-code-self-hosted-url-shortener/",
+                "icon": "🔗",
+                "label": "How to build a low-code, self-hosted URL shortener in 3 steps"
+              },
+              {
+                "url": "https://n8n.io/blog/what-are-apis-how-to-use-them-with-no-code/",
+                "icon": " 🪢",
+                "label": "What are APIs and how to use them with no code"
+              },
+              {
+                "url": "https://n8n.io/blog/5-tasks-you-can-automate-with-notion-api/",
+                "icon": "⚡️",
+                "label": "5 tasks you can automate with the new Notion API "
+              },
+              {
+                "url": "https://n8n.io/blog/how-a-digital-strategist-uses-n8n-for-online-marketing/",
+                "icon": "💻",
+                "label": "How a digital strategist uses n8n for online marketing"
+              },
+              {
+                "url": "https://n8n.io/blog/the-ultimate-guide-to-automate-your-video-collaboration-with-whereby-mattermost-and-n8n/",
+                "icon": "📹",
+                "label": "The ultimate guide to automate your video collaboration with Whereby, Mattermost, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-automatically-give-kudos-to-contributors-with-github-slack-and-n8n/",
+                "icon": "👏",
+                "label": "How to automatically give kudos to contributors with GitHub, Slack, and n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/5-workflow-automations-for-mattermost-that-we-love-at-n8n/",
+                "icon": "🤖",
+                "label": "5 workflow automations for Mattermost that we love at n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/why-this-product-manager-loves-workflow-automation-with-n8n/",
+                "icon": "🧠",
+                "label": "Why this Product Manager loves workflow automation with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/creating-custom-incident-response-workflows-with-n8n/",
+                "label": "How to automate every step of an incident response workflow"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-to-build-powerful-api-endpoints-using-webhooks/",
+                "icon": "🧰",
+                "label": "Learn to Build Powerful API Endpoints Using Webhooks"
+              },
+              {
+                "url": "https://n8n.io/blog/learn-how-to-use-webhooks-with-mattermost-slash-commands/",
+                "icon": "🦄",
+                "label": "Learn how to use webhooks with Mattermost slash commands"
+              },
+              {
+                "url": "https://n8n.io/blog/how-goomer-automated-their-operations-with-over-200-n8n-workflows/",
+                "icon": "🛵",
+                "label": "How Goomer automated their operations with over 200 n8n workflows"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"trigger\"]",
+      "defaults": {
+        "name": "Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 356,
+      "icon": "file:gmail.svg",
+      "name": "n8n-nodes-base.gmail",
+      "codex": {
+        "data": {
+          "alias": [
+            "email",
+            "human",
+            "form",
+            "wait",
+            "hitl",
+            "approval"
+          ],
+          "resources": {
+            "generic": [
+              {
+                "url": "https://n8n.io/blog/why-business-process-automation-with-n8n-can-change-your-daily-life/",
+                "icon": "🧬",
+                "label": "Why business process automation with n8n can change your daily life"
+              },
+              {
+                "url": "https://n8n.io/blog/supercharging-your-conference-registration-process-with-n8n/",
+                "icon": "🎫",
+                "label": "Supercharging your conference registration process with n8n"
+              },
+              {
+                "url": "https://n8n.io/blog/no-code-ecommerce-workflow-automations/",
+                "icon": "store",
+                "label": "6 e-commerce workflows to power up your Shopify s"
+              },
+              {
+                "url": "https://n8n.io/blog/how-to-get-started-with-crm-automation-and-no-code-workflow-ideas/",
+                "icon": "👥",
+                "label": "How to get started with CRM automation (with 3 no-code workflow ideas"
+              },
+              {
+                "url": "https://n8n.io/blog/automate-google-apps-for-productivity/",
+                "icon": "💡",
+                "label": "15 Google apps you can combine and automate to increase productivity"
+              },
+              {
+                "url": "https://n8n.io/blog/your-business-doesnt-need-you-to-operate/",
+                "icon": " 🖥️",
+                "label": "Hey founders! Your business doesn't need you to operate"
+              },
+              {
+                "url": "https://n8n.io/blog/using-automation-to-boost-productivity-in-the-workplace/",
+                "icon": "💪",
+                "label": "Using Automation to Boost Productivity in the Workplace"
+              }
+            ],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.gmail/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/"
+              }
+            ]
+          },
+          "categories": [
+            "Communication",
+            "HITL"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "HITL": [
+              "Human in the Loop"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Gmail"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMTkzIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJ4TWlkWU1pZCI+PHBhdGggZmlsbD0iIzQyODVGNCIgZD0iTTU4LjE4MiAxOTIuMDVWOTMuMTRMMjcuNTA3IDY1LjA3NyAwIDQ5LjUwNHYxMjUuMDkxYzAgOS42NTggNy44MjUgMTcuNDU1IDE3LjQ1NSAxNy40NTV6Ii8+PHBhdGggZmlsbD0iIzM0QTg1MyIgZD0iTTE5Ny44MTggMTkyLjA1aDQwLjcyN2M5LjY1OSAwIDE3LjQ1NS03LjgyNiAxNy40NTUtMTcuNDU1VjQ5LjUwNWwtMzEuMTU2IDE3LjgzNy0yNy4wMjYgMjUuNzk4eiIvPjxwYXRoIGZpbGw9IiNFQTQzMzUiIGQ9Im01OC4xODIgOTMuMTQtNC4xNzQtMzguNjQ3IDQuMTc0LTM2Ljk4OUwxMjggNjkuODY4bDY5LjgxOC01Mi4zNjQgNC42NyAzNC45OTItNC42NyA0MC42NDRMMTI4IDE0NS41MDR6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTE5Ny44MTggMTcuNTA0VjkzLjE0TDI1NiA0OS41MDRWMjYuMjMxYzAtMjEuNTg1LTI0LjY0LTMzLjg5LTQxLjg5LTIwLjk0NXoiLz48cGF0aCBmaWxsPSIjQzUyMjFGIiBkPSJtMCA0OS41MDQgMjYuNzU5IDIwLjA3TDU4LjE4MiA5My4xNFYxNy41MDRMNDEuODkgNS4yODZDMjQuNjEtNy42NiAwIDQuNjQ2IDAgMjYuMjN6Ii8+PC9zdmc+"
+      },
+      "displayName": "Gmail",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 6,
+          "name": "Communication"
+        },
+        {
+          "id": 28,
+          "name": "HITL"
+        }
+      ]
+    },
+    {
+      "id": 535,
+      "icon": "file:webhook.svg",
+      "name": "n8n-nodes-base.respondToWebhook",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.respondtowebhook/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes",
+            "Utility"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Respond to Webhook"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCI+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTM1IDM3Yy0yLjIgMC00LTEuOC00LTRzMS44LTQgNC00IDQgMS44IDQgNC0xLjggNC00IDQiLz48cGF0aCBmaWxsPSIjMzc0NzRmIiBkPSJNMzUgNDNjLTMgMC01LjktMS40LTcuOC0zLjdsMy4xLTIuNWMxLjEgMS40IDIuOSAyLjMgNC43IDIuMyAzLjMgMCA2LTIuNyA2LTZzLTIuNy02LTYtNmMtMSAwLTIgLjMtMi45LjdsLTEuNyAxTDIzLjMgMTZsMy41LTEuOSA1LjMgOS40YzEtLjMgMi0uNSAzLS41IDUuNSAwIDEwIDQuNSAxMCAxMFM0MC41IDQzIDM1IDQzIi8+PHBhdGggZmlsbD0iIzM3NDc0ZiIgZD0iTTE0IDQzQzguNSA0MyA0IDM4LjUgNCAzM2MwLTQuNiAzLjEtOC41IDcuNS05LjdsMSAzLjlDOS45IDI3LjkgOCAzMC4zIDggMzNjMCAzLjMgMi43IDYgNiA2czYtMi43IDYtNnYtMmgxNXY0SDIzLjhjLS45IDQuNi01IDgtOS44IDgiLz48cGF0aCBmaWxsPSIjZTkxZTYzIiBkPSJNMTQgMzdjLTIuMiAwLTQtMS44LTQtNHMxLjgtNCA0LTQgNCAxLjggNCA0LTEuOCA0LTQgNCIvPjxwYXRoIGZpbGw9IiMzNzQ3NGYiIGQ9Ik0yNSAxOWMtMi4yIDAtNC0xLjgtNC00czEuOC00IDQtNCA0IDEuOCA0IDQtMS44IDQtNCA0Ii8+PHBhdGggZmlsbD0iI2U5MWU2MyIgZD0ibTE1LjcgMzQtMy40LTIgNS45LTkuN2MtMi0xLjktMy4yLTQuNS0zLjItNy4zIDAtNS41IDQuNS0xMCAxMC0xMHMxMCA0LjUgMTAgMTBjMCAuOS0uMSAxLjctLjMgMi41bC0zLjktMWMuMS0uNS4yLTEgLjItMS41IDAtMy4zLTIuNy02LTYtNnMtNiAyLjctNiA2YzAgMi4xIDEuMSA0IDIuOSA1LjFsMS43IDF6Ii8+PC9zdmc+"
+      },
+      "displayName": "Respond to Webhook",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 565,
+      "icon": "fa:sticky-note",
+      "name": "n8n-nodes-base.stickyNote",
+      "codex": {
+        "data": {
+          "alias": [
+            "Comments",
+            "Notes",
+            "Sticky"
+          ],
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers"
+            ]
+          }
+        }
+      },
+      "group": "[\"input\"]",
+      "defaults": {
+        "name": "Sticky Note",
+        "color": "#FFD233"
+      },
+      "iconData": {
+        "icon": "sticky-note",
+        "type": "icon"
+      },
+      "displayName": "Sticky Note",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 834,
+      "icon": "file:code.svg",
+      "name": "n8n-nodes-base.code",
+      "codex": {
+        "data": {
+          "alias": [
+            "cpde",
+            "Javascript",
+            "JS",
+            "Python",
+            "Script",
+            "Custom Code",
+            "Function"
+          ],
+          "details": "The Code node allows you to execute JavaScript in your workflow.",
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.code/"
+              }
+            ]
+          },
+          "categories": [
+            "Development",
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0",
+          "subcategories": {
+            "Core Nodes": [
+              "Helpers",
+              "Data Transformation"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Code"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgdmlld0JveD0iMCAwIDUxMiA1MTIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMF8xMTcxXzQ0MSkiPgo8cGF0aCBkPSJNMTcwLjI4MyA0OEgxOTYuNUMyMDMuMTI3IDQ4IDIwOC41IDQyLjYyNzQgMjA4LjUgMzZWMTJDMjA4LjUgNS4zNzI1OCAyMDMuMTI3IDAgMTk2LjUgMEgxNzAuMjgzQzEyNi4xIDAgOTAuMjgzIDM1LjgxNzIgOTAuMjgzIDgwVjE3NkM5MC4yODMgMjA2LjkyOCA2NS4yMTA5IDIzMiAzNC4yODMgMjMySDIzQzE2LjM3MjYgMjMyIDExIDIzNy4zNzIgMTEgMjQ0VjI2OEMxMSAyNzQuNjI3IDE2LjM3MjQgMjgwIDIyLjk5OTYgMjgwTDM0LjI4MyAyODBDNjUuMjEwOSAyODAgOTAuMjgzIDMwNS4wNzIgOTAuMjgzIDMzNlY0NDBDOTAuMjgzIDQ3OS43NjQgMTIyLjUxOCA1MTIgMTYyLjI4MyA1MTJIMTk2LjVDMjAzLjEyNyA1MTIgMjA4LjUgNTA2LjYyNyAyMDguNSA1MDBWNDc2QzIwOC41IDQ2OS4zNzMgMjAzLjEyNyA0NjQgMTk2LjUgNDY0SDE2Mi4yODNDMTQ5LjAyOCA0NjQgMTM4LjI4MyA0NTMuMjU1IDEzOC4yODMgNDQwVjMzNkMxMzguMjgzIDMwOS4wMjIgMTI4LjAxMSAyODQuNDQzIDExMS4xNjQgMjY1Ljk2MUMxMDYuMTA5IDI2MC40MTYgMTA2LjEwOSAyNTEuNTg0IDExMS4xNjQgMjQ2LjAzOUMxMjguMDExIDIyNy41NTcgMTM4LjI4MyAyMDIuOTc4IDEzOC4yODMgMTc2VjgwQzEzOC4yODMgNjIuMzI2OSAxNTIuNjEgNDggMTcwLjI4MyA0OFoiIGZpbGw9IiNGRjk5MjIiLz4KPHBhdGggZD0iTTMwNSAzNkMzMDUgNDIuNjI3NCAzMTAuMzczIDQ4IDMxNyA0OEgzNDIuOTc5QzM2MC42NTIgNDggMzc0Ljk3OCA2Mi4zMjY5IDM3NC45NzggODBWMTc2QzM3NC45NzggMjAyLjk3OCAzODUuMjUxIDIyNy41NTcgNDAyLjA5OCAyNDYuMDM5QzQwNy4xNTMgMjUxLjU4NCA0MDcuMTUzIDI2MC40MTYgNDAyLjA5OCAyNjUuOTYxQzM4NS4yNTEgMjg0LjQ0MyAzNzQuOTc4IDMwOS4wMjIgMzc0Ljk3OCAzMzZWNDMyQzM3NC45NzggNDQ5LjY3MyAzNjAuNjUyIDQ2NCAzNDIuOTc5IDQ2NEgzMTdDMzEwLjM3MyA0NjQgMzA1IDQ2OS4zNzMgMzA1IDQ3NlY1MDBDMzA1IDUwNi42MjcgMzEwLjM3MyA1MTIgMzE3IDUxMkgzNDIuOTc5QzM4Ny4xNjEgNTEyIDQyMi45NzggNDc2LjE4MyA0MjIuOTc4IDQzMlYzMzZDNDIyLjk3OCAzMDUuMDcyIDQ0OC4wNTEgMjgwIDQ3OC45NzkgMjgwSDQ5MEM0OTYuNjI3IDI4MCA1MDIgMjc0LjYyOCA1MDIgMjY4VjI0NEM1MDIgMjM3LjM3MyA0OTYuNjI4IDIzMiA0OTAgMjMyTDQ3OC45NzkgMjMyQzQ0OC4wNTEgMjMyIDQyMi45NzggMjA2LjkyOCA0MjIuOTc4IDE3NlY4MEM0MjIuOTc4IDM1LjgxNzIgMzg3LjE2MSAwIDM0Mi45NzkgMEgzMTdDMzEwLjM3MyAwIDMwNSA1LjM3MjU4IDMwNSAxMlYzNloiIGZpbGw9IiNGRjk5MjIiLz4KPC9nPgo8ZGVmcz4KPGNsaXBQYXRoIGlkPSJjbGlwMF8xMTcxXzQ0MSI+CjxyZWN0IHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBmaWxsPSJ3aGl0ZSIvPgo8L2NsaXBQYXRoPgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "displayName": "Code",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 5,
+          "name": "Development"
+        },
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 839,
+      "icon": "fa:clock",
+      "name": "n8n-nodes-base.scheduleTrigger",
+      "codex": {
+        "data": {
+          "alias": [
+            "Time",
+            "Scheduler",
+            "Polling",
+            "Cron",
+            "Interval"
+          ],
+          "resources": {
+            "generic": [],
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.scheduletrigger/"
+              }
+            ]
+          },
+          "categories": [
+            "Core Nodes"
+          ],
+          "nodeVersion": "1.0",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"trigger\",\"schedule\"]",
+      "defaults": {
+        "name": "Schedule Trigger",
+        "color": "#31C49F"
+      },
+      "iconData": {
+        "icon": "clock",
+        "type": "icon"
+      },
+      "displayName": "Schedule Trigger",
+      "typeVersion": 1,
+      "nodeCategories": [
+        {
+          "id": 9,
+          "name": "Core Nodes"
+        }
+      ]
+    },
+    {
+      "id": 1250,
+      "icon": "file:openAi.svg",
+      "name": "@n8n/n8n-nodes-langchain.openAi",
+      "codex": {
+        "data": {
+          "alias": [
+            "LangChain",
+            "ChatGPT",
+            "Sora",
+            "DallE",
+            "whisper",
+            "audio",
+            "transcribe",
+            "tts",
+            "assistant"
+          ],
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.openai/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Langchain"
+          ],
+          "subcategories": {
+            "AI": [
+              "Agents",
+              "Miscellaneous",
+              "Root Nodes"
+            ]
+          }
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "OpenAI"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MCA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTM2Ljg2NzEgMTYuMzcxOEMzNy43NzQ2IDEzLjY0OCAzNy40NjIxIDEwLjY2NDIgMzYuMDEwOCA4LjE4NjYxQzMzLjgyODIgNC4zODY1MyAyOS40NDA3IDIuNDMxNDkgMjUuMTU1NiAzLjM1MTUxQzIzLjI0OTMgMS4yMDM5NiAyMC41MTA1IC0wLjAxNzMxNDggMTcuNjM5MiAwLjAwMDE4NTUzM0MxMy4yNTkxIC0wLjAwOTgxNDY4IDkuMzcyNzMgMi44MTAyNSA4LjAyNTIgNi45Nzc4M0M1LjIxMTM5IDcuNTU0MSAyLjc4MjU4IDkuMzE1MzggMS4zNjEzIDExLjgxMTdDLTAuODM3NDkzIDE1LjYwMTggLTAuMzM2MjMyIDIwLjM3OTQgMi42MDEzMyAyMy42Mjk0QzEuNjkzODEgMjYuMzUzMiAyLjAwNjMyIDI5LjMzNzEgMy40NTc2IDMxLjgxNDZDNS42NDAxNSAzNS42MTQ3IDEwLjAyNzcgMzcuNTY5NyAxNC4zMTI4IDM2LjY0OTdDMTYuMjE3OSAzOC43OTczIDE4Ljk1NzkgNDAuMDE4NSAyMS44MjkyIDM5Ljk5OThDMjYuMjExOCA0MC4wMTEgMzAuMDk5NCAzNy4xODg1IDMxLjQ0NjkgMzMuMDE3MUMzNC4yNjA4IDMyLjQ0MDkgMzYuNjg5NiAzMC42Nzk2IDM4LjExMDggMjguMTgzM0M0MC4zMDcxIDI0LjM5MzIgMzkuODA0NiAxOS42MTk0IDM2Ljg2ODMgMTYuMzY5M0wzNi44NjcxIDE2LjM3MThaTTIxLjgzMTcgMzcuMzg2QzIwLjA3OCAzNy4zODg1IDE4LjM3OTIgMzYuNzc0NyAxNy4wMzI5IDM1LjY1MDlDMTcuMDk0MSAzNS42MTg1IDE3LjIwMDQgMzUuNTU5NyAxNy4yNjkxIDM1LjUxNzJMMjUuMjM0MyAzMC45MTcxQzI1LjY0MTggMzAuNjg1OCAyNS44OTE4IDMwLjI1MjEgMjUuODg5MyAyOS43ODMzVjE4LjU1NDNMMjkuMjU1NiAyMC40OTgxQzI5LjI5MTkgMjAuNTE1NiAyOS4zMTU3IDIwLjU1MDYgMjkuMzIwNyAyMC41OTA2VjI5Ljg4OTZDMjkuMzE1NyAzNC4wMjQ3IDI1Ljk2NjggMzcuMzc3MiAyMS44MzE3IDM3LjM4NlpNNS43MjY0IDMwLjUwNzFDNC44NDc2MyAyOC45ODk2IDQuNTMxMzcgMjcuMjEwOCA0LjgzMjYzIDI1LjQ4NDVDNC44OTEzOCAyNS41MTk1IDQuOTk1MTMgMjUuNTgzMiA1LjA2ODg4IDI1LjYyNTdMMTMuMDM0MSAzMC4yMjU4QzEzLjQzNzggMzAuNDYyMSAxMy45Mzc4IDMwLjQ2MjEgMTQuMzQyOCAzMC4yMjU4TDI0LjA2NjggMjQuNjEwN1YyOC40OTgzQzI0LjA2OTMgMjguNTM4MyAyNC4wNTA1IDI4LjU3NyAyNC4wMTkzIDI4LjYwMkwxNS45Njc5IDMzLjI1MDlDMTIuMzgxNSAzNS4zMTU5IDcuODAxNDQgMzQuMDg4NCA1LjcyNzY1IDMwLjUwNzFINS43MjY0Wk0zLjYzMDEgMTMuMTIwNUM0LjUwNTEyIDExLjYwMDQgNS44ODY0IDEwLjQzNzkgNy41MzE0NCA5LjgzNDE1QzcuNTMxNDQgOS45MDI5IDcuNTI3NjkgMTAuMDI0MSA3LjUyNzY5IDEwLjEwOTJWMTkuMzEwNkM3LjUyNTE5IDE5Ljc3ODEgNy43NzUxOSAyMC4yMTE5IDguMTgxNDUgMjAuNDQzMUwxNy45MDU0IDI2LjA1N0wxNC41MzkxIDI4LjAwMDhDMTQuNTA1MyAyOC4wMjMzIDE0LjQ2MjggMjguMDI3IDE0LjQyNTMgMjguMDEwOEw2LjM3MjY2IDIzLjM1ODJDMi43OTM4MyAyMS4yODU2IDEuNTY2MzEgMTYuNzA2OCAzLjYyODg1IDEzLjEyMTdMMy42MzAxIDEzLjEyMDVaTTMxLjI4ODIgMTkuNTU2OUwyMS41NjQyIDEzLjk0MTdMMjQuOTMwNiAxMS45OTkyQzI0Ljk2NDMgMTEuOTc2NyAyNS4wMDY4IDExLjk3MjkgMjUuMDQ0MyAxMS45ODkyTDMzLjA5NyAxNi42MzhDMzYuNjgyMSAxOC43MDkzIDM3LjkxMDggMjMuMjk1NyAzNS44Mzk1IDI2Ljg4MDhDMzQuOTYzMyAyOC4zOTgzIDMzLjU4MzIgMjkuNTYwOCAzMS45Mzk1IDMwLjE2NThWMjAuNjg5NEMzMS45NDMyIDIwLjIyMTkgMzEuNjk0NSAxOS43ODk0IDMxLjI4OTQgMTkuNTU2OUgzMS4yODgyWk0zNC42MzgzIDE0LjUxNDJDMzQuNTc5NSAxNC40NzggMzQuNDc1OCAxNC40MTU1IDM0LjQwMiAxNC4zNzNMMjYuNDM2OCA5Ljc3Mjg5QzI2LjAzMzEgOS41MzY2NCAyNS41MzMxIDkuNTM2NjQgMjUuMTI4MSA5Ljc3Mjg5TDE1LjQwNDEgMTUuMzg4VjExLjUwMDRDMTUuNDAxNiAxMS40NjA0IDE1LjQyMDQgMTEuNDIxNyAxNS40NTE2IDExLjM5NjdMMjMuNTAzIDYuNzUxNThDMjcuMDg5NCA0LjY4Mjc5IDMxLjY3NDUgNS45MTQwNiAzMy43NDIgOS41MDE2NEMzNC42MTU4IDExLjAxNjcgMzQuOTMyIDEyLjc5MDUgMzQuNjM1OCAxNC41MTQySDM0LjYzODNaTTEzLjU3NDEgMjEuNDQzMUwxMC4yMDY1IDE5LjQ5OTRDMTAuMTcwMiAxOS40ODE5IDEwLjE0NjUgMTkuNDQ2OCAxMC4xNDE1IDE5LjQwNjhWMTAuMTA3OUMxMC4xNDQgNS45Njc4MSAxMy41MDI4IDIuNjEyNzQgMTcuNjQyOSAyLjYxNTI0QzE5LjM5NDIgMi42MTUyNCAyMS4wODkyIDMuMjMwMjUgMjIuNDM1NSA0LjM1MDI4QzIyLjM3NDMgNC4zODI3OCAyMi4yNjkzIDQuNDQxNTMgMjIuMTk5MiA0LjQ4NDAzTDE0LjIzNDEgOS4wODQxM0MxMy44MjY2IDkuMzE1MzggMTMuNTc2NiA5Ljc0Nzg5IDEzLjU3OTEgMTAuMjE2N0wxMy41NzQxIDIxLjQ0MDZWMjEuNDQzMVpNMTUuNDAyOSAxNy41MDA2TDE5LjczNDIgMTQuOTk5M0wyNC4wNjU1IDE3LjQ5OTNWMjIuNTAwN0wxOS43MzQyIDI1LjAwMDdMMTUuNDAyOSAyMi41MDA3VjE3LjUwMDZaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K"
+      },
+      "displayName": "OpenAI",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 25,
+          "name": "AI"
+        },
+        {
+          "id": 26,
+          "name": "Langchain"
+        }
+      ]
+    },
+    {
+      "id": 1304,
+      "icon": "file:perplexity.svg",
+      "name": "n8n-nodes-base.perplexity",
+      "codex": {
+        "data": {
+          "resources": {
+            "primaryDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-langchain.perplexity/"
+              }
+            ],
+            "credentialDocumentation": [
+              {
+                "url": "https://docs.n8n.io/integrations/builtin/credentials/perplexity/"
+              }
+            ]
+          },
+          "categories": [
+            "AI",
+            "Utility"
+          ],
+          "nodeVersion": "1.1",
+          "codexVersion": "1.0"
+        }
+      },
+      "group": "[\"transform\"]",
+      "defaults": {
+        "name": "Perplexity"
+      },
+      "iconData": {
+        "type": "file",
+        "fileBuffer": "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBzdGFuZGFsb25lPSJubyI/Pgo8IURPQ1RZUEUgc3ZnIFBVQkxJQyAiLS8vVzNDLy9EVEQgU1ZHIDIwMDEwOTA0Ly9FTiIKICJodHRwOi8vd3d3LnczLm9yZy9UUi8yMDAxL1JFQy1TVkctMjAwMTA5MDQvRFREL3N2ZzEwLmR0ZCI+CjxzdmcgdmVyc2lvbj0iMS4wIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciCiB3aWR0aD0iMjcwLjAwMDAwMHB0IiBoZWlnaHQ9IjI3MC4wMDAwMDBwdCIgdmlld0JveD0iMCAwIDI3MC4wMDAwMDAgMjcwLjAwMDAwMCIKIHByZXNlcnZlQXNwZWN0UmF0aW89InhNaWRZTWlkIG1lZXQiPgo8bWV0YWRhdGE+CkNyZWF0ZWQgYnkgcG90cmFjZSAxLjE0LCB3cml0dGVuIGJ5IFBldGVyIFNlbGluZ2VyIDIwMDEtMjAxNwo8L21ldGFkYXRhPgo8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLjAwMDAwMCwyNzAuMDAwMDAwKSBzY2FsZSgwLjEwMDAwMCwtMC4xMDAwMDApIgpmaWxsPSIjMDAwMDAwIiBzdHJva2U9Im5vbmUiPgo8cGF0aCBkPSJNMTg1IDI2OTEgYy04NiAtMjEgLTE1OCAtOTMgLTE3NSAtMTc1IC03IC0zNSAtMTAgLTQxNSAtOCAtMTE5NiAzCi0xMjc2IC0yIC0xMTgwIDczIC0xMjUzIDIwIC0yMCA1NCAtNDIgNzQgLTQ5IDUzIC0xOSAyMzQ5IC0xOSAyNDAyIDAgMjAgNyA1NAoyOSA3NCA0OSA3NSA3MyA3MCAtMjMgNzMgMTI1MyAyIDgxNyAtMSAxMTYxIC05IDEyMDAgLTkgNDYgLTE5IDYzIC02NCAxMDYKLTQyIDQxIC02MyA1NCAtMTA0IDYzIC01OSAxMyAtMjI4NCAxNCAtMjMzNiAyeiBtNzg2IC01NDcgbDMxNCAtMjU1IDMgMjU1IDIKMjU2IDYwIDAgNjAgMCAyIC0yNTUgMyAtMjU2IDMxNSAyNTcgMzE1IDI1NyAzIC0yOTIgMiAtMjkxIDEzNSAwIDEzNSAwIDAKLTQ1MCAwIC00NTAgLTEzNSAwIC0xMzUgMCAtMiAtMjk2IC0zIC0yOTUgLTMxMiAyNzUgYy0xNzIgMTUyIC0zMTUgMjc2IC0zMTgKMjc2IC0zIDAgLTUgLTEzMyAtNSAtMjk1IGwwIC0yOTUgLTYwIDAgLTYwIDAgMCAyOTUgYzAgMTYyIC0yIDI5NSAtNSAyOTUgLTMKMCAtMTQ2IC0xMjQgLTMxOCAtMjc2IGwtMzEyIC0yNzYgLTMgMjk2IC0yIDI5NiAtMTM1IDAgLTEzNSAwIDAgNDUwIDAgNDUwCjEzNSAwIDEzNSAwIDAgMjkwIGMwIDE2MCAyIDI5MCA0IDI5MCAyIDAgMTQ1IC0xMTUgMzE3IC0yNTZ6Ii8+CjxwYXRoIGQ9Ik03ODAgMTk4MSBsMCAtMTYxIDIxNSAwIDIxNiAwIC0yMDMgMTUxIGMtMTEyIDg0IC0yMDkgMTU2IC0yMTUgMTYyCi0xMCA3IC0xMyAtMjQgLTEzIC0xNTJ6Ii8+CjxwYXRoIGQ9Ik0xNzA2IDE5ODIgbC0yMTAgLTE1NyAyMDkgLTMgYzExNCAtMSAyMTAgLTEgMjEyIDEgMiAyIDIgNzQgMSAxNjAKbC0zIDE1NiAtMjA5IC0xNTd6Ii8+CjxwYXRoIGQ9Ik01MTAgMTM3MCBsMCAtMzMwIDcwIDAgNzAgMCAwIDg4IDAgODggMzggMzUgYzIwIDIwIDE0NiAxMjcgMjgwIDIzOQoxMzMgMTExIDI0MiAyMDQgMjQyIDIwNiAwIDIgLTE1NyA0IC0zNTAgNCBsLTM1MCAwIDAgLTMzMHoiLz4KPHBhdGggZD0iTTE0OTAgMTY5NiBjMCAtMiAxMjYgLTEwMiAyODAgLTIyMyBsMjgwIC0yMTggMCAtMTA3IDAgLTEwOCA3MCAwIDcwCjAgMCAzMzAgMCAzMzAgLTM1MCAwIGMtMTkyIDAgLTM1MCAtMiAtMzUwIC00eiIvPgo8cGF0aCBkPSJNMTAyOCAxMzkyIGwtMjQ3IC0yMTcgMCAtMjgzIGMtMSAtMjMzIDEgLTI4MiAxMiAtMjc1IDggNCAxMjIgMTA0CjI1NSAyMjIgbDI0MiAyMTQgMCAyNzggYzAgMTU0IC0zIDI3OSAtNyAyNzkgLTUgMCAtMTE5IC05OCAtMjU1IC0yMTh6Ii8+CjxwYXRoIGQ9Ik0xNDEwIDEzMzIgbDAgLTI3OSAyNDIgLTIxNCBjMTMzIC0xMTggMjQ3IC0yMTggMjU1IC0yMjIgMTEgLTcgMTMKNDIgMTIgMjc1IGwwIDI4MyAtMjQ1IDIxNSBjLTEzNSAxMTggLTI0OSAyMTcgLTI1NCAyMTggLTYgMiAtMTAgLTEwMSAtMTAKLTI3NnoiLz4KPC9nPgo8L3N2Zz4K"
+      },
+      "displayName": "Perplexity",
+      "typeVersion": 2,
+      "nodeCategories": [
+        {
+          "id": 7,
+          "name": "Utility"
+        },
+        {
+          "id": 25,
+          "name": "AI"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    {
+      "id": 33,
+      "name": "Social Media"
+    },
+    {
+      "id": 51,
+      "name": "Multimodal AI"
+    }
+  ],
+  "image": []
+}
