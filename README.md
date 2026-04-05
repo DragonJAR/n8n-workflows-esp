@@ -4,7 +4,7 @@
 
 # Coleccion de Flujos de Trabajo de n8n
 
-Este repositorio es un fork de la iniciativa original de [@Zie619](https://github.com/Zie619/n8n-workflows) y contiene la coleccion mas grande de workflows de n8n en espanol, con mas de 10,000 automatizaciones listas para usar.
+Este repositorio es un fork de la iniciativa para recolectar y clasificar la mayor cantidad de flujos de trabajo (workflows) de n8n procedentes de diversas fuentes.
 
 ## Mejoras Implementadas
 - Buscador de Workflows disponible con 10,405 workflows

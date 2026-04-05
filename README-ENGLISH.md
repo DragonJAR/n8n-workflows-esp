@@ -4,7 +4,7 @@
 
 # n8n Workflows Collection
 
-This repository is a fork of the original initiative by [@Zie619](https://github.com/Zie619/n8n-workflows).
+This repository is a fork of the initiative to collect and classify the largest amount of n8n workflows from various sources.
 
 ## Improvements Implemented
 - Workflow search with 10,405 workflows
