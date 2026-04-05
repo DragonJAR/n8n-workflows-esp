@@ -76,43 +76,43 @@ _Total de workflows: 10405_
   - **Descripción:** Este workflow automatiza el manejo de nuevas respuestas de leads recibidas en Gmail. Captura correos con una etiqueta específica, analiza el mensaje usando IA para determinar sentimiento, intención, urgencia, próxima acción y prioridad, y luego decide si se necesita seguimiento. Si es necesario, crea tareas en HubSpot, notifica al equipo de ventas vía Slack y registra todos los detalles en Google Sheets para rastreo.
   - **Complejidad:** Alta (varios nodos)
 
-- **10411-Analyze-form-feedback-with-GPT-4-sync-tasks-to-Monday-ClickUp-HubSpot.json**
+- **02511-Analyze-form-feedback-with-GPT-4-sync-tasks-to-Monday-ClickUp-HubSpot.json**
   - **Descripción:** Este workflow automatiza la gestión de comentarios de clientes capturados a través de un formulario. Analiza los comentarios con IA para sentimiento e información, luego crea tareas estructuradas en Monday.com, ClickUp y HubSpot, asegurando que cada preocupación del cliente sea categorizada, priorizada y asignada al equipo correcto.
   - **Complejidad:** Media (varios nodos)
 
-- **10612-Automate-support-ticket-classification-routing-from-HubSpot-to-Jira-with-GPT.json**
+- **02712-Automate-support-ticket-classification-routing-from-HubSpot-to-Jira-with-GPT.json**
   - **Descripción:** Este workflow está diseñado para equipos de soporte al cliente, operaciones y ventas que gestionan mensajes de clientes a través de HubSpot y usan Jira para gestión interna de tareas. Automatiza la clasificación de tickets de soporte en HubSpot usando agentes de IA, detecta el sentimiento, los enruta a la cola correcta de Jira para que el equipo técnico correspondiente los maneje, y mantiene a los clientes informados.
   - **Complejidad:** Media (varios nodos)
 
-- **10727-Quick-HubSpot-contact-lookup-in-Slack-for-sales-support-teams.json**
+- **02827-Quick-HubSpot-contact-lookup-in-Slack-for-sales-support-teams.json**
   - **Descripción:** Este workflow se inicia cuando un usuario activa un comando personalizado en Slack. Verifica si se proporcionó un mensaje válido (dirección de correo o ID de contacto de HubSpot). Basado en la entrada, busca HubSpot para el contacto ya sea por correo electrónico o por ID. Una vez encontrado el contacto, el workflow formatea los detalles en una tarjeta limpia amigable para Slack y la publica de vuelta en el canal de Slack.
   - **Complejidad:** Baja (varios nodos)
 
-- **10802-Lead-routing-system-Qualify-direct-Typeform-leads-to-HubSpot-Sheets-Airtable.json**
+- **02902-Lead-routing-system-Qualify-direct-Typeform-leads-to-HubSpot-Sheets-Airtable.json**
   - **Descripción:** Este workflow captura nuevos leads de Typeform, verifica su presupuesto y los enruta según prioridad y origen. Los leads con presupuesto mayor de $5,000 se marcan como alta prioridad y se envían a HubSpot con una tarea de seguimiento para ventas. Los leads de Facebook se registran en Google Sheets para análisis de marketing, mientras los leads de SurveyMonkey se almacenan en Airtable para seguimiento de campañas. Finalmente, cada lead recibe un correo de confirmación automática de Gmail.
   - **Complejidad:** Media (13 nodos)
 
-- **10836-Qualify-high-budget-leads-Typeform-to-HubSpot-Google-Sheets-Slack-alerts.json**
+- **02936-Qualify-high-budget-leads-Typeform-to-HubSpot-Google-Sheets-Slack-alerts.json**
   - **Descripción:** Este workflow captura nuevos leads de Typeform, verifica instantáneamente si su presupuesto supera los $5,000 y los prioriza para seguimiento de ventas acelerado. Los leads de alto presupuesto se enriquecen en HubSpot como contactos con propiedades detalladas y se crea una tarea de seguimiento de alta prioridad. Los leads se enrutan según su origen (Facebook o SurveyMonkey) para almacenamiento apropiado.
   - **Complejidad:** Media (varios nodos)
 
-- **10986-Enrich-HubSpot-contacts-with-LinkedIn-profiles-using-SerpAPI-Google-Docs-and-AI.json**
+- **06986-Enrich-HubSpot-contacts-with-LinkedIn-profiles-using-SerpAPI-Google-Docs-and-AI.json**
   - **Descripción:** Disparadores: HubSpot Trigger, Trigger manual, Leer Google Doc, Agente IA. Flujo: HubSpot detecta creación/actualización → Agente lee Google Doc con contexto sobre el contacto → Agent usa LinkedIn SerpAPI para encontrar perfiles públicos de decisores → Enrich datos → Actualiza HubSpot con información (LinkedIn, email, teléfono, cargo). Notifica Slack con resumen. Resuelve problema de información incompleta con LinkedIn SerpAPI (perfiles privados o no encontrados).
   - **Complejidad:** Alta (varios nodos)
 
-- **10988-Automate-Calendly-to-HubSpot-contact-updates-meeting-logging.json**
+- **06988-Automate-Calendly-to-HubSpot-contact-updates-meeting-logging.json**
   - **Descripción:** Este workflow sincroniza automáticamente las reservas de reuniones de Calendly en HubSpot CRM. Verifica si el asistente ya existe como contacto en HubSpot. Extrae los detalles del asistente y la reunión. Crea o actualiza el contacto en HubSpot. Registra el compromiso de la reunión en el contacto de HubSpot. Asegura que cada reserva vinculada al contacto correcto en HubSpot.
   - **Complejidad:** Media (varios nodos)
 
-- **11015-Automate-sales-follow-ups-with-GPT-4o-mini-HubSpot-Slack-Teams-Telegram.json**
+- **07015-Automate-sales-follow-ups-with-GPT-4o-mini-HubSpot-Slack-Teams-Telegram.json**
   - **Descripción:** Este workflow genera automáticamente mensajes de seguimiento personalizados para leads o clientes después de interacciones clave como demostraciones o llamadas de ventas. Enriquece los detalles del contacto desde HubSpot (o Monday.com opcionalmente), usa GPT-4o-mini para redactar un correo de seguimiento profesional adaptado al contexto del prospecto, y distribuye el mensaje a través de múltiples canales (Slack para equipos internos, Teams para comunicación corporativa, Telegram para notificaciones personales).
   - **Complejidad:** Media (varios nodos)
 
-- **11018-Bidirectional-company-sync-between-ProspectPro-and-HubSpot-with-status-tracking.json**
+- **07018-Bidirectional-company-sync-between-ProspectPro-and-HubSpot-with-status-tracking.json**
   - **Descripción:** Esta plantilla sincroniza prospectos desde ProspectPro a HubSpot. Verifica si una empresa ya existe en HubSpot (por ID de ProspectPro o por dominio), luego actualiza el registro o crea uno nuevo. Los resultados de sincronización se registran de vuelta en ProspectPro con etiquetas (HubspotSynced, HubspotSyncFailed) para evitar duplicados y marcar errores, asegurando integraciones confiables y repetibles.
   - **Complejidad:** Media (29 nodos)
 
-- **11111-Automate-lead-qualification-follow-up-with-Gemini-HubSpot-Zoom-Mailchimp.json**
+- **07111-Automate-lead-qualification-follow-up-with-Gemini-HubSpot-Zoom-Mailchimp.json**
   - **Descripción:** Automatiza la ingesta, calificación y seguimiento de leads. Los leads calificados como CALIFICADOS reciben: reunión programada, detalles de Zoom, confirmación por correo y actualización en CRM. Los leads NO CALIFICADOS reciben: secuencia de seguimiento por correo, actualización en CRM y recordatorio de 30 días. Usa Gemini para inteligencia, Zoom para videoconferencias y Mailchimp para emails masivos.
   - **Complejidad:** Alta (varios nodos)
 
@@ -152,11 +152,11 @@ _Total de workflows: 10405_
   - **Descripción:** Este workflow extrae deals y sus notas de Pipedrive, limpia los IDs de etapa en nombres legibles, agrega la información y usa OpenAI para generar un resumen diario de tu pipeline de ventas. Configuración: Conectar Pipedrive y OpenAI. Uso: Análisis de pipeline, informes ejecutivos, detección de tendencias. Ideal para revisiones diarias y reuniones de revisión de pipeline.
   - **Complejidad:** Media (varios nodos)
 
-- **10429-Track-Pipedrive-deals-in-Google-Sheets-for-sales-pipeline-reporting.json**
+- **02529-Track-Pipedrive-deals-in-Google-Sheets-for-sales-pipeline-reporting.json**
   - **Descripción:** Este workflow extrae deals de Pipedrive, los categoriza por etapa y los registra en una hoja de Google para informes y rastreo de pipeline de ventas. Ideal para seguimiento de rendimiento, proyecciones y análisis de tendencias de ventas.
   - **Complejidad:** Media (varios nodos)
 
-- **10812-Connect-Pipedrive-deal-outcomes-to-GA4-Google-Ads-via-Measurement-Protocol.json**
+- **02912-Connect-Pipedrive-deal-outcomes-to-GA4-Google-Ads-via-Measurement-Protocol.json**
   - **Descripción:** Tu publicidad y GA4 a menudo optimizan para eventos superficiales (envíos de formularios, clics) mientras el valor real está en Pipedrive (Qualified, Closed Won). Esta plantilla convierte los hitos de Pipedrive en eventos de servidor GA4, asegurando que tus campañas optimicen para ingresos, no solo clics baratos. Sin código, sin configuraciones de servidor complejas: busca `client_id` en los datos del evento de contacto de Pipedrive, envía a Measurement Protocol con parámetros de campaña, mapea resultado de conversión. Ideal para optimización de ROAS en B2B y attribution multicanal.
   - **Complejidad:** Media (varios nodos)
 
@@ -176,7 +176,7 @@ _Total de workflows: 10405_
 
 #### Zoho
 
-- **10809-Automatic-email-categorization-labeling-in-Zoho-Mail-with-GPT-4o-mini.json**
+- **02909-Automatic-email-categorization-labeling-in-Zoho-Mail-with-GPT-4o-mini.json**
   - **Descripción:** Categorización y etiquetado automático de correos con IA en Zoho Mail. Esta plantilla de n8n demuestra cómo usar la clasificación de texto con IA para categorizar automáticamente correos entrantes en Zoho Mail y aplicar la etiqueta correcta (Soporte, Facturación, RRHH, etc.). Ahorra tiempo manteniendo tu bandeja de entrada organizada, asegura que los correos se enrutan a la categoría correcta y mejora la eficiencia del equipo de soporte.
   - **Complejidad:** Media (varios nodos)
 
@@ -276,104 +276,104 @@ _Total de workflows: 10405_
   - **Descripción:** Generador de correos fríos personalizados para outreach. Este workflow usa IA (Google Gemini) para generar correos de cold outreach hiper-personalizados investigando sitios web de prospectos y empresas. Combina múltiples fuentes: búsqueda web, análisis de IA, integración con CRM (Smartlead), almacenamiento en Google Sheets. Funcionalidades: investigación automática, análisis de sitio web, redacción de correos personalizados, CRM integrado, rastreo de campaña.
   - **Complejidad:** Alta (varios nodos)
 
-- **10436-Enrich-Mondaycom-leads-draft-personalized-emails-with-Explorium-MCP-and-GPT-41.json**
+- **02536-Enrich-Mondaycom-leads-draft-personalized-emails-with-Explorium-MCP-and-GPT-41.json**
   - **Descripción:** Enriquece leads de Monday.com y redacta correos personalizados usando IA. Transforma tus inbound leads en oportunidades calentadas mediante análisis contextual profundo de cada prospecto, investigación de empresa y generación de correos personalizados de alta conversión. Usa Explorium MCP para investigación B2B, GPT-4.1 para redacción de correos y Monday.com para gestión de leads.
   - **Complejidad:** Alta (varios nodos)
 
-- **10439-Extract-business-leads-from-Gmail-to-Google-Sheets-with-Slack-notifications.json**
+- **02539-Extract-business-leads-from-Gmail-to-Google-Sheets-with-Slack-notifications.json**
   - **Descripción:** Este workflow permite extraer leads potenciales de tu bandeja de entrada. La idea del "reverse outreach" se basa en la noción de que el próximo gran cliente o socio comercial puede estar esperando ser descubierto en tu bandeja de entrada. La automatización tiene dos flujos: 1) Extrae correos históricos en masa 2) Ejecutar una búsqueda programada diaria (configurada para ejecutarse cada mañana) que busca nuevos leads. El workflow analiza inteligentemente cada correo para identificar oportunidades, extrae información del cliente y mantener un registro centralizado.
   - **Complejidad:** Alta (varios nodos)
 
-- **10500-LinkedIn-lead-generation-Auto-DM-system-with-comment-triggers-using-Unipile.json**
+- **02600-LinkedIn-lead-generation-Auto-DM-system-with-comment-triggers-using-Unipile.json**
   - **Descripción:** Sistema de generación de leads de LinkedIn automatizado. Este workflow monitorea publicaciones de LinkedIn en busca de palabras clave específicas, envía mensajes directos con lead magnets a usuarios comprometidos, gestiona el estado de las solicitudes de conexión y evita duplicados mediante un registro de base de datos. Ideal para agencias de crecimiento que buscan automatizar el outreach en LinkedIn sin violar las reglas de la plataforma.
   - **Complejidad:** Alta (70+ nodos, requiere nodos comunitarios)
 
-- **10527-Restaurant-lead-generation-from-Google-Maps-with-Apify-Airtable-AI-newsletter.json**
+- **02627-Restaurant-lead-generation-from-Google-Maps-with-Apify-Airtable-AI-newsletter.json**
   - ** estilo:** Este workflow contiene nodos comunitarios y solo es compatible con instancias autoalojadas de n8n.
   - **Descripción:** Generación de leads de restaurantes automatizada con newsletter de IA. Scraping de Google Maps para encontrar restaurantes, filtrado por calidad (ratings, etc.), enriquecimiento con IA, scraping de sitios web (menú, horarios, precios), generación de newsletter tipo Morning Brew personalizada y envío. Automatización completa del flujo: descubrimiento → análisis → enriquecimiento → contenido → filtrado → generación de newsletter → almacenamiento en Airtable. Requiere múltiples APIs (Apify, SerpAPI, OpenAI).
   - **Complejidad:** Alta (varios nodos)
 
-- **10549-Extract-business-emails-from-Google-Maps-to-Google-Sheets-for-lead-generation.json**
+- **02649-Extract-business-emails-from-Google-Maps-to-Google-Sheets-for-lead-generation.json**
   - **Descripción:** Generador de leads de correos de negocios gratuito desde Google Maps. Este workflow construye un sistema completamente gratuito de scraping de correos de Google Maps usando HTTP requests y JavaScript, sin requerir APIs de terceros. Busca listados de negocios en Google Maps por consultas personalizadas (ej. "abogados en Miami"), extrae sitios web, extrae correos de negocios y los exporta directamente a Google Sheets. Ideal para generar miles de leads específicos por industria.
   - **Complejidad:** Alta (varios nodos)
 
-- **10614-LinkedIn-lead-finder-Gemini-powered-personalized-outreach-with-Google-Sheets.json**
+- **02714-LinkedIn-lead-finder-Gemini-powered-personalized-outreach-with-Google-Sheets.json**
   - **Descripción:** Automatiza el proceso de encontrar leads de LinkedIn y redactar mensajes de outreach personalizados. Toma entrada del usuario (palabras clave + propósito), genera una consulta de búsqueda booleana optimizada para LinkedIn usando Gemini, extrae hasta 20 resultados vía Google Custom Search API, los registra en Google Sheets y luego redacta mensajes de outreach personalizados para cada lead. Finalmente, el workflow actualiza la hoja de Google con los mensajes redactados para fácil revisión y envío.
   - **Complejidad:** Alta (varios nodos)
 
-- **10630-Google-Maps-to-Airtable-lead-scraper-with-GPT-contact-extraction-from-impressum.json**
+- **02730-Google-Maps-to-Airtable-lead-scraper-with-GPT-contact-extraction-from-impressum.json**
   - **Descripción:** Workflow automatizado de descubrimiento de empresas en diferentes ciudades, extracción de sus datos de contacto y almacenamiento en Airtable. 1) Bucle por ciudades en Airtable con búsqueda personalizada (ej. "agencia de SEO en Berlín") 2) Consulta Google Maps API para obtener resultados 3) Extrae datos de contacto (dirección, sitio web, teléfono) 4) Extrae datos de contacto adicionales desde el sitio web (usando Scrape.do para datos de contacto e IA para extraer email de impressum) 5) Crear o actualizar registro en Airtable. Funcionalidades: búsqueda de negocios personalizada, extracción de datos de contacto de múltiples fuentes, generación de base de datos B2B. Ideal para listas de prospección sistemática y enriquecimiento de datos.
   - **Complejidad:** Alta (varios nodos)
 
-- **10644-LeadChat-Booker-conversational-lead-capture-that-schedules.json**
+- **02744-LeadChat-Booker-conversational-lead-capture-that-schedules.json**
   - **Descripción:** LeadBot conversacional con captura y programación. Captura información paso a paso a través de chat amigable, valida entradas, verifica duplicados en Salesforce (actualiza si existe, crea si es nuevo), notifica al equipo internamente vía Slack y envía confirmación por correo al cliente. Si el prospecto califica, programa reunión con Zoom y añade a Mailchimp. Si no califica, envía secuencia de seguimiento y recordatorio de 30 días.
   - **Complejidad:** Alta (varios nodos)
 
-- **10652-Auto-save-Instagram-leads-to-Google-Sheets.json**
+- **02752-Auto-save-Instagram-leads-to-Google-Sheets.json**
   - **Descripción:** Captura automática de leads de Instagram en Google Sheets. Este workflow captura automáticamente leads enviados a través del formulario de Instagram de Meta y los guarda directamente en una hoja de Google. Asegura que cada nuevo lead se registre instantáneamente, creando una base de datos centralizada para equipos de marketing y ventas. Ideal para campañas de marketing en Instagram, influencers y equipos de ventas que necesitan captura automatizada de leads.
   - **Complejidad:** Baja (varios nodos)
 
-- **10701-Generate-B2B-lead-opportunities-from-websites-with-Brightdata-OpenRouter-AI.json**
+- **02801-Generate-B2B-lead-opportunities-from-websites-with-Brightdata-OpenRouter-AI.json**
   - **Descripción:** Identifica automáticamente oportunidades B2B desde sitios web de empresas. Analiza páginas de "About Us", "Team" y "Contact" para identificar puntos de dolor y necesidades, luego usa IA para generar un resumen estructurado de oportunidades de ventas. Usa Bright Data Web Unblocker para acceder a sitios web bloqueados o protegidos, OpenRouter para enrutamiento inteligente de LLMs avanzados (GPT-4, Claude, etc.). Resultado: resumen estructurado + enlaces directos a páginas relevantes. Ideal para SDRs y equipos de cuentas que investigan prospectos y necesitan identificación rápida de oportunidades.
   - **Complejidad:** Alta (varios nodos, requiere nodos comunitarios)
 
-- **10716-Email-new-leads-from-Google-Sheets-via-Outlook-on-a-schedule.json**
+- **02816-Email-new-leads-from-Google-Sheets-via-Outlook-on-a-schedule.json**
   - **Descripción:** Envía correos de outreach a nuevos leads en Google Sheets según una programación diaria. Este workflow lee una hoja de Google con leads no contactados, envía correos personalizados a cada uno usando plantillas variables (campo de asunto personalizado, cuerpo con datos del prospecto, nombre del remitente), marca cada lead como contactado en la hoja después de enviar para evitar correos duplicados. Diseñado para campañas de correo frío sistematizadas que respeten el tiempo de los prospectos y mantienen la integridad de tu marca.
   - **Complejidad:** Media (varios nodos)
 
-- **10725-Generate-AI-powered-sales-proposals-from-JotForm-leads-with-OpenAI-and-Google.json**
+- **02825-Generate-AI-powered-sales-proposals-from-JotForm-leads-with-OpenAI-and-Google.json**
   - **Descripción:** Generador automático de propuestas de ventas desde envíos de formularios JotForm. Este workflow usa IA para analizar respuestas de formulario y generar propuestas de ventas personalizadas y profesionales automáticamente. Procesa: 1) Recepción de envío JotForm 2) Análisis con IA del prospecto (necesidades, presupuesto, cronograma) 3) Generación de propuesta con IA (estructura profesional, precios, términos) 4) Creación de documento PDF y envío por correo 5) Seguimiento de propuestas en Google Drive. Ideal para empresas de servicios que necesitan automatizar su proceso de propuestas.
   - **Complejidad:** Alta (varios nodos)
 
-- **10785-Generate-and-research-sales-leads-with-Jina-AI-OpenAI-email-automation-via-Gmail.json**
+- **02885-Generate-and-research-sales-leads-with-Jina-AI-OpenAI-email-automation-via-Gmail.json**
   - **Descripción:** Genera leads listos para enviar y automatiza correos de outreach personalizados. Este workflow combina múltiples servicios para crear una solución de outbound B2B automatizada. Usa Google (Jina AI) para investigación de negocios, OpenAI para redacción de correos, Gmail para envío y Google Sheets para almacenamiento. Flujo de trabajo: investigación → redacción → envío → seguimiento → almacenamiento. Funcionalidades: investigación B2B, personalización de correos, gestión de campañas, CRM integrado.
   - **Complejidad:** Alta (varios nodos)
 
-- **10825-Research-business-leads-with-Perplexity-AI-save-to-Google-Sheets-using-OpenAI.json**
+- **02925-Research-business-leads-with-Perplexity-AI-save-to-Google-Sheets-using-OpenAI.json**
   - **Descripción:** Automatiza la investigación de nuevos leads en tu área objetivo y estructura los resultados para append en Google Sheets. Usa Perplexity para investigar negocios (ej. "cafeterías en esta ciudad"), limpia y estructura la información en JSON usando OpenAI, luego los agrega a Google Sheets. Ideal para equipos de ventas que hacen prospección geográfica y necesitan leads investigados y organizados.
   - **Complejidad:** Media (varios nodos)
 
-- **10863-Automate-B2B-lead-generation-email-campaigns-with-Google-Maps-SendGrid-AI.json**
+- **02963-Automate-B2B-lead-generation-email-campaigns-with-Google-Maps-SendGrid-AI.json**
   - **Descripción:** Automatiza el ciclo de vida completo de lead generation y email campaigns para B2B. Este workflow n8n-powered combina seis flujos especializados en uno: 1) Generación de leads desde Google Maps (scrapeo, enriquecimiento, almacenamiento) 2) Envío de campañas por correo (SendGrid) 3) Detección y clasificación de respuestas (Gmail, IA) 4) Reenvío y segmentación 5) Gestión de opt-outs y supresiones 6) Análisis de rendimiento 7) Base de datos centralizada (Google Sheets). Automatización completa de outbound: descubrimiento → enriquecimiento → outreach → clasificación → análisis → optimización. Ideal para equipos de outbound B2B que buscan automatización a escala.
   - **Complejidad:** Alta (varios nodos)
 
-- **10872-Deduplicate-lead-data-with-Google-Sheets-automated-email-alerts-log-management.json**
+- **02972-Deduplicate-lead-data-with-Google-Sheets-automated-email-alerts-log-management.json**
   - **Descripción:** Mantén tu base de datos de leads limpia y confiable con este workflow automatizado. Detecta automáticamente registros duplicados en tu hoja de Google, genera registros estructurados de logs para cada operación de limpieza, envía alertas de correo cuando se detectan problemas y mantiene un registro de auditoría completa. Ideal para bases de datos grandes donde múltiples usuarios o sistemas pueden actualizar registros simultáneamente. Funcionalidades: deduplicación en tiempo real, registro de auditoría, alertas por correo, gestión de historial.
   - **Complejidad:** Alta (varios nodos)
 
-- **10873-Business-hours-lead-response-system-with-Gmail-Google-Sheets-Telegram-alerts.json**
+- **02973-Business-hours-lead-response-system-with-Gmail-Google-Sheets-Telegram-alerts.json**
   - **Descripción:** Nunca dejes que tus leads esperen una respuesta profesional. Este workflow n8n-powered garantiza que cada consulta recibida por un formulario de tu sitio web reciba una respuesta oportuna y profesional, ya sea horario laboral o no. El workflow monitorea tu Google Sheet para nuevos formularios, verifica horarios de oficina configurados, verifica si es horario laboral (solo respuestas profesionales) y envía automáticamente correos personalizados con el horario apropiado. Si es horario no laboral, envía un mensaje amable informando que responderemos en horario laboral. Garantiza respuestas rápidas y profesionales para mejorar la experiencia del cliente.
   - **Complejidad:** Media (varios nodos)
 
-- **10884-Monitor-lead-response-time-SLA-breaches-with-Google-Sheets-Telegram-alerts.json**
+- **02984-Monitor-lead-response-time-SLA-breaches-with-Google-Sheets-Telegram-alerts.json**
   - **Descripción:** Nunca pierdas un lead de nuevo por incumplir tu SLA. Este workflow n8n-powered monitorea tu Google Sheet para leads sin respuesta y envía alertas instantáneas a Telegram cuando se detecta una violación de SLA. Los umbrales se pueden configurar (ej.  1 hora, 4 horas, 24 horas). Ideal para equipos de ventas y soporte que tienen SLAs e necesitan monitoreo proactivo para evitar pérdida de oportunidades.
   - **Complejidad:** Media (varios nodos)
 
-- **10869-Qualify-leads-auto-assignment-with-GPT-4-Mini-Google-Sheets-to-ClickUp.json**
+- **02969-Qualify-leads-auto-assignment-with-GPT-4-Mini-Google-Sheets-to-ClickUp.json**
   - **Descripción:** Elimina la confusión en la transferencia de ventas a los leads calificados. Este workflow crea y asigna automáticamente tareas en ClickUp cuando el estatus de un lead en Google Sheets cambia a "Qualified" o "Hot", asegurando propiedad asignación y responsabilidad clara. Envia resúmenes de IA generados por GPT-4 Mini que incluyen contexto del prospecto, permitiendo a los representantes ver todo el contexto antes de contactar al lead. Mejora la propiedad de transición y reduce el tiempo de capacitación del equipo.
   - **Complejidad:** Alta (varios nodos)
 
-- **10936-Automate-lead-intake-deduplication-with-Google-Forms-Sheets-and-GoHighLevel-CRM.json**
+- **06936-Automate-lead-intake-deduplication-with-Google-Forms-Sheets-and-GoHighLevel-CRM.json**
   - **Descripción:** Elimina entradas duplicadas y simplifica tu gestión de leads. Este workflow monitorea envíos de formularios web en tiempo real, verifica contra una base de datos de GoHighLevel (GHL) CRM para detectar duplicados por correo o nombre/empresa, actualiza o crea registros únicos, y sincroniza con Google Sheets. Ideal para empresas que usan GoHighLevel y quieren evitar corrupción de datos.
   - **Complejidad:** Alta (varios nodos)
 
-- **11024-Automated-lead-follow-up-system-with-Gmail-Google-Calendar-Sheets-sync.json**
+- **07045-Automated-lead-follow-up-system-with-Gmail-Google-Calendar-Sheets-sync.json**
   - **Descripción:** Aumenta tus tasas de conversión de reuniones. Este workflow automatiza el seguimiento de leads no reservados que han pasado 24 horas después de un envío de formulario. Envía correos de seguimiento personalizados con enlaces a reservas de calendario (Cal.com, Google Calendar), ofrece horarios alternativos y confirma reservas automáticamente. Si un prospecto responde, el workflow actualiza los datos del lead y cancela las notificaciones de seguimiento programadas. Ideal para equipos de ventas con calendarios que necesitan automatización de seguimiento sistemática.
   - **Complejidad:** Alta (varios nodos)
 
-- **11029-Lead-qualification-auto-assignment-with-GPT-4-Mini-Google-Sheets-to-ClickUp.json**
+- **07029-Lead-qualification-auto-assignment-with-GPT-4-Mini-Google-Sheets-to-ClickUp.json**
   - **Descripción:** Calificación inteligente con asignación automática. Usa IA para analizar prospectos de inbound y tomar decisiones de calificación complejas. Detecta patrones de comportamiento, evalúa el nivel de compra (BANT, BANT, SQLI, TSQL), segmenta leads y asigna a los representantes más apropiados basándose en coincidencias de perfil y disponibilidad. Usa ClickUp para gestión de asignación y Google Sheets para registro.
   - **Complejidad:** Alta (varios nodos)
 
-- **11045-Automated-lead-follow-up-system-with-Gmail-Google-Sheets-Slack-Google-Sheets.json**
+- **07045-Automated-lead-follow-up-system-with-Gmail-Google-Calendar-Sheets-sync.json**
   - **Descripción:** Sistema de seguimiento de leads automatizado con múltiples etapas. Monitorea Google Sheets para cambios, ejecuta secuencia de follow-ups (Día 1, 3, 7, 14), envía correos automáticos, notifica en Slack, midee conversiones. Configuración flexible: define tu propio plan de follow-up, número de toques, plantillas de correo. Incluye análisis de sentimiento con IA para personalización avanzada.
   - **Complejidad:** Alta (varios nodos)
 
-- **11053-Lead-analysis-personalized-email-generation-with-OpenAI-Firecrawl-gotoHuman.json**
+- **07053-Lead-analysis-personalized-email-generation-with-OpenAI-Firecrawl-gotoHuman.json**
   - **Descripción:** Agente de Outreach IA para reacción rápida a leads nuevos. Este workflow usa IA para analizar información de prospecto (de sitios web, LinkedIn, etc.) y generar correos de outreach personalizados. Característica única: gotoHuman permite revisión y aprobación antes del envío, asegurando calidad y control. Flujo: Análisis → Generación de borrador → Revisión humano → Aprobación → Envío. Ideal para equipos que buscan respuesta rápida con calidad garantizada.
   - **Complejidad:** Alta (varios nodos)
 
-- **11096-Automated-WhatsApp-welcome-messages-for-sales-leads-with-Google-Sheets-Rapiwa.json**
+- **07096-Automated-WhatsApp-welcome-messages-for-sales-leads-with-Google-Sheets-Rapiwa.json**
   - **Descripción:** Mensajes de bienvenida automatizados en WhatsApp para leads de ventas. Esta automatización es ideal para equipos de ventas que usan Google Sheets para gestionar leads y Rapiwa (WhatsApp Business API) sin WhatsApp oficial. Procesa leads nuevos de Google Sheets, envía mensajes de bienvenida personalizados con información del prospecto (nombre, empresa, fuente) y notifica al equipo. Sin configuración de servidor compleja: usa webhook de Rapiwa para entrega directa y confiable.
  Ideal para respuestas rápidas y personalización a escala.
   - **Complejidad:** Media (varios nodos)
@@ -464,31 +464,31 @@ _Total de workflows: 10405_
   - **Descripción:** Sincroniza tus contactos de Google Sheets con SeaTable. Usa Google Sheets como fuente de datos principal, actualiza o inserta registros en SeaTable basándose en correo electrónico (clave única). Si el registro ya existe en SeaTable, lo actualiza con los datos más recientes. Si no existe, inserta uno nuevo. Garantiza integridad bidireccional y manejo de conflictos (último escritor gana).
   - **Complejidad:** Media (varios nodos)
 
-- **10457-Get-all-the-contacts-from-GetResponse-and-update-them.json**
+- **02557-Get-all-the-contacts-from-GetResponse-and-update-them.json**
   - **Descripción:** Obtiene todos los contactos de GetResponse y los actualiza. Simple automatización para mantener sincronizado entre ambos sistemas. Ideal para usuarios de GetResponse que también usan otro CRM.
   - **Complejidad:** Baja (varios nodos)
 
-- **10459-Automated-client-onboarding-system-with-Notion-email-CRM-integration.json**
+- **02559-Automated-client-onboarding-system-with-Notion-email-CRM-integration.json**
   - **Descripción:** Sistema de bienvenida al cliente concierge pro. Captura envío de formulario a través de webhook, crea Cliente en Notion, envía correo de bienvenida con horario de reserva opcional, opcionalmente pingea al propietario en Telegram, actualiza CRM simultáneamente (HubSpot, Airtable), guarda un recordatorio temporal en Google Calendar. Ideal para pequeñas empresas y estudios que necesitan experiencia de cliente profesional sin contratar servicios dedicados.
   - **Complejidad:** Alta (varios nodos)
 
-- **10508-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
+- **02608-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
   - **Descripción:** Asistente personal de IA con Telegram. Transforma tu Telegram en un asistente de IA potente que puede gestionar tu calendario, buscar en la web, acceder a tus contactos y enviar correos simples. Usa GPT-4o-mini para comprensión de lenguaje natural y varios servicios de Google (Calendar, Contacts, Drive, Gmail). Flujo de trabajo: recibe comando → procesa con IA → ejecuta acción → responde. Ideal para profesionales y gestores ocupados.
   - **Complejidad:** Alta (varios nodos)
 
-- **10543-Automate-Gmail-tasks-with-Gemini-AI-assistant-and-contact-management.json**
+- **02643-Automate-Gmail-tasks-with-Gemini-AI-assistant-and-contact-management.json**
   - **Descripción:** Automatiza tareas de Gmail usando IA. Usa múltiples casos de uso: enviar, responder, etiquetar, eliminar, buscar y extraer información. Usa Gemini para inteligencia en lenguaje natural para entender contexto y ejecutar comandos. Ideal para usuarios que manejan grandes volúmenes de correo y necesitan organización.
   - **Complejidad:** Alta (varios nodos)
 
-- **10696-Process-contact-form-submissions-with-validation-and-MongoDB-storage.json**
+- **02796-Process-contact-form-submissions-with-validation-and-MongoDB-storage.json**
   - **Descripción:** Procesa seguro de envíos de formularios de contacto. Este workflow n8n-powered valida entradas de usuario, formatea datos, previene inyecciones SQL y almacena todo de forma segura en MongoDB. Garantiza integridad de datos y consistencia. Ideal para sitios web con formularios de contacto que requieren seguridad robusta.
   - **Complejidad:** Media (varios nodos)
 
-- **10956-Create-professional-email-drafts-with-GPT-4-Telegram-contact-database.json**
+- **06956-Create-professional-email-drafts-with-GPT-4-Telegram-contact-database.json**
   - **Descripción:** Generador de correos profesionales a través de comandos de Telegram con IA. Usa OpenAI GPT-4 para generar correos formales y profesionales, usa Pinecone vector database con RAG para buscar contactos y contexto. Flujo de trabajo: usuario envía comando → comando → IA busca datos → genera borrador → usuario revisa → envía. Ideal para profesionales que necesitan correos profesionales pero no tiempo para redactarlos todos.
   - **Complejidad:** Alta (varios nodos)
 
-- **11108-Automate-digital-product-delivery-sales-tracking-with-Stripe-Email-Notion.json**
+- **07108-Automate-digital-product-delivery-sales-tracking-with-Stripe-Email-Notion.json**
   - **Descripción:** Automatización de entrega de productos digitales después de pagos de Stripe. Este workflow procesa webhooks de Stripe para nuevos pagos, verifica la entrega, actualiza registros en Notion para seguimiento y opcionalmente notifica en Telegram. Ideal para vendedores de productos digitales (plantillas, cursos, SaaS) que necesitan automatización completa post-pago.
   - **Complejidad:** Alta (varios nodos)
 
@@ -510,7 +510,7 @@ _Total de workflows: 10405_
   - **Descripción:** Workflow de automatización CRM y ventas.
   - **Complejidad:** Alta (28 nodos)
 
-- **11010-Create-ideal-customer-profile-from-websites-content-to-Google-Doc.json**
+- **07010-Create-ideal-customer-profile-from-websites-content-to-Google-Doc.json**
   - **Descripción:** Generador de Perfil de Cliente Ideal (ICP) desde contenido web. Recolecta datos de sitios web (About Us, Team, Contact), usa crawling (Scraping o Bright Data) para contenido completo, usa IA (GPT-5, Claude u OpenRouter) para análisis profundo, genera ICP estructurado en Google Doc. Para: equipos de growth, marketing y ventas que necesitan entendimiento profundo de su base de clientes ideales.
   - **Complejidad:** Alta (varios nodos)
 
@@ -1335,11 +1335,11 @@ Workflows de automatización para plataformas de redes sociales y mensajería.
   - **Descripción:** Resume transcripciones de videos de YouTube en Discord usando Gemini y Supabase
   - **Complejidad:** No disponible
 
-- **10508-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
+- **02608-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
   - **Descripción:** Gestiona agenda y contactos usando bot de Telegram con GPT-4o-mini y servicios de Google
   - **Complejidad:** No disponible
 
-- **11400-Send-WooCommerce-new-category-alert-via-WhatsApp-using-Rapiwa-API.json**
+- **03600-Send-WooCommerce-new-category-alert-via-WhatsApp-using-Rapiwa-API.json**
   - **Descripción:** Envía alertas de nuevas categorías de WooCommerce por WhatsApp usando API de Rapiwa
   - **Complejidad:** No disponible
 
@@ -1429,7 +1429,7 @@ Workflows de automatización para plataformas de comercio electrónico, pagos y 
   - **Descripción:** Importa múltiples fabricantes desde Google Sheets a Shopware 6
   - **Complejidad:** No disponible
 
-- **11400-Send-WooCommerce-new-category-alert-via-WhatsApp-using-Rapiwa-API.json**
+- **03600-Send-WooCommerce-new-category-alert-via-WhatsApp-using-Rapiwa-API.json**
   - **Descripción:** Envía alertas de nuevas categorías de WooCommerce por WhatsApp usando API de Rapiwa
   - **Complejidad:** No disponible
 

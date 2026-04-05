@@ -76,43 +76,43 @@ _Total workflows: 10405_
   - **Description:** Automates handling of new lead responses from Gmail with AI-powered analysis. Captures emails with specific labels, analyzes messages using OpenAI to determine sentiment, intent, urgency, next action, and priority. Decides if follow-up is needed, creates tasks in HubSpot, notifies sales team via Slack, and logs all details to Google Sheets for comprehensive tracking.
   - **Complexity:** High (35+ nodes)
 
-- **10411-Analyze-form-feedback-with-GPT-4-sync-tasks-to-Monday-ClickUp-HubSpot.json**
+- **02511-Analyze-form-feedback-with-GPT-4-sync-tasks-to-Monday-ClickUp-HubSpot.json**
   - **Description:** Automates customer feedback management by capturing reviews through forms, analyzing them with GPT-4 for sentiment and insights, then creating structured tasks across Monday.com, ClickUp, and HubSpot. Ensures customer concerns are categorized, prioritized, and assigned to the right teams with actionable metadata for systematic follow-up.
   - **Complexity:** High (30-40 nodes)
 
-- **10612-Automate-support-ticket-classification-routing-from-HubSpot-to-Jira-with-GPT.json**
+- **02712-Automate-support-ticket-classification-routing-from-HubSpot-to-Jira-with-GPT.json**
   - **Description:** Automates HubSpot ticket triage by classifying and routing to Jira using AI agents. Designed for customer support, CX, and operations teams managing messages through HubSpot and using Jira for internal task management. Automates sentiment detection, ticket classification, and team assignment, ideal for SaaS companies optimizing support workflows.
   - **Complexity:** High (30-35 nodes)
 
-- **10727-Quick-HubSpot-contact-lookup-in-Slack-for-sales-support-teams.json**
+- **02827-Quick-HubSpot-contact-lookup-in-Slack-for-sales-support-teams.json**
   - **Description:** Instant HubSpot contact lookup via Slack slash commands. Users trigger the workflow in Slack with an email address or HubSpot contact ID, the workflow searches HubSpot for the matching contact, formats details into a clean Slack-friendly message card, and posts results back to the Slack channel. Enables sales and support teams to quickly access contact information without leaving Slack.
   - **Complexity:** Low (8-12 nodes)
 
-- **10802-Lead-routing-system-Qualify-direct-Typeform-leads-to-HubSpot-Sheets-Airtable.json**
+- **02902-Lead-routing-system-Qualify-direct-Typeform-leads-to-HubSpot-Sheets-Airtable.json**
   - **Description:** Intelligent lead routing system that processes Typeform submissions. Captures lead details, checks budget levels, and routes based on priority and source. High-budget leads are pushed to HubSpot with follow-up tasks for sales. Facebook leads are logged to Google Sheets for marketing, SurveyMonkey leads stored in Airtable for campaign tracking. Every lead receives appropriate processing based on criteria.
   - **Complexity:** High (25-30 nodes)
 
-- **10836-Qualify-high-budget-leads-Typeform-to-HubSpot-Google-Sheets-Slack-alerts.json**
+- **02936-Qualify-high-budget-leads-Typeform-to-HubSpot-Google-Sheets-Slack-alerts.json**
   - **Description:** Captures Typeform leads and instantly checks if budget exceeds $5,000 to prioritize for fast sales follow-up. High-budget leads are enriched in HubSpot as contacts with detailed properties, and a priority task is created for the sales team. Leads are routed based on source (Facebook or SurveyMonkey), logged to Google Sheets for marketing, and triggers Slack alerts for immediate attention.
   - **Complexity:** High (30+ nodes)
 
-- **10986-Enrich-HubSpot-contacts-with-LinkedIn-profiles-using-SerpAPI-Google-Docs-and-AI.json**
+- **06986-Enrich-HubSpot-contacts-with-LinkedIn-profiles-using-SerpAPI-Google-Docs-and-AI.json**
   - **Description:** Enriches HubSpot contacts with LinkedIn profile information using SerpAPI and AI. Triggers on HubSpot contact creation/updates or manual request, maps key fields (First Name, Last Name, Email), reads enrichment criteria from Google Docs, searches LinkedIn via SerpAPI, extracts profile data, and updates HubSpot contacts with LinkedIn information.
   - **Complexity:** Medium (20-25 nodes)
 
-- **10988-Automate-Calendly-to-HubSpot-contact-updates-meeting-logging.json**
+- **06988-Automate-Calendly-to-HubSpot-contact-updates-meeting-logging.json**
   - **Description:** Automatically syncs Calendly meeting bookings into HubSpot CRM. Checks if invitee already exists as a contact, extracts attendee details, creates or updates contacts in HubSpot, and logs the meeting engagement with all relevant information. Ensures every booked meeting is properly tracked, linked to the right contact, and enriched with context from Calendly.
   - **Complexity:** Low (10-15 nodes)
 
-- **11015-Automate-sales-follow-ups-with-GPT-4o-mini-HubSpot-Slack-Teams-Telegram.json**
+- **07015-Automate-sales-follow-ups-with-GPT-4o-mini-HubSpot-Slack-Teams-Telegram.json**
   - **Description:** Automatically generates personalized follow-up messages for leads or customers after key interactions like demos or sales calls. Enriches contact details from HubSpot, uses GPT-4o-mini to draft professional follow-up emails, and distributes reminders across multiple communication channels including Slack, Telegram, and Teams. Ensures consistent and timely follow-up across all platforms.
   - **Complexity:** High (30+ nodes)
 
-- **11018-Bidirectional-company-sync-between-ProspectPro-and-HubSpot-with-status-tracking.json**
+- **07018-Bidirectional-company-sync-between-ProspectPro-and-HubSpot-with-status-tracking.json**
   - **Description:** Synchronizes prospects from ProspectPro into HubSpot with bidirectional status tracking. Checks if companies already exist in HubSpot by ProspectPro ID or domain, updates records if found or creates new ones. Logs sync results back to ProspectPro with tags to prevent duplicates and mark errors, ensuring reliable and repeatable integration between the two systems.
   - **Complexity:** Medium (15-20 nodes)
 
-- **11111-Automate-lead-qualification-follow-up-with-Gemini-HubSpot-Zoom-Mailchimp.json**
+- **07111-Automate-lead-qualification-follow-up-with-Gemini-HubSpot-Zoom-Mailchimp.json**
   - **Description:** Complete lead qualification and follow-up automation using Google Gemini AI. Captures leads, qualifies them as QUALIFIED or NOT QUALIFIED using AI. Qualified leads get a scheduled meeting with Zoom details, email confirmation, CRM update, and Mailchimp enrollment. Not-qualified leads receive follow-up sequences, CRM updates, and 30-day reminders for re-engagement.
   - **Complexity:** High (35+ nodes)
 
@@ -144,11 +144,11 @@ _Total workflows: 10405_
   - **Description:** Automatically generates daily summaries of Pipedrive deals. Fetches deals and their notes from Pipedrive, cleans up stage IDs into readable names, aggregates the information, and uses OpenAI to generate a comprehensive daily summary of the sales funnel. Helps sales teams stay informed about pipeline status without manual reporting.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10429-Track-Pipedrive-deals-in-Google-Sheets-for-sales-pipeline-reporting.json**
+- **02529-Track-Pipedrive-deals-in-Google-Sheets-for-sales-pipeline-reporting.json**
   - **Description:** Tracks and reports Pipedrive deals in Google Sheets. Pulls all deals from Pipedrive, categorizes them by sales stage, and logs them into a Google Sheet for reporting, analytics, and pipeline tracking. Provides a centralized view of deal progress and enables custom reporting outside of Pipedrive.
   - **Complexity:** Low (8-12 nodes)
 
-- **10812-Connect-Pipedrive-deal-outcomes-to-GA4-Google-Ads-via-Measurement-Protocol.json**
+- **02912-Connect-Pipedrive-deal-outcomes-to-GA4-Google-Ads-via-Measurement-Protocol.json**
   - **Description:** Connects Pipedrive deal milestones to Google Analytics 4 via Measurement Protocol. Solves the optimization gap where ads optimize to shallow web events (form fills) while real value sits in Pipedrive (Qualified, Closed Won). Turns deal stages into server-side GA4 events matched to original visitors by client_id, enabling more accurate bidding optimization based on actual revenue.
   - **Complexity:** High (25-30 nodes)
 
@@ -168,7 +168,7 @@ _Total workflows: 10405_
 
 #### Zoho
 
-- **10809-Automatic-email-categorization-labeling-in-Zoho-Mail-with-GPT-4o-mini.json**
+- **02909-Automatic-email-categorization-labeling-in-Zoho-Mail-with-GPT-4o-mini.json**
   - **Description:** AI-powered email categorization and labeling for Zoho Mail. Uses GPT-4o-mini text classification to automatically categorize incoming emails in Zoho Mail and apply correct labels like Support, Billing, or HR. Saves time by keeping inbox structured and ensures emails are routed to the right category for efficient processing.
   - **Complexity:** Medium (15-20 nodes)
 
@@ -266,95 +266,95 @@ _Total workflows: 10405_
   - **Description:** AI-personalized cold email campaign automation. Automates cold email campaigns by fetching leads from Supabase, generating hyper-personalized email content using Google Gemini AI, sending emails via Smartlead API, and logging campaign activity to Google Sheets. Enables scalable personalized outreach.
   - **Complexity:** High (30+ nodes)
 
-- **10436-Enrich-Mondaycom-leads-draft-personalized-emails-with-Explorium-MCP-and-GPT-41.json**
+- **02536-Enrich-Mondaycom-leads-draft-personalized-emails-with-Explorium-MCP-and-GPT-41.json**
   - **Description:** Monday.com lead enrichment with AI-powered company research and personalized email drafts. Uses Explorium MCP and GPT-4.1 to research companies, enrich leads with contextual insights, draft personalized emails, and update Monday.com records. Transforms inbound leads into qualified opportunities with intelligent automation.
   - **Complexity:** High (35+ nodes)
 
-- **10439-Extract-business-leads-from-Gmail-to-Google-Sheets-with-Slack-notifications.json**
+- **02539-Extract-business-leads-from-Gmail-to-Google-Sheets-with-Slack-notifications.json**
   - **Description:** Reverse outreach lead extraction from Gmail inbox. Extracts potential leads sitting in existing emails. Two workflows: one processes historical emails, another runs daily to capture new leads. Intelligently identifies business opportunity messages, extracts contact information, saves to Google Sheets, and sends Slack notifications for follow-up.
   - **Complexity:** High (30+ nodes)
 
-- **10500-LinkedIn-lead-generation-Auto-DM-system-with-comment-triggers-using-Unipile.json**
+- **02600-LinkedIn-lead-generation-Auto-DM-system-with-comment-triggers-using-Unipile.json**
   - **Description:** LinkedIn comment-triggered lead generation and DM automation. Monitors post comments for specific trigger words, automatically sends direct messages with lead magnets to engaged users. Checks connection status, handles non-connected users with connection requests, and prevents duplicate outreach by tracking interactions in database.
   - **Complexity:** High (30+ nodes)
 
-- **10527-Restaurant-lead-generation-from-Google-Maps-with-Apify-Airtable-AI-newsletter.json**
+- **02627-Restaurant-lead-generation-from-Google-Maps-with-Apify-Airtable-AI-newsletter.json**
   - **Description:** Automated Google Maps restaurant lead generation with AI newsletter. Scrapes restaurant data from Google Maps using Apify, filters for best leads, and sends Morning Brew-style newsletter emails automatically. Requires self-hosted n8n for community nodes. Combines lead generation with content marketing outreach.
   - **Complexity:** High (35+ nodes)
 
-- **10549-Extract-business-emails-from-Google-Maps-to-Google-Sheets-for-lead-generation.json**
+- **02649-Extract-business-emails-from-Google-Maps-to-Google-Sheets-for-lead-generation.json**
   - **Description:** Free Google Maps email scraping for lead generation. Scrapes business emails from Google Maps listings and exports to Google Sheets. Built with HTTP requests and JavaScript—no paid APIs required. Scrapes listings based on search queries, extracts email addresses, and builds lead lists for sales and marketing.
   - **Complexity:** High (25-30 nodes)
 
-- **10614-LinkedIn-lead-finder-Gemini-powered-personalized-outreach-with-Google-Sheets.json**
+- **02714-LinkedIn-lead-finder-Gemini-powered-personalized-outreach-with-Google-Sheets.json**
   - **Description:** LinkedIn lead finder with AI-powered personalized outreach. Takes user input (keywords + purpose), generates Boolean LinkedIn search query with Gemini, fetches up to 20 results via Google Custom Search API, logs to Google Sheets, drafts custom outreach messages for each lead, and updates sheets with campaign tracking.
   - **Complexity:** High (30+ nodes)
 
-- **10630-Google-Maps-to-Airtable-lead-scraper-with-GPT-contact-extraction-from-impressum.json**
+- **02730-Google-Maps-to-Airtable-lead-scraper-with-GPT-contact-extraction-from-impressum.json**
   - **Description:** Automated lead discovery and data extraction pipeline. Reads city list from Airtable, combines with search term (e.g., "SEO Agency, Berlin") to query Google Maps API, marks processed cities. Scrapes company websites for contact data using GPT to extract information from impressum/legal pages, and stores everything in Airtable.
   - **Complexity:** High (30+ nodes)
 
-- **10644-LeadChat-Booker-conversational-lead-capture-that-schedules.json**
+- **02744-LeadChat-Booker-conversational-lead-capture-that-schedules.json**
   - **Description:** Conversational lead capture chatbot that automatically schedules meetings. LeadBot greets and collects Full Name → Email → Mobile (optional) → Product interest via chat. Validates inputs, checks Salesforce for existing lead by email to prevent duplicates, creates new lead, schedules meeting via Calendly, and sends confirmation. Includes working demo.
   - **Complexity:** High (30+ nodes)
 
-- **10652-Auto-save-Instagram-leads-to-Google-Sheets.json**
+- **02752-Auto-save-Instagram-leads-to-Google-Sheets.json**
   - **Description:** Instagram Form lead capture to Google Sheets. Automatically captures leads submitted through Instagram Form via webhook and saves data directly to Google Sheet. Ensures every new lead is instantly logged, creating centralized database for marketing and sales teams with real-time sync.
   - **Complexity:** Low (5-8 nodes)
 
-- **10701-Generate-B2B-lead-opportunities-from-websites-with-Brightdata-OpenRouter-AI.json**
+- **02801-Generate-B2B-lead-opportunities-from-websites-with-Brightdata-OpenRouter-AI.json**
   - **Description:** B2B opportunity discovery from company websites. Automatically identifies and summarizes business opportunities by scraping relevant company pages (About Us, Team, Contact) using Bright Data Web Unblocker, analyzes content for pain points and needs with advanced AI models from OpenRouter. Generates opportunity summaries for sales outreach.
   - **Complexity:** High (35+ nodes)
 
-- **10716-Email-new-leads-from-Google-Sheets-via-Outlook-on-a-schedule.json**
+- **02816-Email-new-leads-from-Google-Sheets-via-Outlook-on-a-schedule.json**
   - **Description:** Automated daily outreach to new Google Sheets leads. Sends templated outreach emails to new leads in Google Sheet on daily schedule, then marks each lead as contacted to prevent duplicate emails. Workflow: Schedule Trigger → Google Sheets → Filter → Outlook Send Email → Google Sheets update.
   - **Complexity:** Low (8-12 nodes)
 
-- **10725-Generate-AI-powered-sales-proposals-from-JotForm-leads-with-OpenAI-and-Google.json**
+- **02825-Generate-AI-powered-sales-proposals-from-JotForm-leads-with-OpenAI-and-Google.json**
   - **Description:** AI-powered proposal generator from JotForm submissions. Captures JotForm form data, generates professional sales proposals using OpenAI AI, creates Google Docs with formatted proposals, and sends to leads for review. Automates proposal creation process to save time and ensure consistency.
   - **Complexity:** High (25-30 nodes)
 
-- **10785-Generate-and-research-sales-leads-with-Jina-AI-OpenAI-email-automation-via-Gmail.json**
+- **02885-Generate-and-research-sales-leads-with-Jina-AI-OpenAI-email-automation-via-Gmail.json**
   - **Description:** Automated sales lead generation, research, and email outreach. Generates personalized sales leads, creates HTML-formatted emails ready to send, and sends automatically via Gmail. Researches leads, drafts emails with AI, and executes outreach campaigns. Ideal for sales professionals scaling outreach.
   - **Complexity:** High (35+ nodes)
 
-- **10825-Research-business-leads-with-Perplexity-AI-save-to-Google-Sheets-using-OpenAI.json**
+- **02925-Research-business-leads-with-Perplexity-AI-save-to-Google-Sheets-using-OpenAI.json**
   - **Description:** Automated lead research and data structuring. Uses Perplexity AI to research businesses (coffee shops example) with company name + email, cleans and structures output into proper JSON using OpenAI, and appends new leads directly into Google Sheets. Automates lead research with AI-powered data processing.
   - **Complexity:** High (30+ nodes)
 
-- **10863-Automate-B2B-lead-generation-email-campaigns-with-Google-Maps-SendGrid-AI.json**
+- **02963-Automate-B2B-lead-generation-email-campaigns-with-Google-Maps-SendGrid-AI.json**
   - **Description:** Complete lifecycle B2B lead generation and email campaign automation. Combines six specialized workflows into one seamless system: scrapes fresh leads, sends personalized emails via SendGrid, tracks engagements, detects replies, classifies responses, handles follow-ups, and updates live CRM—all in one integrated system.
   - **Complexity:** High (40+ nodes)
 
-- **10869-Qualify-leads-with-AI-review-analysis-using-Azure-GPT-4o-mini-and-Google-Sheets.json**
+- **02969-Qualify-leads-with-AI-review-analysis-using-Azure-GPT-4o-mini-and-Google-Sheets.json**
   - **Description:** AI-powered customer feedback analysis and lead qualification. Captures reviews from Google Sheets, runs AI-driven sentiment and intent analysis using Azure GPT-4o-mini, and enriches dataset with structured insights. Transforms raw customer feedback into actionable lead qualification data without manual review.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10872-Deduplicate-lead-data-with-Google-Sheets-automated-email-alerts-log-management.json**
+- **02972-Deduplicate-lead-data-with-Google-Sheets-automated-email-alerts-log-management.json**
   - **Description:** Automated lead deduplication with email alerts and logging. Detects duplicate records from Google Sheets using custom deduplication engine based on email and phone, generates structured logs, saves logs to Google Sheets, and sends instant email updates. Keeps databases clean and reliable without manual review.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10873-Business-hours-lead-response-system-with-Gmail-Google-Sheets-Telegram-alerts.json**
+- **02973-Business-hours-lead-response-system-with-Gmail-Google-Sheets-Telegram-alerts.json**
   - **Description:** Automated lead response system based on business hours. Monitors Google Sheet for new form responses, checks submission times, sends tailored email replies (business hours vs after hours), updates team instantly via Telegram alerts. Ensures every inquiry gets timely and professional response regardless of when submitted.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10884-Monitor-lead-response-time-SLA-breaches-with-Google-Sheets-Telegram-alerts.json**
+- **02984-Monitor-lead-response-time-SLA-breaches-with-Google-Sheets-Telegram-alerts.json**
   - **Description:** SLA breach monitoring and alerting for lead response times. Continuously monitors Google Sheets for un-replied leads, triggers instant Telegram alerts for SLA breaches with direct Google Sheet links. Runs frequent SLA checks, enriches alerts with actionable information, ensures immediate team action on overdue leads.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10936-Automate-lead-intake-deduplication-with-Google-Forms-Sheets-and-GoHighLevel-CRM.json**
+- **06936-Automate-lead-intake-deduplication-with-Google-Forms-Sheets-and-GoHighLevel-CRM.json**
   - **Description:** Lead intake and deduplication automation with GoHighLevel CRM sync. Captures new Google Form submissions in real time, checks against existing records for duplicates, updates duplicates, creates new leads, and syncs seamlessly to GoHighLevel (GHL) CRM and Google Sheets database. Eliminates duplicate entries and streamlines lead management.
   - **Complexity:** High (25-30 nodes)
 
-- **10964-Generate-B2B-leads-from-any-city-business-type-using-GMaps-Jinaai-GPT-5.json**
+- **06964-Generate-B2B-leads-from-any-city-business-type-using-GMaps-Jinaai-GPT-5.json**
   - **Description:** Worldwide B2B lead generation from Google Maps with AI enrichment. Generates comprehensive B2B leads for any business type in any city including: company name, website, email (enriched with AI Agent + Jina.ai), phone number, address, main language, Google Maps URL, and reviews. Saves to Airtable for organized lead management.
   - **Complexity:** High (35+ nodes)
 
-- **10966-Automated-LinkedIn-lead-enrichment-pipeline-using-Apolloio-Google-Sheets.json**
+- **06966-Automated-LinkedIn-lead-enrichment-pipeline-using-Apolloio-Google-Sheets.json**
   - **Description:** LinkedIn to Apollo.io lead enrichment system with Google Sheets storage. Captures company and store details from LinkedIn posts, enriches with domain names and key decision-maker (KDM) data from Apollo.io, stores everything in Google Sheets. Turns LinkedIn post data into complete, structured lead database fully automated from detection to enrichment.
   - **Complexity:** High (30+ nodes)
 
-- **10974-Scrape-targeted-leads-from-Google-Maps-LinkedIn-to-Supabase-using-Apify.json**
+- **06974-Scrape-targeted-leads-from-Google-Maps-LinkedIn-to-Supabase-using-Apify.json**
   - **Description:** Multi-source lead scraping from Google Maps and LinkedIn to Supabase. Collects targeted lead data from multiple sources including Google Maps business listings and LinkedIn profiles. Uses Apify for scraping, stores enriched data in Supabase database. Perfect for building prospect lists, market research, or expanding contact databases.
   - **Complexity:** High (35+ nodes)
 
@@ -362,27 +362,27 @@ _Total workflows: 10405_
   - **Description:** Automated B2B lead generation using Google Places and Scrape.do. Finds businesses on Google Maps based on criteria (e.g., "dentists" in "Istanbul"), assigns quality scores, uses Scrape.do to reliably access websites, scrapes relevant data, and enriches with AI analysis. Powerful, fully automated B2B lead generation engine.
   - **Complexity:** High (30+ nodes)
 
-- **11019-Scrape-Google-Maps-leads-and-find-emails-with-Apify-and-Anymailfinder.json**
+- **07019-Scrape-Google-Maps-leads-and-find-emails-with-Apify-and-Anymailfinder.json**
   - **Description:** Google Maps lead scraping with email verification using Apify and Anymailfinder. Scrapes business data from Google Maps using Apify, enriches with verified email addresses via Anymailfinder, stores results in NocoDB database. Prevents duplicates and ensures high-quality lead data with verified emails for outreach campaigns.
   - **Complexity:** High (30+ nodes)
 
-- **11024-Automated-lead-intelligence-enrich-Google-Sheets-with-Clearbit-sync-to-Notion.json**
+- **07045-Automated-lead-intelligence-enrich-Google-Sheets-with-Clearbit-sync-to-Notion.json**
   - **Description:** Lead profile enrichment with Clearbit and multi-platform sync. Enriches lead data by fetching company details, logos, and brand colors using Clearbit API, syncs everything to Notion, ClickUp, and Google Sheets. Ensures sales reps walk into calls fully prepared with enriched lead profiles across all platforms.
   - **Complexity:** Medium (15-20 nodes)
 
-- **11029-Lead-qualification-auto-assignment-with-GPT-4-Mini-Google-Sheets-to-ClickUp.json**
+- **07029-Lead-qualification-auto-assignment-with-GPT-4-Mini-Google-Sheets-to-ClickUp.json**
   - **Description:** Automated lead qualification and ClickUp task assignment. Creates and assigns ClickUp tasks when lead status changes to "Qualified" or "Hot", ensuring seamless ownership and accountability. Uses AI-generated lead summaries, synchronizes task details between Google Sheets and ClickUp, eliminates confusion in sales hand-offs.
   - **Complexity:** Medium (15-20 nodes)
 
-- **11045-Automated-lead-follow-up-system-with-Gmail-Google-Calendar-Sheets-sync.json**
+- **07045-Automated-lead-follow-up-system-with-Gmail-Google-Calendar-Sheets-sync.json**
   - **Description:** Automated meeting booking sequence for unbooked leads. Automatically follows up with unbooked leads after 24 hours, sends personalized emails with calendar links and alternate time slots, confirms bookings via replies or webhook triggers. Runs every hour to maximize meeting conversion rates with minimal manual effort.
   - **Complexity:** Medium (15-20 nodes)
 
-- **11053-Lead-analysis-personalized-email-generation-with-OpenAI-Firecrawl-gotoHuman.json**
+- **07053-Lead-analysis-personalized-email-generation-with-OpenAI-Firecrawl-gotoHuman.json**
   - **Description:** AI-powered lead outreach with human review. Analyzes new leads with AI, generates personalized outreach emails, and uses gotoHuman for review before sending. Provides AI-generated editable email drafts for human approval, ensuring quality while speeding up response times to avoid losing potential customers.
   - **Complexity:** Medium (15-20 nodes)
 
-- **11096-Automated-WhatsApp-welcome-messages-for-sales-leads-with-Google-Sheets-Rapiwa.json**
+- **07096-Automated-WhatsApp-welcome-messages-for-sales-leads-with-Google-Sheets-Rapiwa.json**
   - **Description:** Automated WhatsApp welcome messages for sales leads. Cost-effective solution for teams using Google Sheets for leads but not official WhatsApp Business API. Automatically sends WhatsApp welcome messages to new leads via Rapiwa, collects leads in Google Sheets, triggers welcome sequences. Ideal for sales teams and small businesses.
   - **Complexity:** Medium (15-20 nodes)
 
@@ -472,31 +472,31 @@ _Total workflows: 10405_
   - **Description:** Google Sheets to SeaTable contact sync automation. Uses Google Sheets as central contact list, checks if records exist in SeaTable by email, updates if found or inserts new contact if not found. Maintains bidirectional sync between sheets and SeaTable database.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10457-Get-all-the-contacts-from-GetResponse-and-update-them.json**
+- **02557-Get-all-the-contacts-from-GetResponse-and-update-them.json**
   - **Description:** GetResponse contact retrieval and update workflow. Fetches all contacts from GetResponse email marketing platform and performs bulk updates. Enables mass contact management operations for campaigns and list maintenance.
   - **Complexity:** Medium (10-15 nodes)
 
-- **10459-Automated-client-onboarding-system-with-Notion-email-CRM-integration.json**
+- **02559-Automated-client-onboarding-system-with-Notion-email-CRM-integration.json**
   - **Description:** Graceful client onboarding concierge system. Captures form submission via webhook, creates client record in Notion, sends concierge-style welcome email with scheduler + optional contract link, optionally pings owner on Telegram, mirrors lead to Airtable/HubSpot, places temporary Google Calendar hold. Professional onboarding for small businesses and studios.
   - **Complexity:** High (30+ nodes)
 
-- **10508-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
+- **02608-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
   - **Description:** AI personal assistant Telegram bot with contact management. Transforms Telegram into powerful AI assistant that manages calendar, sends daily schedules, searches web, and accesses contacts through text messages. Uses GPT-4o-mini for intelligence and Google Services for data management.
   - **Complexity:** High (30+ nodes)
 
-- **10543-Automate-Gmail-tasks-with-Gemini-AI-assistant-and-contact-management.json**
+- **02643-Automate-Gmail-tasks-with-Gemini-AI-assistant-and-contact-management.json**
   - **Description:** Gmail automation with Gemini AI for task management and contacts. Automates Gmail tasks: sending, replying, labeling, deleting, and fetching emails with AI assistance. Perfect for YouTubers managing viewer emails, sales teams handling inquiries, or professionals keeping inbox organized. Each Gemini request billed per token.
   - **Complexity:** High (30+ nodes)
 
-- **10696-Process-contact-form-submissions-with-validation-and-MongoDB-storage.json**
+- **02796-Process-contact-form-submissions-with-validation-and-MongoDB-storage.json**
   - **Description:** Secure contact form processing with validation and MongoDB storage. Processes contact form submissions by validating user input, formatting data, and storing in MongoDB database. Ensures data consistency, prevents unsafe entries, and provides confirmation response back to user.
   - **Complexity:** Medium (15-20 nodes)
 
-- **10956-Create-professional-email-drafts-with-GPT-4-Telegram-contact-database.json**
+- **06956-Create-professional-email-drafts-with-GPT-4-Telegram-contact-database.json**
   - **Description:** Professional email drafting via Telegram with AI and contact retrieval. Drafts professional emails through Telegram commands using OpenAI GPT-4 and contact retrieval from Pinecone vector database with RAG. Enables sending email requests directly from Telegram, generates formal professional emails, retrieves contacts intelligently.
   - **Complexity:** High (30+ nodes)
 
-- **11108-Automate-digital-product-delivery-sales-tracking-with-Stripe-Email-Notion.json**
+- **07108-Automate-digital-product-delivery-sales-tracking-with-Stripe-Email-Notion.json**
   - **Description:** End-to-end digital product delivery and sales tracking automation. Automates delivery after successful Stripe checkout, eliminates manual fulfillment, keeps structured sales log in Notion, optionally notifies via Telegram. Designed for template sellers, coaches, course creators, and micro-SaaS owners.
   - **Complexity:** High (30+ nodes)
 
@@ -517,7 +517,7 @@ _Total workflows: 10405_
   - **Description:** WhatsApp sales automation agent. Handles customer inquiries, provides product information, processes orders, and manages sales conversations via WhatsApp. Complex workflow with 28 nodes for complete WhatsApp sales automation.
   - **Complexity:** High (28 nodes)
 
-- **11010-Create-ideal-customer-profile-from-websites-content-to-Google-Doc.json**
+- **07010-Create-ideal-customer-profile-from-websites-content-to-Google-Doc.json**
   - **Description:** Ideal Customer Profile (ICP) generator from website content. Collects Website URL and Business Name via form submission, crawls and scrapes 20 pages from website, analyzes content using AI to generate decision-ready ICP grounded in site content, saves to Google Doc. For growth, marketing, sales, and founder teams.
   - **Complexity:** High (30+ nodes)
 
@@ -3630,7 +3630,7 @@ This section contains workflows for automating social media platforms, content c
   - **Description:** User registration automation via Telegram bot. Handles new user signups, verification, and data storage.
   - **Complexity:** Medium (12 nodes)
 
-- **11423-WhatsApp-support-bot-with-Google-Drive-RAG-GPT-41-mini-and-Cohere-reranking.json**
+- **03623-WhatsApp-support-bot-with-Google-Drive-RAG-GPT-41-mini-and-Cohere-reranking.json**
   - **Description:** WhatsApp customer support bot with RAG (Retrieval-Augmented Generation). Uses GPT-4.1-mini, Google Drive knowledge base, and Cohere reranking for intelligent responses.
   - **Complexity:** High (45 nodes)
 
@@ -3638,7 +3638,7 @@ This section contains workflows for automating social media platforms, content c
   - **Description:** AI-powered WhatsApp assistant for restaurant and delivery services. Handles order management, menu inquiries, and delivery tracking with conversational AI.
   - **Complexity:** High (32 nodes)
 
-- **11400-Send-WooCommerce-new-category-alert-via-WhatsApp-using-Rapiwa-API.json**
+- **03600-Send-WooCommerce-new-category-alert-via-WhatsApp-using-Rapiwa-API.json**
   - **Description:** WooCommerce category change alert system via WhatsApp. Notifies designated contacts when new product categories are added to store.
   - **Complexity:** Medium (16 nodes)
 
@@ -3680,19 +3680,19 @@ This section contains workflows for automating social media platforms, content c
   - **Description:** Lead generation email outreach automation using Apify and Apollo.io. Scrapes LinkedIn profiles, enriches with Apollo data, generates AI-powered emails via GPT-4.
   - **Complexity:** High (40 nodes)
 
-- **10435-Automate-LinkedIn-post-summaries-to-Slack-with-AI-and-Apify.json**
+- **02535-Automate-LinkedIn-post-summaries-to-Slack-with-AI-and-Apify.json**
   - **Description:** LinkedIn post aggregator with AI summarization to Slack. Scrapes LinkedIn content, summarizes with AI, and posts digests to Slack channels.
   - **Complexity:** Medium (22 nodes)
 
-- **10638-Automate-LinkedIn-profile-research-email-outreach-with-Apify-Gemini-Sheets.json**
+- **02738-Automate-LinkedIn-profile-research-email-outreach-with-Apify-Gemini-Sheets.json**
   - **Description:** LinkedIn profile research and email outreach automation. Uses Apify for data extraction, Gemini for analysis, and automated email campaigns via Google Sheets management.
   - **Complexity:** High (36 nodes)
 
-- **10664-Weekly-LinkedIn-connections-sync-analysis-with-Apify-and-Google-Sheets.json**
+- **02764-Weekly-LinkedIn-connections-sync-analysis-with-Apify-and-Google-Sheets.json**
   - **Description:** LinkedIn connections weekly sync and analysis workflow. Tracks connection growth, analyzes network patterns, and stores data in Google Sheets.
   - **Complexity:** Medium (25 nodes)
 
-- **12046-Match-resumes-to-jobs-automatically-with-Gemini-AI-and-Decodo-Scraping.json**
+- **04246-Match-resumes-to-jobs-automatically-with-Gemini-AI-and-Decodo-Scraping.json**
   - **Description:** Resume-to-job matching automation with Gemini AI and Decodo scraping. Takes candidate resumes and LinkedIn profiles, scrapes job postings from LinkedIn/JobStreet, ranks matches, emails reports.
   - **Complexity:** High (42 nodes)
 
@@ -3814,7 +3814,7 @@ This section contains workflows for automating social media platforms, content c
   - **Description:** AI social media caption creator for Airtable. Generates platform-specific captions for various social networks and stores them in Airtable for easy access.
   - **Complexity:** High (35 nodes)
 
-- **12059-Generate-platform-specific-social-media-posts-with-ChatGPT-Tavily-G-Sheets.json**
+- **04259-Generate-platform-specific-social-media-posts-with-ChatGPT-Tavily-G-Sheets.json**
   - **Description:** Platform-specific social media post generator with ChatGPT and Tavily. Uses Google Sheets as input, researches topics with Tavily, generates LinkedIn/X/IG posts with ChatGPT, writes back to sheet.
   - **Complexity:** High (28 nodes)
 
@@ -3824,19 +3824,19 @@ This section contains workflows for automating social media platforms, content c
   - **Description:** Facebook profile change monitoring with Mattermost notifications. Detects profile updates and sends alerts to Mattermost channels.
   - **Complexity:** Medium (11 nodes)
 
-- **12047-Voice-text-Telegram-assistant-with-GPT-41-mini-and-conversation-memory.json**
+- **04247-Voice-text-Telegram-assistant-with-GPT-41-mini-and-conversation-memory.json**
   - **Description:** Personal AI assistant on Telegram with voice and text support. Uses GPT-4.1-mini for processing, Whisper for voice transcription, includes conversation memory buffer.
   - **Complexity:** High (33 nodes)
 
-- **10508-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
+- **02608-Manage-schedule-contacts-with-Telegram-Bot-using-GPT-4o-mini-Google-Services.json**
   - **Description:** Telegram bot for managing schedules and contacts using GPT-4o-mini. Integrates with Google Calendar and Contacts for intelligent scheduling and contact management.
   - **Complexity:** High (38 nodes)
 
-- **12037-Telegram-research-assistant-for-academic-papers-using-Gemini-AI-and-Decodo.json**
+- **04237-Telegram-research-assistant-for-academic-papers-using-Gemini-AI-and-Decodo.json**
   - **Description:** AI research assistant for academic papers via Telegram. Uses Gemini AI to interpret queries, Decodo to scrape Google Scholar/arXiv, summarizes papers, delivers results in chat.
   - **Complexity:** High (45 nodes)
 
-- **12053-Automate-Telegram-support-handover-from-AI-to-humans-with-GPT4-and-email-alerts.json**
+- **04253-Automate-Telegram-support-handover-from-AI-to-humans-with-GPT4-and-email-alerts.json**
   - **Description:** Telegram support handoff automation from AI to humans. Detects complex queries, routes to human agents, sends email alerts, maintains conversation context.
   - **Complexity:** High (52 nodes)
 
@@ -3937,27 +3937,27 @@ This section contains workflows for automating e-commerce platforms, payment pro
   - **Description:** Shopify SEO content automation with multi-agent AI. Generates product descriptions, blog posts, meta content using GPT-4o and Claude agents, optimizes for search engines.
   - **Complexity:** High (52 nodes)
 
-- **10672-Scrape-Shopify-store-data-with-RapidAPI-and-save-to-Google-Sheets.json**
+- **02772-Scrape-Shopify-store-data-with-RapidAPI-and-save-to-Google-Sheets.json**
   - **Description:** Shopify store data scraper using RapidAPI. Scrapes product information, pricing, inventory from any Shopify store and exports to Google Sheets.
   - **Complexity:** Medium (11 nodes)
 
-- **10713-Automated-Shopify-abandoned-cart-alerts-from-Razorpay-to-Telegram.json**
+- **02813-Automated-Shopify-abandoned-cart-alerts-from-Razorpay-to-Telegram.json**
   - **Description:** Shopify abandoned cart alerts via Telegram. Monitors incomplete checkouts, triggers follow-up notifications through Razorpay payment gateway.
   - **Complexity:** High (30 nodes)
 
-- **10783-Generate-multilingual-Shopify-product-descriptions-with-Gemini-25-Vision-AI.json**
+- **02883-Generate-multilingual-Shopify-product-descriptions-with-Gemini-25-Vision-AI.json**
   - **Description:** Multilingual Shopify product descriptions with Gemini 2.5 Vision AI. Generates product descriptions in multiple languages using visual analysis and advanced AI translation.
   - **Complexity:** High (35 nodes)
 
-- **10900-AI-powered-WhatsApp-customer-support-for-Shopify-brands-with-LLM-agents.json**
+- **06900-AI-powered-WhatsApp-customer-support-for-Shopify-brands-with-LLM-agents.json**
   - **Description:** AI-powered WhatsApp support for Shopify brands. Handles customer inquiries, order tracking, returns using LLM agents integrated with Shopify data.
   - **Complexity:** High (48 nodes)
 
-- **11087-AI-Shopify-product-descriptions-GPT-4o-Vision-Claude-Analytics.json**
+- **07087-AI-Shopify-product-descriptions-GPT-4o-Vision-Claude-Analytics.json**
   - **Description:** AI Shopify product descriptions with GPT-4o Vision and Claude Analytics. Generates optimized product descriptions using visual AI and analytics-driven insights.
   - **Complexity:** High (42 nodes)
 
-- **12025-Scrape-import-shoe-products-to-Shopify-with-BrowserAct-with-variants-images.json**
+- **04225-Scrape-import-shoe-products-to-Shopify-with-BrowserAct-with-variants-images.json**
   - **Description:** Scrape and import shoe products to Shopify with BrowserAct (with variants & images). Reads product URLs from Google Sheets, scrapes detailed product data, creates Shopify products with variants and images using BrowserAct.
   - **Complexity:** High (25 nodes)
 
@@ -3983,11 +3983,11 @@ This section contains workflows for automating e-commerce platforms, payment pro
   - **Description:** Stripe checkout filtering and routing automation. Processes checkout events, applies custom filters, routes transactions to appropriate workflows.
   - **Complexity:** Medium (15 nodes)
 
-- **10654-Auto-send-PDF-invoices-with-Stripe-payment-triggers-and-Gmail.json**
+- **02754-Auto-send-PDF-invoices-with-Stripe-payment-triggers-and-Gmail.json**
   - **Description:** Automated PDF invoice delivery with Stripe payment triggers. Generates professional PDF invoices upon Stripe payment events, sends via Gmail.
   - **Complexity:** High (28 nodes)
 
-- **10961-Automate-QuickBooks-sales-receipts-customer-creation-from-Stripe-payments.json**
+- **06961-Automate-QuickBooks-sales-receipts-customer-creation-from-Stripe-payments.json**
   - **Description:** QuickBooks integration with Stripe payments. Creates sales receipts and customer records in QuickBooks when Stripe transactions occur.
   - **Complexity:** High (32 nodes)
 
@@ -4017,35 +4017,35 @@ This section contains workflows for automating e-commerce platforms, payment pro
   - **Description:** Generate authentic product reviews with OpenAI for WooCommerce. Creates realistic, AI-generated reviews for social proof and marketing purposes.
   - **Complexity:** High (30 nodes)
 
-- **10447-Automate-WordPress-WooCommerce-content-with-OpenAI-Reviews-comments-updates.json**
+- **02547-Automate-WordPress-WooCommerce-content-with-OpenAI-Reviews-comments-updates.json**
   - **Description:** WordPress and WooCommerce content automation with OpenAI. Generates blog posts, manages product reviews, syncs comments using AI content generation.
   - **Complexity:** High (42 nodes)
 
-- **10624-Complete-WooCommerce-to-Odoo-integration-Sync-orders-products-customers.json**
+- **02724-Complete-WooCommerce-to-Odoo-integration-Sync-orders-products-customers.json**
   - **Description:** Complete WooCommerce to Odoo integration. Synchronizes orders, products, customers between WooCommerce store and Odoo ERP system.
   - **Complexity:** High (45 nodes)
 
-- **10637-Conversational-sales-agent-for-WooCommerce-with-GPT-4-Stripe-and-CRM-integration.json**
+- **02737-Conversational-sales-agent-for-WooCommerce-with-GPT-4-Stripe-and-CRM-integration.json**
   - **Description:** Conversational AI sales agent for WooCommerce. Handles pre-sales, order management, payments using GPT-4, Stripe integration, and CRM synchronization.
   - **Complexity:** High (55 nodes)
 
-- **10648-Auto-generate-virtual-AI-try-on-images-for-WooCommerce-with-Gemini-Nano-Banana.json**
+- **02748-Auto-generate-virtual-AI-try-on-images-for-WooCommerce-with-Gemini-Nano-Banana.json**
   - **Description:** Auto-generate virtual AI try-on images for WooCommerce with Gemini and Nano Banana. Creates virtual try-on visuals for products using generative AI.
   - **Complexity:** High (38 nodes)
 
-- **11016-Create-update-and-get-a-product-from-WooCommerce.json**
+- **07016-Create-update-and-get-a-product-from-WooCommerce.json**
   - **Description:** WooCommerce product CRUD operations. Create, update, and retrieve products from WooCommerce store via REST API integration.
   - **Complexity:** Medium (15 nodes)
 
-- **11026-Send-a-message-on-Mattermost-when-an-order-is-created-in-WooCommerce.json**
+- **07026-Send-a-message-on-Mattermost-when-an-order-is-created-in-WooCommerce.json**
   - **Description:** WooCommerce order alerts to Mattermost. Sends formatted order notifications to Mattermost channels when new orders are placed.
   - **Complexity:** Medium (14 nodes)
 
-- **11033-Voice-AI-customer-support-for-WooCommerce-using-VAPI-GPT-4o-Gemini-with-RAG.json**
+- **07033-Voice-AI-customer-support-for-WooCommerce-using-VAPI-GPT-4o-Gemini-with-RAG.json**
   - **Description:** Voice AI customer support for WooCommerce using VAPI. Handles voice calls, order inquiries, support tickets using GPT-4o, Gemini, and RAG knowledge base.
   - **Complexity:** High (52 nodes)
 
-- **11050-Auto-collect-WooCommerce-orders-to-Discord-Google-Sheets.json**
+- **07050-Auto-collect-WooCommerce-orders-to-Discord-Google-Sheets.json**
   - **Description:** WooCommerce order collection to Discord and Google Sheets. Automatically gathers new orders, posts summaries to Discord, and stores in Google Sheets.
   - **Complexity:** High (32 nodes)
 
@@ -4085,7 +4085,7 @@ This section contains workflows for automating e-commerce platforms, payment pro
   - **Description:** Google Maps business data scraper with SerpAPI. Extracts business information (name, address, phone, reviews) from Google Maps, exports to Sheets and Excel.
   - **Complexity:** Medium (22 nodes)
 
-- **10686-Generate-daily-business-digest-with-Notion-Gmail-Stripe-Calendar-and-GPT-4o.json**
+- **02786-Generate-daily-business-digest-with-Notion-Gmail-Stripe-Calendar-and-GPT-4o.json**
   - **Description:** Daily business digest generator with Notion, Gmail, Stripe, Calendar. Compiles daily sales, payments, and schedule summaries using GPT-4o for natural language generation.
   - **Complexity:** High (40 nodes)
 # AI AND NLP
@@ -4252,7 +4252,7 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** TechCrunch news and startup scraper. Scrapes articles, funding rounds, and startup news from TechCrunch website.
   - **Complexity:** Medium (17 nodes)
 
-- **10563-ScrapingBee-and-Google-Sheets-integration-template.json**
+- **02663-ScrapingBee-and-Google-Sheets-integration-template.json**
   - **Description:** ScrapingBee integration with Google Sheets. Uses ScrapingBee API for web scraping, stores extracted data directly to Google Sheets.
   - **Complexity:** Medium (14 nodes)
 
@@ -4310,55 +4310,55 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** Lead generation email outreach with Apify and Apollo.io. Scrapes LinkedIn profiles, enriches with Apollo data, generates AI-powered emails via GPT-4.
   - **Complexity:** High (40 nodes)
 
-- **10435-Automate-LinkedIn-post-summaries-to-Slack-with-AI-and-Apify.json**
+- **02535-Automate-LinkedIn-post-summaries-to-Slack-with-AI-and-Apify.json**
   - **Description:** LinkedIn post aggregator with AI summarization to Slack. Scrapes LinkedIn content, summarizes with AI, posts digests to Slack channels.
   - **Complexity:** Medium (22 nodes)
 
-- **10638-Automate-LinkedIn-profile-research-email-outreach-with-Apify-Gemini-Sheets.json**
+- **02738-Automate-LinkedIn-profile-research-email-outreach-with-Apify-Gemini-Sheets.json**
   - **Description:** LinkedIn profile research and email outreach with Apify, Gemini, and Sheets. Uses Apify for data extraction, Gemini for analysis, automated email campaigns via Google Sheets management.
   - **Complexity:** High (36 nodes)
 
-- **10639-Automate-scraping-Y-Combinator-startups-with-Apify-Google-Sheets.json**
+- **02739-Automate-scraping-Y-Combinator-startups-with-Apify-Google-Sheets.json**
   - **Description:** Y Combinator startup scraping with Apify and Google Sheets. Scrapes Hacker News startup discussions, extracts company info, tracks in Google Sheets.
   - **Complexity:** High (30 nodes)
 
-- **10641-Automate-AI-Upwork-proposal-generation-with-Apify-Google-Gemini-sheets.json**
+- **02741-Automate-AI-Upwork-proposal-generation-with-Apify-Google-Gemini-sheets.json**
   - **Description:** AI Upwork proposal generator with Apify, Google, and Gemini. Scrapes Upwork job postings, generates customized proposals using AI, tracks in Google Sheets.
   - **Complexity:** High (38 nodes)
 
-- **10649-Analyze-trending-YouTube-videos-with-Apify-OpenAI-and-Google-Sheets.json**
+- **02749-Analyze-trending-YouTube-videos-with-Apify-OpenAI-and-Google-Sheets.json**
   - **Description:** Trending YouTube videos analyzer with Apify and OpenAI. Scrapes trending videos, analyzes metrics, generates insights using AI, stores in Google Sheets.
   - **Complexity:** High (35 nodes)
 
-- **10664-Weekly-LinkedIn-connections-sync-analysis-with-Apify-and-Google-Sheets.json**
+- **02764-Weekly-LinkedIn-connections-sync-analysis-with-Apify-and-Google-Sheets.json**
   - **Description:** LinkedIn connections weekly sync and analysis with Apify. Tracks connection growth, analyzes network patterns, stores data in Google Sheets.
   - **Complexity:** Medium (25 nodes)
 
-- **10672-Scrape-Shopify-store-data-with-RapidAPI-and-save-to-Google-Sheets.json**
+- **02772-Scrape-Shopify-store-data-with-RapidAPI-and-save-to-Google-Sheets.json**
   - **Description:** Shopify store data scraper with RapidAPI. Scrapes product information, pricing, inventory from any Shopify store and exports to Google Sheets.
   - **Complexity:** Medium (11 nodes)
 
-- **10692-Instagram-visual-analysis-with-Apify-scraping-OpenAI-GPT-5-Google-Sheets.json**
+- **02792-Instagram-visual-analysis-with-Apify-scraping-OpenAI-GPT-5-Google-Sheets.json**
   - **Description:** Instagram visual content analysis with Apify, OpenAI, and Google Sheets. Scrapes Instagram posts, analyzes images with AI vision, generates insights and stores in Sheets.
   - **Complexity:** High (42 nodes)
 
-- **10700-Find-valid-vouchers-and-promo-codes-with-SerpAPI-Decodo-and-GPT-5-Mini.json**
+- **02800-Find-valid-vouchers-and-promo-codes-with-SerpAPI-Decodo-and-GPT-5-Mini.json**
   - **Description:** Voucher and promo code finder with SerpAPI, Decodo, and GPT-5-mini. Scrapes discount codes from various websites, validates them, generates curated lists.
   - **Complexity:** High (35 nodes)
 
-- **10755-Automate-content-research-with-Reddit-scraping-AI-analysis-and-Google-Sheets.json**
+- **02855-Automate-content-research-with-Reddit-scraping-AI-analysis-and-Google-Sheets.json**
   - **Description:** Reddit content research automation with AI. Scrapes Reddit posts, analyzes discussions, generates content strategy recommendations, stores in Google Sheets.
   - **Complexity:** High (38 nodes)
 
-- **10756-Extract-Amazon-book-data-generate-purchase-reports-with-Decodo-Scraper.json**
+- **02856-Extract-Amazon-book-data-generate-purchase-reports-with-Decodo-Scraper.json**
   - **Description:** Amazon book data extraction with Decodo. Scrapes book information, pricing, reviews from Amazon, generates purchase analysis reports.
   - **Complexity:** High (30 nodes)
 
-- **10758-Scrape-LinkedIn-job-listings-with-Phantombuster-save-to-Google-Sheets.json**
+- **02858-Scrape-LinkedIn-job-listings-with-Phantombuster-save-to-Google-Sheets.json**
   - **Description:** LinkedIn job listings scraper with Phantombuster. Extracts job postings, company info, requirements from LinkedIn, saves to Google Sheets.
   - **Complexity:** High (28 nodes)
 
-- **10785-Generate-and-research-sales-leads-with-Jina-AI-OpenAI-email-automation-via-Gmail.json**
+- **02885-Generate-and-research-sales-leads-with-Jina-AI-OpenAI-email-automation-via-Gmail.json**
   - **Description:** Sales lead generation with Jina AI, OpenAI, and Gmail. Scrapes business websites, generates leads, creates AI-powered email outreach campaigns.
   - **Complexity:** High (38 nodes)
 
@@ -4384,7 +4384,7 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** GitHub trending data automation with Firecrawl, GPT, and Supabase. Scrapes trending repositories, analyzes with GPT, stores in Supabase database.
   - **Complexity:** High (38 nodes)
 
-- **10795-Crawl-website-blog-content-and-save-to-Google-Sheets-with-Dumpling-AI.json**
+- **02895-Crawl-website-blog-content-and-save-to-Google-Sheets-with-Dumpling-AI.json**
   - **Description:** Website blog content crawler with Dumpling AI. Crawls blog websites, extracts articles, summarizes with AI, saves to Google Sheets.
   - **Complexity:** High (35 nodes)
 
@@ -4394,19 +4394,19 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** Book information extractor with Jina AI. Scrapes book metadata, descriptions, and reviews from various online bookstores using Jina AI technology.
   - **Complexity:** Medium (15 nodes)
 
-- **10442-Article-to-threaded-Bluesky-posts-with-JinaAI-and-GeminiGPT.json**
+- **02542-Article-to-threaded-Bluesky-posts-with-JinaAI-and-GeminiGPT.json**
   - **Description:** Article to Bluesky thread generator with Jina AI and Gemini. Scrapes articles, breaks them into Bluesky-friendly threads, generates posts with AI assistance.
   - **Complexity:** High (30 nodes)
 
-- **12036-Scrape-structure-and-store-news-data-using-Decodo-Gemini-AI-and-Google-Sheets.json**
+- **04236-Scrape-structure-and-store-news-data-using-Decodo-Gemini-AI-and-Google-Sheets.json**
   - **Description:** News scraper and structuring with Decodo and Gemini AI. Scrapes forum or news content, structures data into clean JSON, stores in Google Sheets.
   - **Complexity:** High (28 nodes)
 
-- **12046-Match-resumes-to-jobs-automatically-with-Gemini-AI-and-Decodo-Scraping.json**
+- **04246-Match-resumes-to-jobs-automatically-with-Gemini-AI-and-Decodo-Scraping.json**
   - **Description:** Resume-to-job matching with Gemini AI and Decodo scraping. Takes candidate resumes and LinkedIn profiles, scrapes job postings from LinkedIn/JobStreet, ranks matches, emails reports.
   - **Complexity:** High (42 nodes)
 
-- **12037-Telegram-research-assistant-for-academic-papers-using-Gemini-AI-and-Decodo.json**
+- **04237-Telegram-research-assistant-for-academic-papers-using-Gemini-AI-and-Decodo.json**
   - **Description:** AI research assistant for academic papers via Telegram. Uses Gemini AI to interpret queries, Decodo to scrape Google Scholar/arXiv, summarizes papers, delivers results in chat.
   - **Complexity:** High (45 nodes)
 
@@ -4424,11 +4424,11 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** SaaS pricing intelligence with Decodo. Scrapes SaaS pricing pages, compares features, generates pricing radar reports for competitive analysis.
   - **Complexity:** High (32 nodes)
 
-- **10547-Scrape-Google-Maps-data-discover-email-addresses-with-SerpAPI-and.json**
+- **02647-Scrape-Google-Maps-data-discover-email-addresses-with-SerpAPI-and.json**
   - **Description:** Google Maps data scraper with SerpAPI. Discovers and extracts email addresses, contact info from Google Maps business listings.
   - **Complexity:** Medium (20 nodes)
 
-- **10756-Extract-Amazon-book-data-generate-purchase-reports-with-Decodo-Scraper.json**
+- **02856-Extract-Amazon-book-data-generate-purchase-reports-with-Decodo-Scraper.json**
   - **Description:** Amazon book data extraction with Decodo. Scrapes book information, pricing, reviews from Amazon, generates purchase analysis reports.
   - **Complexity:** High (30 nodes)
 
@@ -4438,31 +4438,31 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** Google Maps business data scraper with SerpAPI. Extracts business information (name, address, phone, reviews) from Google Maps, exports to Sheets and Excel.
   - **Complexity:** Medium (22 nodes)
 
-- **10547-Scrape-Google-Maps-data-discover-email-addresses-with-SerpAPI-and.json**
+- **02647-Scrape-Google-Maps-data-discover-email-addresses-with-SerpAPI-and.json**
   - **Description:** Google Maps data scraper with SerpAPI. Discovers and extracts email addresses, contact info from Google Maps business listings.
   - **Complexity:** Medium (20 nodes)
 
-- **10700-Find-valid-vouchers-and-promo-codes-with-SerpAPI-Decodo-and-GPT-5-Mini.json**
+- **02800-Find-valid-vouchers-and-promo-codes-with-SerpAPI-Decodo-and-GPT-5-Mini.json**
   - **Description:** Voucher and promo code finder with SerpAPI, Decodo, and GPT-5-mini. Scrapes discount codes from various websites, validates them, generates curated lists.
   - **Complexity:** High (35 nodes)
 
-- **10630-Google-Maps-to-Airtable-lead-scraper-with-GPT-contact-extraction-from-impressum.json**
+- **02730-Google-Maps-to-Airtable-lead-scraper-with-GPT-contact-extraction-from-impressum.json**
   - **Description:** Google Maps to Airtable lead scraper with GPT. Scrapes Google Maps listings, extracts contact info from impressum pages, generates leads stored in Airtable.
   - **Complexity:** High (28 nodes)
 
 ## BrowserAct Scraping
 
-- **12024-Scrape-detailed-GitHub-profiles-to-Google-Sheets-using-BrowserAct.json**
+- **04224-Scrape-detailed-GitHub-profiles-to-Google-Sheets-using-BrowserAct.json**
   - **Description:** Detailed GitHub profile scraper to Google Sheets with BrowserAct. Scrapes comprehensive GitHub user data (profile, repos, activity), creates dedicated sheets for each user.
   - **Complexity:** High (38 nodes)
 
-- **12025-Scrape-import-shoe-products-to-Shopify-with-BrowserAct-with-variants-images.json**
+- **04225-Scrape-import-shoe-products-to-Shopify-with-BrowserAct-with-variants-images.json**
   - **Description:** Scrape and import shoe products to Shopify with BrowserAct. Reads product URLs from Google Sheets, scrapes detailed product data, creates Shopify products with variants and images using BrowserAct.
   - **Complexity:** High (25 nodes)
 
 ## Content Extraction & Summarization
 
-- **12035-CoinGecko-crypto-price-forecasting-pipeline-with-Gemini-AI-Decodo-and-Gmail.json**
+- **04235-CoinGecko-crypto-price-forecasting-pipeline-with-Gemini-AI-Decodo-and-Gmail.json**
   - **Description:** CoinGecko crypto price forecasting with Gemini AI and Decodo. Scrapes cryptocurrency prices, generates 24h forecasts with Gemini, emails daily reports.
   - **Complexity:** High (32 nodes)
 
@@ -4480,7 +4480,7 @@ This section contains workflows for automated web scraping, data extraction, con
 
 ## Other Scraping & Extraction Tools
 
-- **12050-Doctor-appointment-scheduler-with-Telegram-Gemini-AI-and-Google-Sheets.json**
+- **04250-Doctor-appointment-scheduler-with-Telegram-Gemini-AI-and-Google-Sheets.json**
   - **Description:** Doctor appointment scheduler with Telegram, Gemini AI, and Google Sheets. Handles appointment booking, availability checking, and sends confirmations via Telegram.
   - **Complexity:** High (35 nodes)
 
@@ -4488,15 +4488,15 @@ This section contains workflows for automated web scraping, data extraction, con
   - **Description:** GitHub trending data automation with Firecrawl, GPT, and Supabase. Scrapes trending repositories, analyzes with GPT, stores in Supabase database.
   - **Complexity:** High (38 nodes)
 
-- **10527-Restaurant-lead-generation-from-Google-Maps-with-Apify-Airtable-AI-newsletter.json**
+- **02627-Restaurant-lead-generation-from-Google-Maps-with-Apify-Airtable-AI-newsletter.json**
   - **Description:** Restaurant lead generation from Google Maps with Apify, Airtable, and AI newsletter. Scrapes restaurant info, generates leads, manages newsletter campaigns.
   - **Complexity:** High (40 nodes)
 
-- **12060-AI-powered-feedback-triage-Jotform-to-Trello-Airtable-Slack-with-Gemini.json**
+- **04260-AI-powered-feedback-triage-Jotform-to-Trello-Airtable-Slack-with-Gemini.json**
   - **Description:** AI-powered feedback triage with Jotform, Trello, Airtable, Slack, and Gemini. Collects form submissions, categorizes with AI, routes to appropriate Trello boards, sends Slack notifications.
   - **Complexity:** High (45 nodes)
 
-- **11572-Extracts-and-organizes-academic-publications-using-GPT-4-Mini-Google-Sheets.json**
+- **03772-Extracts-and-organizes-academic-publications-using-GPT-4-Mini-Google-Sheets.json**
   - **Description:** Academic publications extractor with GPT-4-mini and Google Sheets. Scrapes academic papers, extracts metadata, organizes in structured Google Sheets database.
   - **Complexity:** High (38 nodes)
 # OTHERS
