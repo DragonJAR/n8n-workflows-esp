@@ -1,8 +1,67 @@
-# Documentación Completa de Workflows de n8n
+ [🌐 Versión en español](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README.md) | [🌐 English Version](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README-ENGLISH.md) | [🖥️ Mejor hosting n8n](https://djar.co/hostingn8n)
 
-Este documento contiene la documentación completa de 10,093 workflows de n8n organizados por categorías.
+[📲 Noticias Diarias de Inteligencia Artificial gratis en tu WhatsApp](https://djar.co/iawz)
 
-**Total de workflows:** 10093
+
+# 🧠 Colección de Flujos de Trabajo de n8n
+
+Este repositorio es un **fork** de la iniciativa que busca recopilar flujos de trabajo (workflows) de n8n procedentes de diversas fuentes, tales como:
+
+- El sitio oficial de [n8n.io](https://n8n.io/) y su foro comunitario.  
+- Ejemplos compartidos públicamente en GitHub, blogs y otros sitios web.
+
+El propósito de este repositorio es ofrecer un recurso consolidado para inspirarte, facilitar tu aprendizaje y permitir la reutilización de workflows en tus propios proyectos de n8n.
+
+
+## 📂 Mejoras Implementadas
+
+- **Buscador de Workflows de N8N**: Hemos implementado [este buscador 🔎 de workflows](https://www.dragonjar.org/apps/IQwMu3KtpyCFEj56WBzov) para que puedas explorar de manera rápida y sencilla todos los workflows disponibles en el repositorio, facilitando su identificación y acceso.
+- **Descripciones en español**: Cada archivo `.json` fue analizado y se le asignó una descripción clara en español, basada en las acciones que realiza.  
+- **Eliminación de duplicados**: Se verificó y validó el hash único de cada archivo para detectar y eliminar workflows duplicados, garantizando que cada flujo de trabajo sea único en contenido.  
+- **Renombrado de archivos**: Se actualizaron los nombres de los archivos para que describan con mayor precisión su funcionalidad principal, facilitando su búsqueda y selección.
+
+
+## 🛠 Instrucciones de Uso
+
+Para importar cualquier flujo de trabajo en tu instancia de n8n, sigue estos pasos:
+
+1. Abre tu instancia de n8n.  
+2. Pulsa el menú "Importar" (☰ → Importar workflow).  
+3. Selecciona el archivo `.json` deseado desde la carpeta `workflows`.  
+4. Revisa y ajusta las credenciales o URLs de los webhooks según sea necesario.  
+5. Guarda y ejecuta el flujo de trabajo.
+6. [Si no encuentras el flujo que necesitas, puedes usar este Custom GPT para que te ayude a encontrarlo o a resolver cualquier problema que tengas con N8N.](https://chatgpt.com/g/g-6840a79abd348191966dd06abd7236c8-asistente-de-flujos-n8n).
+7. También puedes chatear con este repositorio usando [https://gitmcp.io/DragonJAR/n8n-workflows-es/chat](https://gitmcp.io/DragonJAR/n8n-workflows-es/chat)
+
+## 🖥️ Servidor MCP (Model Context Protocol)
+
+El servidor MCP de este repositorio, para que puedas interactuar con esta gran base de datos de conocimiento con flujos de n8n documentados, es:
+
+`https://gitmcp.io/DragonJAR/n8n-workflows-esp`
+
+[Aquí encontrarás las instrucciones para usarlo en Cursor, Claude Desktop, Windsurf, VSCode, Cline o Highlight AI](https://gitmcp.io/DragonJAR/n8n-workflows-es).
+
+## 🤝 Contribución
+
+Si descubriste un workflow interesante o desarrollaste uno propio, ¡anímate a contribuir a esta colección! Solo ten en cuenta:
+
+- **Nombre descriptivo**: Elige un nombre de archivo que refleje claramente la función principal del workflow.  
+- **Mención de la fuente**: Si el flujo de trabajo proviene de otra fuente, incluye un comentario breve al inicio del archivo indicando su origen.
+
+Para proponer contribuciones, abre un pull request con tu nuevo workflow o mejora.
+
+## ⏯️ Manel aporta esta excelente explicación en video sobre el repositorio.
+
+[![Agradecimiento a Manelautomatic](https://i.imgur.com/fq4Ef0N.png)](https://www.youtube.com/watch?v=9haKti-edOE "Gracias a Manelautomatic por explicar en video el repositorio")
+
+## ⚠️ Aviso
+
+Todos los workflows aquí compartidos se proporcionan tal cual. **Antes de emplearlos en un entorno de producción, inspecciónalos y pruébalos en un entorno controlado**. Asegúrate de entender completamente cada nodo, credencial y enlace para evitar posibles errores o brechas de seguridad.
+
+
+## 📋 Listado de Workflows
+
+_Total de workflows: 10405_
 
 ### AI y Automatización
 

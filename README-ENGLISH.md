@@ -1,10 +1,69 @@
-# Complete n8n Workflows Documentation
+ [🌐 Versión en español](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README.md) | [🌐 English Version](https://github.com/DragonJAR/n8n-workflows-es/blob/main/README-ENGLISH.md) | [🖥️ Best n8n hosting](https://djar.co/hostingn8n)
 
-This document contains complete documentation for 10,093 n8n workflows organized by categories.
+[📲 Free Daily Artificial Intelligence News on your WhatsApp](https://djar.co/iawz)
 
-**Total workflows:** 10093
 
-### AI and Automatización
+# 🧠 n8n Workflows Collection
+
+This repository is a **fork** of the initiative that seeks to collect n8n workflows from various sources, such as:
+
+- The official [n8n.io](https://n8n.io/) website and community forum.  
+- Examples publicly shared on GitHub, blogs, and other websites.
+
+The purpose of this repository is to offer a consolidated resource to inspire you, facilitate your learning, and allow the reuse of workflows in your own n8n projects.
+
+
+## 📂 Improvements Implemented
+
+- **N8N Workflows Search**: We have implemented [this 🔎 workflow search](https://www.dragonjar.org/apps/IQwMu3KtpyCFEj56WBzov) so you can quickly and easily explore all workflows available in the repository, making it easier to identify and access them.
+- **Spanish descriptions**: Each `.json` file was analyzed and assigned a clear description in Spanish, based on the actions it performs.  
+- **Duplicate removal**: The unique hash of each file was verified and validated to detect and eliminate duplicate workflows, ensuring that each workflow is unique in content.  
+- **File renaming**: The file names were updated to more precisely describe their main functionality, making them easier to search and select.
+
+
+## 🛠 Usage Instructions
+
+To import any workflow into your n8n instance, follow these steps:
+
+1. Open your n8n instance.  
+2. Click the "Import" menu (☰ → Import workflow).  
+3. Select the desired `.json` file from the `workflows` folder.  
+4. Review and adjust credentials or webhook URLs as needed.  
+5. Save and run the workflow.
+6. [If you can't find the workflow you need, you can use this Custom GPT to help you find it or solve any problems you have with N8N.](https://chatgpt.com/g/g-6840a79abd348191966dd06abd7236c8-asistente-de-flujos-n8n).
+7. You can also chat with this repository using [https://gitmcp.io/DragonJAR/n8n-workflows-es/chat](https://gitmcp.io/DragonJAR/n8n-workflows-es/chat)
+
+## 🖥️ MCP Server (Model Context Protocol)
+
+The MCP server for this repository, so you can interact with this great knowledge base with documented n8n workflows, is:
+
+`https://gitmcp.io/DragonJAR/n8n-workflows-esp`
+
+[Here you will find the instructions to use it in Cursor, Claude Desktop, Windsurf, VSCode, Cline or Highlight AI](https://gitmcp.io/DragonJAR/n8n-workflows-es).
+
+## 🤝 Contribution
+
+If you discovered an interesting workflow or developed one of your own, feel free to contribute to this collection! Just keep in mind:
+
+- **Descriptive name**: Choose a file name that clearly reflects the main function of the workflow.  
+- **Source mention**: If the workflow comes from another source, include a brief comment at the beginning of the file indicating its origin.
+
+To propose contributions, open a pull request with your new workflow or improvement.
+
+## ⏯️ Manel contributes this excellent video explanation about the repository.
+
+[![Thanks to Manelautomatic](https://i.imgur.com/fq4Ef0N.png)](https://www.youtube.com/watch?v=9haKti-edOE "Thanks to Manelautomatic for explaining the repository in video")
+
+## ⚠️ Notice
+
+All workflows shared here are provided as is. **Before using them in a production environment, inspect and test them in a controlled environment**. Make sure you fully understand each node, credential, and link to avoid potential errors or security gaps.
+
+
+## 📋 Workflow Listing
+
+_Total workflows: 10405_
+
+### AI and Automation
 
 - **10000-Complete-Lyft-API-integration-for-AI-agents-with-16-operations-using-MCP.json**
   - **Description:** Integrates Api, Mcp and Lyft to automate 10000 complete lyft api integration for ai agents with 16 operations using mcp processes.
