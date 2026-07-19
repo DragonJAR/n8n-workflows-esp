@@ -50,6 +50,12 @@ If you discovered an interesting workflow or developed one of your own, feel fre
 
 To propose contributions, open a pull request with your new workflow or improvement.
 
+Validate changed files before opening the pull request:
+
+```bash
+node scripts/validate-workflows.mjs workflows/changed-file.json
+```
+
 ## ⏯️ Manel contributes this excellent video explanation about the repository.
 
 [![Thanks to Manelautomatic](https://i.imgur.com/fq4Ef0N.png)](https://www.youtube.com/watch?v=9haKti-edOE "Thanks to Manelautomatic for explaining the repository in video")
@@ -63,7 +69,7 @@ All workflows shared here are provided as is. **Before using them in a productio
 
 ## 📋 Workflow List
 
-_Total workflows: 10405_
+_Total workflows: 10406_
 
 ### AI & Automation
 
@@ -40477,6 +40483,10 @@ _Total workflows: 10405_
 
 ### Security & DevOps
 
+- **10406-monitor-amenazas-x-xquik-cve-url.json**
+  - **Description:** Monitors X threat signals through Xquik, extracts CVE identifiers and URLs, calculates engagement, and emits review-ready items.
+  - **Complexity:** Low (4 nodes)
+
 - **00087-github-backup-flujos.json**
   - **Description:** n8n workflow that automates processes related to github backup flujos
   - **Complexity:** Medium (11 nodes)
@@ -41722,4 +41732,3 @@ _Total workflows: 10405_
 - **10259-Add-text-to-a-downloaded-image.json**
   - **Description:** n8n workflow that automates processes related to add text to a downloaded image
   - **Complexity:** Low (3 nodes)
-
